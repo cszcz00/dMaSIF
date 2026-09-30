@@ -1,13 +1,20 @@
 """Build a training manifest from PLINDER for contrastive protein-ligand retrieval.
 
-Reads a column subset of index/annotation_table.parquet (745 columns, ~1 GB on
-disk - never load it whole) and merges the split labels from splits/split.parquet.
+Reads a column subset of index/annotation_table.parquet
+and merges the split labels from splits/split.parquet.
 
 Three modes:
 
     --inspect   print the schema of all three tables and exit
     --counts    per-filter attrition and the headline numbers; writes nothing
     (default)   write manifest.parquet, receptors.txt, ligand_fps.npy
+
+Loose by default: only the HARD filters (is the ligand a usable small molecule
+at all?) remove rows. Every other filter is recorded as a boolean pass_<name>
+column, so the dataset can be trimmed later from the manifest alone, without
+re-reading PLINDER. `pass_all` marks rows passing every filter, and
+`strict_rep` marks exactly the rows the strict pipeline (all filters + dedup)
+would have kept. --strict restores that pipeline as the output.
 
 The cluster columns (pli_unique_qcov__95__strong__component and friends) are
 denormalized into the annotation table, so dedup, leakage-aware grouping and
@@ -18,6 +25,10 @@ Example:
     python build_manifest.py --plinder $PLINDER_DIR --out meta/ --inspect
     python build_manifest.py --plinder $PLINDER_DIR --out meta/ --counts
     python build_manifest.py --plinder $PLINDER_DIR --out meta/
+    python build_manifest.py --plinder $PLINDER_DIR --out meta_strict/ --strict
+
+Trimming later, e.g. back to the strict set:
+    df = pd.read_parquet("meta/manifest.parquet"); df = df[df.strict_rep]
 """
 
 import argparse
@@ -73,13 +84,12 @@ WANTED = [
     "system_pocket_UniProt",
 ]
 
-# (label, predicate). Applied one at a time so attrition is visible.
 def _flag(col, want=True):
     """Row-level boolean test that treats a null as failing."""
     return lambda d: d[col].fillna(not want).astype(bool) == want
 
 
-# (label, predicate), applied one at a time so attrition is visible.
+# (name, label, predicate). Each becomes a pass_<name> column in the manifest.
 #
 # ROW-level filters come first and are the ones that matter for correctness:
 # annotation_table has one row per (system, ligand), so a system_* column says
@@ -89,30 +99,36 @@ def _flag(col, want=True):
 # ligands and the MG row inherits it.
 FILTERS = [
     # -- row level: is THIS ligand a training example? --
-    ("ligand is proper", _flag("ligand_is_proper")),
-    ("not an ion", _flag("ligand_is_ion", False)),
-    ("not a cofactor", _flag("ligand_is_cofactor", False)),
-    ("not an artifact", _flag("ligand_is_artifact", False)),
-    ("not an oligomer", _flag("ligand_is_oligo", False)),
-    ("not covalently bound", _flag("ligand_is_covalent", False)),
-    ("valid / rdkit loadable", _flag("ligand_is_rdkit_loadable")),
-    ("ligand MW 200-800", lambda d: d["ligand_molecular_weight"].between(200, 800)),
-    ("ligand positions correct", _flag("ligand_positions_correct")),
-    ("3-50 interactions", lambda d: d["ligand_num_interactions"].between(3, 50)),
+    ("proper", "ligand is proper", _flag("ligand_is_proper")),
+    ("not_ion", "not an ion", _flag("ligand_is_ion", False)),
+    ("not_cofactor", "not a cofactor", _flag("ligand_is_cofactor", False)),
+    ("not_artifact", "not an artifact", _flag("ligand_is_artifact", False)),
+    ("not_oligo", "not an oligomer", _flag("ligand_is_oligo", False)),
+    ("not_covalent", "not covalently bound", _flag("ligand_is_covalent", False)),
+    ("rdkit", "valid / rdkit loadable", _flag("ligand_is_rdkit_loadable")),
+    ("mw", "ligand MW 200-800", lambda d: d["ligand_molecular_weight"].between(200, 800)),
+    ("positions", "ligand positions correct", _flag("ligand_positions_correct")),
+    ("interactions", "3-50 interactions", lambda d: d["ligand_num_interactions"].between(3, 50)),
     # -- system level: is the pocket well defined? --
-    ("system has 1 proper ligand", lambda d: d["system_proper_num_ligand_chains"] == 1),
-    ("pocket 5-100 residues", lambda d: d["system_proper_num_pocket_residues"].between(5, 100)),
-    ("crystal contacts < 25%",
+    ("single_ligand", "system has 1 proper ligand",
+     lambda d: d["system_proper_num_ligand_chains"] == 1),
+    ("pocket_size", "pocket 5-100 residues",
+     lambda d: d["system_proper_num_pocket_residues"].between(5, 100)),
+    ("crystal_contacts", "crystal contacts < 25%",
      lambda d: d["ligand_fraction_atoms_with_crystal_contacts"].fillna(0) < 0.25),
-    ("no missing pocket residues",
+    ("no_missing_pocket", "no missing pocket residues",
      lambda d: d["ligand_num_missing_pli_interface_residues"].fillna(0) == 0),
-    ("all protein chains present", _flag("all_protein_chains_present")),
-    ("resolution <= 2.5 A", lambda d: d["entry_resolution"] <= 2.5),
-    ("pocket fully resolved",
+    ("all_chains", "all protein chains present", _flag("all_protein_chains_present")),
+    ("resolution", "resolution <= 2.5 A", lambda d: d["entry_resolution"] <= 2.5),
+    ("pocket_resolved", "pocket fully resolved",
      lambda d: d["system_pocket_validation_num_unresolved_heavy_atoms"].fillna(0) == 0),
-    ("no alt conformations",
+    ("no_altlocs", "no alt conformations",
      lambda d: d["system_pocket_validation_max_alt_count"].fillna(1) <= 1),
 ]
+
+# Applied even in loose mode: rows failing these are not small-molecule
+# ligands with a fingerprint, so no amount of later trimming makes them usable.
+HARD = {"proper", "not_ion", "not_artifact", "rdkit"}
 
 DEDUP_CLUSTER = "pli_unique_qcov__95__strong__component"
 
@@ -205,38 +221,59 @@ def load(plinder):
 # ----------------------------------------------------------------------------
 # Filtering
 # ----------------------------------------------------------------------------
-def apply_filters(df, splits=("train", "val", "test")):
-    """Apply filters one at a time, reporting what each removes.
+def apply_filters(df, splits=("train", "val", "test"), strict=False):
+    """Evaluate every filter, record it as pass_<name>, drop rows failing HARD.
 
-    Several overlap heavily - a low-resolution entry often also has unresolved
-    pocket atoms - so the individual drops will not sum to the total. Read the
-    running remainder, not the per-filter numbers.
+    `fails` is how many rows fail that filter on its own. `strict left` is the
+    running remainder if every filter were applied in order - the attrition
+    the strict pipeline would show. Filters overlap heavily (a low-resolution
+    entry often also has unresolved pocket atoms), so read the running
+    remainder, not the per-filter numbers.
     """
     df = df[df["split"].isin(splits)].copy()
-    print(f"\n{'filter':35s} {'drops':>9s} {'remaining':>10s}")
-    print(f"{'(start, train/val/test only)':35s} {'':>9s} {len(df):>10d}")
+    print(f"\n{'filter':30s} {'fails':>9s} {'strict left':>12s}  applied")
+    print(f"{'(start, ' + '/'.join(splits) + ')':30s} {'':>9s} {len(df):>12d}")
 
-    mask = pd.Series(True, index=df.index)
-    for label, fn in FILTERS:
+    keep = pd.Series(True, index=df.index)
+    strict_mask = pd.Series(True, index=df.index)
+    for name, label, fn in FILTERS:
         try:
-            m = fn(df).fillna(False)
+            m = fn(df).fillna(False).astype(bool)
         except KeyError as e:
-            print(f"{label:35s} {'SKIPPED':>9s}  (missing {e})")
+            print(f"{label:30s} {'SKIPPED':>9s}  (missing {e})")
             continue
-        drops = int((mask & ~m).sum())
-        mask &= m
-        print(f"{label:35s} {drops:>9d} {int(mask.sum()):>10d}")
+        df[f"pass_{name}"] = m
+        strict_mask &= m
+        applied = strict or name in HARD
+        if applied:
+            keep &= m
+        print(f"{label:30s} {int((~m).sum()):>9d} {int(strict_mask.sum()):>12d}  "
+              f"{'yes' if applied else '-'}")
 
-    out = df[mask].copy()
-    dup = int(out["system_id"].duplicated().sum())
-    if dup:
-        print(f"\n[warn] {dup} rows share a system_id with another surviving row. "
-              "A system should contribute one training pair; check that the "
-              "row-level ligand filters are applied.")
-        print(out[out["system_id"].duplicated(keep=False)]
-              .sort_values("system_id")[["system_id", "ligand_ccd_code"]].head(10).to_string())
+    df["pass_all"] = strict_mask
+    out = df[keep].copy()
+    print(f"\nkept {len(out)} rows ({int(out['pass_all'].sum())} pass every filter)")
+
+    multi = int(out["system_id"].duplicated().sum())
+    if multi:
+        # Expected in loose mode: a system with two proper ligands gives two rows.
+        # In strict mode single_ligand should prevent it, so it points at a bug.
+        note = "check the row-level filters" if strict else "systems with several ligands"
+        print(f"[{'warn' if strict else 'info'}] {multi} rows share a system_id ({note})")
     out["receptor_key"] = out["system_id"].map(receptor_key)
     return out
+
+
+def mark_strict_reps(df, cluster_col=DEDUP_CLUSTER):
+    """strict_rep = the rows the strict pipeline (all filters + dedup) keeps.
+
+    Dedup runs on the pass_all subset with the same key and ordering as the
+    strict pipeline, so df[df.strict_rep] reproduces it exactly.
+    """
+    print("\nstrict subset:", end="")
+    reps = deduplicate(df[df["pass_all"]], cluster_col).index
+    df["strict_rep"] = df.index.isin(reps)
+    return df
 
 
 def deduplicate(df, cluster_col=DEDUP_CLUSTER):
@@ -262,8 +299,9 @@ def deduplicate(df, cluster_col=DEDUP_CLUSTER):
     return out
 
 
-def summarize(df):
-    print(f"\n    {'split':8s}{'pairs':>9s}{'receptors':>11s}{'ligands':>9s}{'Pfam':>8s}")
+def summarize(df, title="manifest"):
+    print(f"\n[{title}]")
+    print(f"    {'split':8s}{'pairs':>9s}{'receptors':>11s}{'ligands':>9s}{'Pfam':>8s}")
     for sp in ["train", "val", "test"]:
         d = df[df["split"] == sp]
         if not len(d):
@@ -282,7 +320,7 @@ def summarize(df):
 # Outputs
 # ----------------------------------------------------------------------------
 def ligand_fingerprints(smiles_list):
-    """Packed ECFP4 bits. Binary bits make batch Tanimoto a single matmul."""
+    """ECFP4 bits, one uint8 (0/1) per bit. Batch Tanimoto is then a single matmul."""
     from rdkit import Chem, RDLogger
     from rdkit.Chem import rdFingerprintGenerator
 
@@ -339,7 +377,11 @@ def main():
     ap.add_argument("--inspect", action="store_true", help="print schemas and exit")
     ap.add_argument("--counts", action="store_true", help="filter attrition only; no writes")
     ap.add_argument("--dedup_cluster", default=DEDUP_CLUSTER)
-    ap.add_argument("--no_dedup", action="store_true")
+    ap.add_argument("--no_dedup", action="store_true",
+                    help="with --strict: skip dedup (loose output is never deduplicated)")
+    ap.add_argument("--strict", action="store_true",
+                    help="apply every filter + dedup to the output (the original behaviour); "
+                         "default applies only HARD filters and records the rest as columns")
     a = ap.parse_args()
 
     if a.inspect:
@@ -347,10 +389,13 @@ def main():
         return
 
     df = load(a.plinder)
-    df = apply_filters(df)
-    if not a.no_dedup:
-        df = deduplicate(df, a.dedup_cluster)
+    df = apply_filters(df, strict=a.strict)
+    df = mark_strict_reps(df, a.dedup_cluster)
+    if a.strict and not a.no_dedup:
+        df = df[df["strict_rep"]].copy()
     summarize(df)
+    if not a.strict:
+        summarize(df[df["strict_rep"]], "strict subset (strict_rep)")
 
     if a.counts:
         print("\n--counts: nothing written")
