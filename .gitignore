@@ -16,3 +16,9 @@ timings/
 data_analysis/roc_curves
 data_analysis/.ipynb_checkpoints/
 .ipynb_checkpoints/
+# affinity-search additions
+__pycache__/
+*.pyc
+*.npz
+.keops*/
+keops_cache/
