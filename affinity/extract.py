@@ -33,8 +33,8 @@ import dmasif_compat
 
 ELE2NUM = {"C": 0, "H": 1, "O": 2, "N": 3, "S": 4, "SE": 5}
 
-# Configuration of models/dMaSIF_search_3layer_12A_16dim, from
-# benchmark_scripts/dMaSIF_search.sh + Arguments.py defaults + checkpoint shapes.
+# Configuration of models/dMaSIF_search_3layer_12A_16dim,
+# our only checkpoint from the official dMaSIF repository
 SEARCH_CONFIG = {
     "embedding_layer": "dMaSIF",
     "search": True,
@@ -55,9 +55,7 @@ SEARCH_CONFIG = {
 }
 
 
-# ----------------------------------------------------------------------------
-# Structure parsing
-# ----------------------------------------------------------------------------
+# Input Parsing Helpers
 def _iter_chains(structure, merge_models):
     """Yield (label, chain) over the structure.
 
@@ -168,9 +166,7 @@ def parse_chains(spec):
     return set(spec)
 
 
-# ----------------------------------------------------------------------------
-# Model
-# ----------------------------------------------------------------------------
+# Model Helpers
 def load_model(repo_dir, ckpt_name, device):
     dmasif_compat.add_repo_to_path(repo_dir)
     from Arguments import parser
