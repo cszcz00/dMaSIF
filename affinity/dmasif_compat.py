@@ -1,8 +1,8 @@
-"""Make the 2021 dMaSIF repo importable in a modern PyTorch / PyG environment.
+"""
+Module for importing 2021 dMaSIF repo soundly in modern environments.
 
-Import this module BEFORE importing anything from the dMaSIF repo. It never
-touches the dMaSIF model itself; it only papers over imports that the
-dMaSIF (keops) path does not use:
+Utilize this module before importing from dMaSIF repository.
+Mainly 
 
   * torch_cluster  - only used by the DGCNN / PointNet++ baselines
   * pyvtk          - only used to write .vtk files for visualization
@@ -22,11 +22,11 @@ import torch
 
 
 class _Unavailable(torch.nn.Module):
-    """Placeholder for baseline-only layers; fails loudly if actually used."""
+    """Placeholder for baseline-only layers; fails if used."""
 
     def __init__(self, *args, **kwargs):
         raise RuntimeError(
-            "This layer is a compatibility placeholder (baseline models only). "
+            "compatibility placeholder (baseline models only): "
             "The dMaSIF embedding layer does not need it."
         )
 
@@ -35,10 +35,7 @@ def _unavailable_fn(*args, **kwargs):
     raise RuntimeError("Compatibility placeholder: baseline-only function called.")
 
 
-# Import PyG FIRST: at import time it probes importlib.util.find_spec('torch_cluster')
-# to decide which optional extensions exist. A stub in sys.modules before that
-# probe makes find_spec raise (stubs have no __spec__) or report a fake extension.
-# PyG names used by the baselines that may no longer exist in PyG 2.x.
+# Import PyG FIRST
 import torch_geometric.data as _pyg_data  # noqa: E402
 import torch_geometric.nn as _pyg_nn  # noqa: E402
 
@@ -54,7 +51,7 @@ if not hasattr(_pyg_data, "DataLoader"):
     _pyg_data.DataLoader = _DL
 
 
-# torch_cluster: compiled PyG extension, not installed in the container.
+# torch_cluster not installed in our container (Empire AI build-specific).
 if "torch_cluster" not in sys.modules:
     try:
         import torch_cluster  # noqa: F401
@@ -64,7 +61,7 @@ if "torch_cluster" not in sys.modules:
         stub.knn = _unavailable_fn
         sys.modules["torch_cluster"] = stub
 
-# pyvtk: imported at module level by geometry_processing.py, used only by save_vtk.
+# imported at module level by geometry_processing.py, but not used in our work.
 if "pyvtk" not in sys.modules:
     try:
         import pyvtk  # noqa: F401
