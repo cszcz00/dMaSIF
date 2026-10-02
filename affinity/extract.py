@@ -1,20 +1,21 @@
-"""Extract per-surface-point dMaSIF embeddings for a batch of protein structures.
+"""Extract dMaSIF forward pass data for batch of protein structures.
 
-Input : a directory of .pdb/.cif files, or a text file listing paths
+Input : Directory containing .pdb/.cif files, or .txt listing paths to 
         (optionally "path CHAINS", e.g. "structs/1abc.pdb AB").
         Biological-assembly files (.pdb1) hold symmetry copies as separate
         MODELs with duplicate chain IDs; pass --merge_models to use them all,
         relabelled "<model>.<chain>" (1.A, 2.A, ...). Without it only the first
         model is read, which for an oligomer means an incomplete surface.
-Output: one .npz per protein in --out, containing
+Output: one .npz per protein saved to --out directory, from a results dictionary containing:
 
-    xyz            (N, 3)  surface points (Angstrom, same frame as the input)
-    normals        (N, 3)  outward normals
-    input_feats    (N, 16) 10 curvature features + 6 learned chemical features
-    emb1, emb2     (N, 16) the two asymmetric search embeddings
-    nearest_atom   (N,)    index into the atom arrays below
-    atom_xyz       (M, 3), atom_type (M,) in {C,H,O,N,S,SE} -> {0..5}
-    atom_chain, atom_resnum, atom_icode, atom_resname, atom_name  (M,)
+    xyz            (N, 3)  Coordinates of dMaSIF-sampled surface points (in same frame as the input structure).
+    normals        (N, 3)  outward normals of surface points.
+    input_feats    (N, 16) 10 curvature features + 6 learned chemical features (KNN-based) per surface point.
+    emb1, emb2     (N, 16) Two dMaSIF-produced embeddings per surface point. 
+    nearest_atom   (N,)    Nearest protein atom per sampled surface point. 
+    atom_xyz       (M, 3)  Coordinates of structure (filtered) atoms
+    atom_type      (M,)    {C,H,O,N,S,SE} -> {0..5}
+    atom_chain, atom_resnum, atom_icode, atom_resname, atom_name  (M,) atom metadata
 
 Example (inside the container):
     python extract.py --inputs pdbs/ --out feats/ --repo ../dMaSIF
@@ -196,7 +197,13 @@ def nearest_atoms(points, atoms, chunk=8192):
 
 @torch.no_grad()
 def embed_batch(net, proteins, device):
-    """Run dMaSIF on a list of parsed proteins in one block-diagonal batch."""
+    """
+    Run dMaSIF on a list of parsed proteins in a single batch.
+    Return list of results dictionaries, one per protein in batch. 
+    results per protein identify 3D coordinates sampled surface points,
+    computed features/embeddings for each of these points, and protein 
+    atom nearest to each sampled surface point. 
+    """
     atom_xyz = torch.cat([torch.from_numpy(p["atom_xyz"]) for p in proteins]).to(device)
     atom_type = torch.cat([torch.from_numpy(p["atom_type"]) for p in proteins])
     atomtypes = torch.nn.functional.one_hot(atom_type, num_classes=6).float().to(device)
@@ -212,22 +219,22 @@ def embed_batch(net, proteins, device):
         "mesh_labels": None,
         "triangles": None,
     }
-    net.preprocess_surface(P)  # samples the surface: P["xyz"], P["normals"], P["batch"]
-    net(P)  # fills P["input_features"], P["embedding_1"], P["embedding_2"]
+    net.preprocess_surface(P)  # sample surface points on batch proteins. Adds P["xyz"], P["normals"], P["batch"]
+    net(P)  # dMaSIF forward pass on batch surface samples. Adds P["input_features"], P["embedding_1"], P["embedding_2"]
 
     results = []
     for i, p in enumerate(proteins):
-        m = P["batch"] == i
-        a = batch_atoms == i
-        xyz = P["xyz"][m]
+        m = P["batch"] == i # mask for ith protein
+        a = batch_atoms == i # Atom indices of ith protein in proteins
+        xyz = P["xyz"][m] # coordinates of dMaSIF sampled surface points of ith protein
         results.append(
             {
                 "xyz": xyz,
                 "normals": P["normals"][m],
-                "input_feats": P["input_features"][m],
-                "emb1": P["embedding_1"][m],
+                "input_feats": P["input_features"][m], # Geometric and Chemical features (KNN-based) per sample point
+                "emb1": P["embedding_1"][m], 
                 "emb2": P["embedding_2"][m],
-                "nearest_atom": nearest_atoms(xyz, atom_xyz[a]),
+                "nearest_atom": nearest_atoms(xyz, atom_xyz[a]), # Nearest protein atom to each surface point
             }
         )
     return results
