@@ -22,6 +22,7 @@ Example (inside the container):
 """
 
 import argparse
+import inspect
 import json
 import time
 from pathlib import Path
@@ -30,6 +31,7 @@ import numpy as np
 import torch
 
 import dmasif_compat
+from ids import parse_chains, surface_tag
 
 ELE2NUM = {"C": 0, "H": 1, "O": 2, "N": 3, "S": 4, "SE": 5}
 
@@ -153,19 +155,6 @@ def read_inputs(inputs):
     return items
 
 
-def parse_chains(spec):
-    """"AB" -> {"A","B"}; "1.A" -> {"1.A"}; "1.A,2.A" -> {"1.A","2.A"}.
-
-    Dotted labels (assembly files, PLINDER receptors) are never split per
-    character; several of them must be comma separated.
-    """
-    if spec is None:
-        return None
-    if "," in spec or "." in spec:
-        return {c.strip() for c in spec.split(",") if c.strip()}
-    return set(spec)
-
-
 # Model Helpers
 def load_model(repo_dir, ckpt_name, device):
     dmasif_compat.add_repo_to_path(repo_dir)
@@ -182,6 +171,22 @@ def load_model(repo_dir, ckpt_name, device):
     net.load_state_dict(ckpt["model_state_dict"], strict=True)
     net = net.to(device).eval()
     return net, args
+
+
+def sampler_defaults():
+    """
+    Sampler parameters that SEARCH_CONFIG cannot set, for the meta record.
+    
+    preprocess_surface forwards only atomtypes, resolution, sup_sampling and
+    distance, so smoothness (atom radius scale), nits (gradient steps onto the
+    level set) and variance (the acceptance band) fall back to
+    atoms_to_points_normals' own defaults. Call after load_model has put the repo on
+    sys.path.
+    """
+    from geometry_processing import atoms_to_points_normals
+
+    sig = inspect.signature(atoms_to_points_normals).parameters
+    return {k: sig[k].default for k in ("smoothness", "nits", "variance")}
 
 
 def nearest_atoms(points, atoms, chunk=8192):
@@ -282,7 +287,7 @@ def main():
 
     todo = []
     for path, chains in read_inputs(a.inputs):
-        tag = path.stem + ("_" + "".join(sorted(chains)).replace(".", "") if chains else "")
+        tag = surface_tag(path.stem, chains)
         if (out / f"{tag}.npz").exists() and not a.overwrite:
             continue
         try:
@@ -296,7 +301,8 @@ def main():
         todo.append((tag, prot))
     print(f"{len(todo)} proteins to embed")
 
-    meta = {"ckpt": a.ckpt, "config": SEARCH_CONFIG, "seed": a.seed}
+    meta = {"ckpt": a.ckpt, "config": SEARCH_CONFIG, "seed": a.seed,
+            "sampler_defaults": sampler_defaults()}
     t0, n_done = time.time(), 0
     for batch in batches_by_atoms(todo, a.max_atoms, a.max_proteins):
         tags, prots = zip(*batch)
