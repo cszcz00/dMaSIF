@@ -1,9 +1,10 @@
-# Every filter in build_manifest.py, one representative per
-# (interaction cluster, ligand): the clean baseline.
-name: dataset_v1
+# Clean baseline: every build_manifest.py filter + dedup (strict_rep), and only
+# systems with exactly one ligand chain, since the ligand encoder takes one
+# molecule per interaction.
 description: >
-  strict_rep rows of the loose manifest (all build_manifest filters + dedup on
-  pli_unique_qcov__95__strong__component and ligand), PLINDER receptor as input.
+  strict_rep rows (all build_manifest filters + dedup on
+  pli_unique_qcov__95__strong__component and ligand) restricted to systems with
+  a single ligand chain of any kind; PLINDER receptor as input.
 
 manifest: meta/manifest.parquet
 fingerprints: meta/ligand_fps.npy
@@ -12,7 +13,9 @@ selection:
   splits: [train, val, test]
   require: [strict_rep]
   exclude: []
-  query: null
+  # n_ligand_chains counts every ligand chain in the system, ions and other
+  # non-proper ligands included. strict_rep only guarantees ONE PROPER ligand.
+  query: "n_ligand_chains == 1"
   dedup: null            # strict_rep is already deduplicated
 
 receptor_input:

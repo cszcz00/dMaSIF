@@ -19,6 +19,14 @@ takes seconds and datasets are cheap to vary. What goes into dMaSIF is decided
 by receptor_input.policy (see receptor_inputs.py) and is recorded per row, so
 changing it later only means a new spec, not new selection code.
 
+Derived columns, computed from system_id before selection so a spec can use
+them in `query` like any manifest column:
+
+    n_receptor_chains   protein chains in the system's receptor (field 3)
+    n_ligand_chains     ALL ligand chains in the system (field 4), including
+                        ions and other non-proper ligands. Stricter than
+                        pass_single_ligand, which counts proper ligands only.
+
 Selection runs in this order, each step logged with its row count:
     splits  ->  require  ->  exclude  ->  query  ->  dedup
 
@@ -87,6 +95,14 @@ def load_spec(path):
 # ----------------------------------------------------------------------------
 # Selection
 # ----------------------------------------------------------------------------
+def add_derived(df):
+    """Columns read off the system_id; see the module docstring."""
+    fields = df["system_id"].str.split("__")
+    df["n_receptor_chains"] = fields.str[2].str.split("_").str.len().astype("int16")
+    df["n_ligand_chains"] = fields.str[3].str.split("_").str.len().astype("int16")
+    return df
+
+
 def _bool_cols(df, cols, what):
     missing = [c for c in cols if c not in df.columns]
     if missing:
@@ -171,7 +187,7 @@ def main():
 
     manifest_path = root / spec["manifest"]
     fps_path = root / spec["fingerprints"]
-    df = pd.read_parquet(manifest_path)
+    df = add_derived(pd.read_parquet(manifest_path))
     df, log = select(df, spec["selection"])
     if not len(df):
         raise SystemExit("selection is empty")
