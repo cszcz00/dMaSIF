@@ -3,10 +3,9 @@
 Answers the questions that are cheap now and expensive after a 100 GB transfer
 or a full extraction:
 
-  A  module shadowing      affinity/ sits INSIDE the dMaSIF repo, and
-                           add_repo_to_path puts the repo root ahead of it on
-                           sys.path. Any affinity module whose name matches a
-                           repo module can be silently replaced.
+  A  module shadowing      add_repo_to_path puts the dMaSIF repo root at
+                           sys.path[0], ahead of src/. Any src module whose
+                           name matches a repo module can be silently replaced.
   B  manifest <-> disk     do receptors.txt, structures/ and systems/ agree
                            with the manifest, and how much is actually present
   C  --merge_models        does a receptor.cif hold several MODELs with
@@ -24,8 +23,8 @@ or a full extraction:
                            nothing downstream means anything.
 
 Example:
-    python affinity/sanity.py --root /mnt/home/cjs2301/dmasif
-    python affinity/sanity.py --root /mnt/home/cjs2301/dmasif --n 20
+    python src/sanity.py --root /mnt/home/cjs2301/dmasif
+    python src/sanity.py --root /mnt/home/cjs2301/dmasif --n 20
 """
 
 import argparse
