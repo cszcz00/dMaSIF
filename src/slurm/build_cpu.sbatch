@@ -8,7 +8,7 @@
 set -e
 module load apptainer
 cd $WORK
-apptainer build --force --fakeroot --ignore-fakeroot-command $WORK/dmasif.sif $WORK/src/slurm/dmasif.def
+apptainer build --force --fakeroot --ignore-fakeroot-command $WORK/dmasif.sif $WORK/dMaSIF/affinity/slurm/dmasif.def
 rm -rf dmasif_sandbox
 apptainer build --sandbox dmasif_sandbox dmasif.sif
 echo BUILD_DONE

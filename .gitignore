@@ -22,3 +22,6 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .keops*/
+.apptainer_cache/
+job_console/
+job_console_tests/

@@ -56,6 +56,11 @@ SEARCH_CONFIG = {
     "dropout": 0.0,
 }
 
+# This file lives in src/, a SIBLING of the vendored dMaSIF clone, not inside
+# it: a subdirectory would be shadowed by the repo's own top-level modules
+# (data, model, helper, ...) once add_repo_to_path puts the repo at sys.path[0].
+DEFAULT_REPO = Path(__file__).resolve().parents[1] / "dMaSIF"
+
 
 # Input Parsing Helpers
 def _iter_chains(structure, merge_models):
@@ -262,7 +267,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--inputs", required=True, help="directory of structures, or a list file")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[1]))
+    ap.add_argument("--repo", default=str(DEFAULT_REPO), help="dMaSIF clone; default ../dMaSIF")
     ap.add_argument("--ckpt", default="dMaSIF_search_3layer_12A_16dim")
     ap.add_argument("--no_hydrogens", action="store_true", help="drop H atoms even if present")
     ap.add_argument(
@@ -276,6 +281,13 @@ def main():
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
+
+    repo = Path(a.repo)
+    if not (repo / "models" / a.ckpt).exists():
+        raise SystemExit(
+            f"no checkpoint at {repo / 'models' / a.ckpt}. --repo must point at the "
+            f"dMaSIF clone itself, not its parent."
+        )
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)

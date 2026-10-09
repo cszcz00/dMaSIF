@@ -9,4 +9,4 @@
 set -e
 module load apptainer
 apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER $WORK/dmasif_sandbox \
-    python $WORK/src/extract.py --inputs $WORK/test_pdbs --out $WORK/feats/test_moved --repo $WORK/dMaSIF
+    python $WORK/dMaSIF/affinity/extract.py --inputs $WORK/test_pdbs --out $WORK/feats/test_moved --repo $WORK/dMaSIF
