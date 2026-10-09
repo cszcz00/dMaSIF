@@ -1,0 +1,26 @@
+{
+  "files.watcherExclude": {
+    "**/dmasif_sandbox/**": true,
+    "**/.apptainer_cache/**": true,
+    "**/keops_cache/**": true,
+    "**/feats/**": true,
+    "**/structures/**": true,
+    "**/systems/**": true,
+    "**/job_console/**": true,
+    "**/*.sif": true
+  },
+  "search.exclude": {
+    "**/dmasif_sandbox": true,
+    "**/.apptainer_cache": true,
+    "**/keops_cache": true,
+    "**/feats": true,
+    "**/structures": true,
+    "**/systems": true,
+    "**/job_console": true
+  },
+  "files.exclude": {
+    "**/*.sif": true,
+    "**/dmasif_sandbox": true,
+    "**/.apptainer_cache": true
+  }
+}
