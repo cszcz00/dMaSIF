@@ -4,6 +4,8 @@ systems/
 feats/
 
 keops_cache/
+meta/
+meta_*/
 *.log
 *.out
 
