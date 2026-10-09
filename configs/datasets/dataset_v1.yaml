@@ -1,6 +1,6 @@
 # Every filter in build_manifest.py, one representative per
 # (interaction cluster, ligand): the clean baseline.
-name: strict_v1
+name: dataset_v1
 description: >
   strict_rep rows of the loose manifest (all build_manifest filters + dedup on
   pli_unique_qcov__95__strong__component and ligand), PLINDER receptor as input.

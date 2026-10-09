@@ -23,8 +23,8 @@ Selection runs in this order, each step logged with its row count:
     splits  ->  require  ->  exclude  ->  query  ->  dedup
 
 Example:
-    python src/build_dataset.py configs/datasets/strict_v1.yaml --root $WORK --dry_run
-    python src/build_dataset.py configs/datasets/strict_v1.yaml --root $WORK --check_files
+    python src/build_dataset.py configs/datasets/dataset_v1.yaml --root $WORK --dry_run
+    python src/build_dataset.py configs/datasets/dataset_v1.yaml --root $WORK --check_files
 """
 
 import argparse
@@ -64,8 +64,11 @@ DEFAULTS = {
 
 def load_spec(path):
     raw = yaml.safe_load(Path(path).read_text()) or {}
-    if "name" not in raw:
-        raise SystemExit(f"{path}: spec needs a `name`")
+    # The file name IS the dataset name; a separate `name:` may only repeat it.
+    stem = Path(path).stem
+    raw.setdefault("name", stem)
+    if raw["name"] != stem:
+        raise SystemExit(f"{path}: name {raw['name']!r} does not match the file name {stem!r}")
     unknown = set(raw) - set(DEFAULTS) - {"name"}
     if unknown:
         raise SystemExit(f"{path}: unknown keys {sorted(unknown)}")

@@ -35,8 +35,8 @@ keep, and which receptor input policy (`src/receptor_inputs.py`) decides what
 goes into dMaSIF for each interaction.
 
 ```bash
-python src/build_dataset.py configs/datasets/strict_v1.yaml --dry_run      # attrition only
-python src/build_dataset.py configs/datasets/strict_v1.yaml --check_files  # writes datasets/strict_v1/
+python src/build_dataset.py configs/datasets/dataset_v1.yaml --dry_run      # attrition only
+python src/build_dataset.py configs/datasets/dataset_v1.yaml --check_files  # writes datasets/dataset_v1/
 ```
 
 Each build writes `provenance.json` with the git commit, manifest checksum and
