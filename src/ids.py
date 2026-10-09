@@ -12,7 +12,7 @@ Deliberately free of torch, PyG and dmasif_compat. Importing extract.py for
 these functions would pull the whole dMaSIF stack in to do string manipulation.
 
 Depends on: nothing.
-Imported by: extract.py, labels.py, pack.py.
+Imported by: extract.py, labels.py, receptor_inputs.py.
 """
 
 

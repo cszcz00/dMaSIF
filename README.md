@@ -7,6 +7,8 @@ dmasif/
 ├── dMaSIF/            # upstream dMaSIF + PyTorch 2 fixes; keep edits here minimal
 ├── src/               # our pipeline: fetch, manifest, extract, labels, probes
 │   └── slurm/         # sbatch scripts + Apptainer definition (dmasif.def)
+├── configs/datasets/  # dataset specs (selection + receptor input policy), tracked
+├── datasets/          # built datasets from src/build_dataset.py (ignored, HPC only)
 ├── job_console/       # shared job-submission console (separate tool, ignored)
 ├── meta/              # dataset manifest from build_manifest.py (ignored, HPC only)
 ├── structures/        # raw structures              (ignored, HPC only)
@@ -16,3 +18,17 @@ dmasif/
 ```
 
 The upstream README is at `dMaSIF/README.md`.
+
+## Building a dataset
+
+A dataset is a spec in `configs/datasets/<name>.yaml`: which manifest rows to
+keep, and which receptor input policy (`src/receptor_inputs.py`) decides what
+goes into dMaSIF for each interaction.
+
+```bash
+python src/build_dataset.py configs/datasets/strict_v1.yaml --dry_run      # attrition only
+python src/build_dataset.py configs/datasets/strict_v1.yaml --check_files  # writes datasets/strict_v1/
+```
+
+Each build writes `provenance.json` with the git commit, manifest checksum and
+per-step row counts. Commit before building so that commit describes the code.
