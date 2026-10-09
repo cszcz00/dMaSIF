@@ -19,6 +19,15 @@ dmasif/
 
 The upstream README is at `dMaSIF/README.md`.
 
+## Environments
+
+| Where | For | Defined by |
+|---|---|---|
+| `~/venvs/plinder` (CPU) | `build_manifest`, `fetch_structures`, `build_dataset`, `labels`, `sanity` | `envs/cpu-requirements.txt` |
+| `dmasif_sandbox` container (GPU) | `extract`, `probe_pocket` | `src/slurm/dmasif.def` |
+
+Not conda `base`: nothing in the pipeline assumes it.
+
 ## Building a dataset
 
 A dataset is a spec in `configs/datasets/<name>.yaml`: which manifest rows to

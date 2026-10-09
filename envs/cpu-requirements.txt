@@ -1,0 +1,11 @@
+# CPU-side data scripts: build_manifest, fetch_structures, build_dataset,
+# labels, sanity. Install into ~/venvs/plinder:
+#   source ~/venvs/plinder/bin/activate && pip install -r envs/cpu-requirements.txt
+# GPU-side scripts (extract, probe_pocket) run in the container from
+# src/slurm/dmasif.def instead.
+numpy
+pandas
+pyarrow
+pyyaml
+rdkit
+biopython
