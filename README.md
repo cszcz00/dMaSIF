@@ -7,8 +7,8 @@ dmasif/
 ├── dMaSIF/            # upstream dMaSIF + PyTorch 2 fixes; keep edits here minimal
 ├── src/               # our pipeline: fetch, manifest, extract, labels, probes
 │   └── slurm/         # sbatch scripts + Apptainer definition (dmasif.def)
-├── job_console/       # job monitoring tooling
-├── meta*/             # dataset definitions (txt lists tracked; parquet/npy ignored)
+├── job_console/       # shared job-submission console (separate tool, ignored)
+├── meta/              # dataset manifest from build_manifest.py (ignored, HPC only)
 ├── structures/        # raw structures              (ignored, HPC only)
 ├── systems/           # per-system folders          (ignored, HPC only)
 ├── feats/             # extracted dMaSIF features   (ignored, HPC only)

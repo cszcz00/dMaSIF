@@ -2,7 +2,7 @@
 structures/
 systems/
 feats/
-test_pdbs/
+
 keops_cache/
 *.log
 *.out
