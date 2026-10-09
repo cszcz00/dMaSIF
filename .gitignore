@@ -6,7 +6,7 @@ feats/
 keops_cache/
 meta/
 meta_*/
-datasets/
+/datasets/
 *.log
 *.out
 

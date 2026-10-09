@@ -1,0 +1,20 @@
+# Every filter in build_manifest.py, one representative per
+# (interaction cluster, ligand): the clean baseline.
+name: strict_v1
+description: >
+  strict_rep rows of the loose manifest (all build_manifest filters + dedup on
+  pli_unique_qcov__95__strong__component and ligand), PLINDER receptor as input.
+
+manifest: meta/manifest.parquet
+fingerprints: meta/ligand_fps.npy
+
+selection:
+  splits: [train, val, test]
+  require: [strict_rep]
+  exclude: []
+  query: null
+  dedup: null            # strict_rep is already deduplicated
+
+receptor_input:
+  policy: plinder_receptor
+  params: {}
