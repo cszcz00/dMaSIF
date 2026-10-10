@@ -278,7 +278,7 @@ def overfit(a):
         opt.zero_grad()
         loss.backward()
         opt.step()
-        loss_val = loss.item()
+        loss_val = loss.detach().item()
     print("\nregion hit = a predicted pocket region covers >=50% of the labelled pocket at "
           ">=30% precision; top-1 = it is the highest-ranked region")
 
