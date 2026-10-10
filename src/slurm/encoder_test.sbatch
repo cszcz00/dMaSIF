@@ -14,6 +14,17 @@ cd $WORK
 RUN="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER $WORK/dmasif_sandbox python $WORK/src/test_encoder.py"
 ITEMS=$WORK/encoder_test/items.tsv
 
+echo "node $(hostname): $(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader)"
+# Fail fast if this container's PyTorch was not built for this GPU (e.g. Blackwell
+# sm_120 vs the CUDA 12.6 image); KeOps would otherwise die with CUDA_ERROR_INVALID_IMAGE.
+apptainer exec --nv --cleanenv $WORK/dmasif_sandbox python -c "
+import sys, torch
+cap = 'sm_%d%d' % torch.cuda.get_device_capability()
+archs = torch.cuda.get_arch_list()
+print('GPU', cap, '| torch built for', archs)
+sys.exit(0 if cap in archs else 'this container cannot run on ' + cap + '; pin the job to a supported GPU')
+"
+
 echo "=== smoke ==="
 $RUN smoke --items $ITEMS --n 8
 
