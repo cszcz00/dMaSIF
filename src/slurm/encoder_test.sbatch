@@ -2,6 +2,7 @@
 #SBATCH --partition=alpha
 #SBATCH --qos=test
 #SBATCH --gres=gpu:1
+#SBATCH --constraint="h100|h200"   # Hopper only: the container (CUDA 12.6) cannot run on Blackwell (rtx6000)
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=01:00:00
