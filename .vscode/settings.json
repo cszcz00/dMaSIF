@@ -1,6 +1,6 @@
 {
   "files.watcherExclude": {
-    "**/dmasif_sandbox/**": true,
+    "**/dmasif_sandbox*/**": true,
     "**/.apptainer_cache/**": true,
     "**/keops_cache/**": true,
     "**/feats/**": true,
@@ -10,7 +10,7 @@
     "**/*.sif": true
   },
   "search.exclude": {
-    "**/dmasif_sandbox": true,
+    "**/dmasif_sandbox*": true,
     "**/.apptainer_cache": true,
     "**/keops_cache": true,
     "**/feats": true,
@@ -20,7 +20,7 @@
   },
   "files.exclude": {
     "**/*.sif": true,
-    "**/dmasif_sandbox": true,
+    "**/dmasif_sandbox*": true,
     "**/.apptainer_cache": true
   }
 }

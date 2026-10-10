@@ -18,7 +18,7 @@ meta_*/
 
 # Containers
 *.sif
-dmasif_sandbox/
+dmasif_sandbox*/
 
 # Python / editor noise
 __pycache__/
