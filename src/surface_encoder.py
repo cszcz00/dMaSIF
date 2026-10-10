@@ -4,9 +4,9 @@
           ──(2) curvatures (10)  +  AtomNet_MP chemistry (6)──> 16 input feats
           ──(3) dMaSIFConv_seg, weights re-learned──> point embeddings (E)
           ──(4) pocket head──> one logit per point, trained as "pocket-ness"
-          ──(5) anchors: k_pos pocket candidates (top logits, suppression)
-                       + k_neg negatives (low logits, spread out)
-          ──(6) Gaussian pooling around each anchor + projection──> (K, D)
+          ──(5) region anchors: k_pos pocket regions grown from the pocket
+                map (watershed) + k_neg low-probability regions of matched size
+          ──(6) probability-weighted pooling per region + projection──> (K, D)
 
 Steps 1-3 are dMaSIF's own classes, instantiated here with fresh weights, so
 everything from the chemistry network onward trains. load_pretrained() can
@@ -34,7 +34,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import dmasif_compat  # noqa: E402
-from anchors import pool_at_anchors, select_anchors  # noqa: E402
+from anchors import pool_regions, select_regions  # noqa: E402
 
 DEFAULT_REPO = HERE.parent / "dMaSIF"
 
@@ -59,15 +59,17 @@ class EncoderConfig:
     orientation_units: int = 16
     # (4) pocket head
     head_hidden: int = 32
-    # (5) anchors
-    k_pos: int = 16
-    k_neg: int = 16
-    nms_radius: float = 8.0
+    # (5) region anchors (see anchors.py)
+    k_pos: int = 8
+    k_neg: int = 8
+    region_threshold: float = 0.5          # pocket probability to join a region
+    link_radius: float = 2.0               # A; points closer are neighbours
+    smooth_radius: float = 2.0             # A; probability smoothing
+    min_region_points: int = 20
     neg_quantile: float = 0.5
-    neg_flat_quantile: float | None = None   # e.g. 0.5: negatives only on flatter half
-    select_temperature: float | None = None  # > 0 while training to explore
-    # (6) pooling and output
-    pool_radius: float = 8.0
+    neg_exclusion: float = 4.0             # A; negatives keep off pocket regions
+    neg_flat_quantile: float | None = None # e.g. 0.5: negative seeds on flatter half
+    # (6) output
     out_dim: int = 128
     normalize: bool = True
     repo: str = field(default=str(DEFAULT_REPO))
@@ -127,18 +129,21 @@ class SurfaceEncoder(nn.Module):
     def forward(self, P, forced=None, generator=None):
         """P: dict with atom_xyz (M,3), atomtypes (M,6) one-hot, batch_atoms (M,),
         and optionally a cached surface: xyz (N,3), normals (N,3), batch (N,).
-        forced: optional list, per protein, of point-index tensors (LOCAL to
-        that protein) to take as pocket anchors first, e.g. the true pocket.
+        forced: optional list, per protein, of lists of point-index tensors
+        (LOCAL to that protein) taken as pocket regions first, e.g. the
+        labelled pocket during training.
 
         Returns a dict:
-            xyz, normals, batch      the surface used
-            input_feats  (N, 16)     curvatures + chemistry
-            point_emb    (N, E)      conv output
-            pocket_logit (N,)        per-point pocket score
-            anchor_idx   (B, K)      GLOBAL point indices, -1 = no anchor
-            anchor_is_pos(B, K)      True for pocket-candidate slots
-            anchor_valid (B, K)
-            anchor_vec   (B, K, D)   the representation-space vectors
+            xyz, normals, batch        the surface used
+            input_feats   (N, 16)      curvatures + chemistry
+            point_emb     (N, E)       conv output
+            pocket_logit  (N,)         per-point pocket score
+            anchor_vec    (B, K, D)    the representation-space vectors
+            anchor_valid  (B, K)       False for empty slots
+            anchor_is_pos (B, K)       True for pocket regions, False for negatives
+            anchor_center (B, K, 3)    probability-weighted region centroid
+            anchor_size   (B, K)       points per region
+            anchor_regions             per protein, list of GLOBAL index tensors
         """
         c = self.cfg
         if "xyz" not in P:
@@ -153,35 +158,47 @@ class SurfaceEncoder(nn.Module):
                             weights=self.orientation_scores(feats), batch=batch)
         emb = self.conv(feats)
         logit = self.pocket_head(emb).squeeze(-1)
+        prob = torch.sigmoid(logit)
 
+        K = c.k_pos + c.k_neg
         n_prot = int(batch.max()) + 1
         flat_col = 2 * (len(c.curvature_scales) - 1)  # mean curvature, largest scale
-        idx_all, pos_all, vec_all = [], [], []
+        vec = emb.new_zeros(n_prot, K, emb.shape[1])
+        center = xyz.new_zeros(n_prot, K, 3)
+        size = torch.zeros(n_prot, K, dtype=torch.long, device=xyz.device)
+        is_pos = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
+        valid = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
+        all_regions = []
         for b in range(n_prot):
             sel = (batch == b).nonzero().squeeze(1)
             neg_ok = None
             if c.neg_flat_quantile is not None:
                 h = feats[sel, flat_col].detach().abs()
                 neg_ok = h <= torch.quantile(h, c.neg_flat_quantile)
-            local, is_pos = select_anchors(
-                xyz[sel], logit[sel], c.k_pos, c.k_neg, c.nms_radius,
-                neg_quantile=c.neg_quantile, neg_allowed=neg_ok,
-                temperature=c.select_temperature if self.training else None,
+            regions, pos = select_regions(
+                xyz[sel], prob[sel], c.k_pos, c.k_neg, threshold=c.region_threshold,
+                link_radius=c.link_radius, smooth_radius=c.smooth_radius,
+                min_points=c.min_region_points, neg_quantile=c.neg_quantile,
+                neg_exclusion=c.neg_exclusion, neg_allowed=neg_ok,
                 forced=None if forced is None else forced[b], generator=generator)
-            vec_all.append(pool_at_anchors(xyz[sel], emb[sel], local, c.pool_radius))
-            idx_all.append(torch.where(local >= 0, sel[local.clamp(min=0)], -1))
-            pos_all.append(is_pos)
+            n = len(regions)
+            if n:
+                vec[b, :n] = pool_regions(emb[sel], prob[sel], regions)
+                center[b, :n] = pool_regions(xyz[sel], prob[sel].detach(), regions)
+                size[b, :n] = torch.tensor([len(r) for r in regions], device=xyz.device)
+                is_pos[b, :n] = pos.to(xyz.device)
+                valid[b, :n] = True
+            all_regions.append([sel[r.to(sel.device)] for r in regions])
 
-        anchor_idx = torch.stack(idx_all)
-        vec = self.project(torch.stack(vec_all))
+        out = self.project(vec)
         if c.normalize:
-            vec = F.normalize(vec, dim=-1)
-        valid = anchor_idx >= 0
+            out = F.normalize(out, dim=-1)
         return {
             "xyz": xyz, "normals": normals, "batch": batch,
             "input_feats": feats, "point_emb": emb, "pocket_logit": logit,
-            "anchor_idx": anchor_idx, "anchor_is_pos": torch.stack(pos_all),
-            "anchor_valid": valid, "anchor_vec": vec * valid[..., None],
+            "anchor_vec": out * valid[..., None], "anchor_valid": valid,
+            "anchor_is_pos": is_pos, "anchor_center": center, "anchor_size": size,
+            "anchor_regions": all_regions,
         }
 
     # ------------------------------------------------------------------

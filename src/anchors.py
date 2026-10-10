@@ -1,23 +1,28 @@
-"""Anchor selection and pooling on one protein surface.
+"""Region anchors on one protein surface.
 
-An anchor is a surface point whose neighbourhood is pooled into one vector for
-the representation space. Each protein contributes K = k_pos + k_neg anchors:
+An anchor is a REGION of surface points, pooled into one vector for the
+representation space. Regions follow the predicted pocket map, so their size
+and shape follow the pocket instead of a fixed radius.
 
-    pocket candidates   highest pocket score, with non-maximum suppression:
-                        once a point is taken, nothing within nms_radius can
-                        be, so one pocket yields one anchor and the k_pos slots
-                        spread over k_pos different pocket-like regions.
-    negatives           low-score points (below the neg_quantile of this
-                        protein's scores), optionally restricted to flat
-                        surface, spread by farthest-point sampling so they
-                        cover the protein instead of clustering.
+    pocket regions   1. smooth the per-point pocket probability over
+                        `smooth_radius`, so noise does not split a pocket
+                     2. flood from the highest-probability points down: a point
+                        above `threshold` joins the region of its strongest
+                        already-assigned neighbour within `link_radius`, or
+                        starts a region if it has none. Two pockets joined by a
+                        lower ridge stay two regions (watershed)
+                     3. drop regions under `min_points`; rank by total
+                        probability; keep the top k_pos
+    negative regions low-probability patches, seeded by farthest-point sampling
+                     away from the pocket regions, each the median size of
+                     the pocket regions so size cannot tell them apart
+    forced regions   given point sets (the labelled pocket during training)
+                     inserted first; predicted regions mostly inside one are
+                     dropped as duplicates
 
-Selection is discrete and runs without gradients. The pocket head learns from
-its own per-point loss, and the pooled vectors carry gradient back into the
-point embeddings, so the network trains through what it selected.
-
-Pure torch, no KeOps: selection runs on a CPU copy of the coordinates, because
-the greedy loops would otherwise synchronise the GPU at every step.
+Pooling weights each point by its pocket probability, so the downstream loss
+also trains the pocket head. Region construction itself is discrete and runs
+without gradients, on a CPU copy (its loops would stall a GPU).
 
 Depends on: torch.
 Imported by: surface_encoder.py.
@@ -26,124 +31,161 @@ Imported by: surface_encoder.py.
 import torch
 
 
-def _gumbel_order(scores, temperature, generator):
-    """Indices by descending score; with a temperature, a random order in which
-    each point's chance of coming first is softmax(score / temperature)."""
-    if not temperature:
-        return torch.argsort(scores, descending=True)
-    u = torch.rand(scores.shape, generator=generator).clamp_(1e-10, 1 - 1e-10)
-    return torch.argsort(scores / temperature - torch.log(-torch.log(u)), descending=True)
-
-
-def _nms(xyz, order, k, radius, blocked):
-    """Walk `order`, keep a point unless within `radius` of one already kept."""
-    keep = []
+# ----------------------------------------------------------------------------
+# surface neighbourhoods
+# ----------------------------------------------------------------------------
+def radius_neighbors(xyz, radius, chunk=1024):
+    """CSR neighbour lists within `radius` (self included) -> (offsets, nbrs)."""
     r2 = radius * radius
+    rows, cols = [], []
+    for s in range(0, len(xyz), chunk):
+        d2 = torch.cdist(xyz[s:s + chunk], xyz) ** 2
+        r, c = (d2 < r2).nonzero(as_tuple=True)
+        rows.append(r + s)
+        cols.append(c)
+    rows, cols = torch.cat(rows), torch.cat(cols)
+    counts = torch.bincount(rows, minlength=len(xyz))
+    offsets = torch.zeros(len(xyz) + 1, dtype=torch.long)
+    offsets[1:] = torch.cumsum(counts, 0)
+    return offsets, cols
+
+
+def smooth(values, offsets, nbrs):
+    """Mean of `values` over each point's neighbour list."""
+    seg = torch.repeat_interleave(torch.arange(len(offsets) - 1), offsets.diff())
+    out = torch.zeros_like(values).index_add_(0, seg, values[nbrs])
+    return out / offsets.diff().clamp_min(1)
+
+
+# ----------------------------------------------------------------------------
+# region construction
+# ----------------------------------------------------------------------------
+def watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius):
+    """Pocket regions from a probability map -> list of index tensors, ranked
+    by total (smoothed) probability, highest first."""
+    if smooth_radius > 0:
+        prob = smooth(prob, *radius_neighbors(xyz, smooth_radius))
+    off, nb = radius_neighbors(xyz, link_radius)
+
+    label = torch.full((len(xyz),), -1, dtype=torch.long)
+    cand = (prob >= threshold).nonzero().squeeze(1)
+    order = cand[torch.argsort(prob[cand], descending=True)]
+    n_regions = 0
     for i in order.tolist():
-        if len(keep) == k:
-            break
-        if blocked[i]:
-            continue
-        keep.append(i)
-        blocked |= ((xyz - xyz[i]) ** 2).sum(-1) < r2
-    return keep
+        nbr = nb[off[i]:off[i + 1]]
+        lab = label[nbr]
+        nbr, lab = nbr[lab >= 0], lab[lab >= 0]
+        if len(lab):
+            label[i] = lab[torch.argmax(prob[nbr])]
+        else:
+            label[i] = n_regions
+            n_regions += 1
+
+    regions = [(label == r).nonzero().squeeze(1) for r in range(n_regions)]
+    regions = [r for r in regions if len(r) >= min_points]
+    regions.sort(key=lambda r: -float(prob[r].sum()))
+    return regions
 
 
-def _farthest(xyz, pool, k, start_dist, generator):
-    """Farthest-point sampling over the indices in `pool`."""
+def negative_regions(xyz, prob, k, size, exclude, neg_quantile, allowed, generator):
+    """k low-probability patches of `size` points each, spread over the surface.
+
+    Seeds: farthest-point sampling among points at or below the neg_quantile of
+    prob, not in `exclude`, and allowed. Region: the `size` points nearest the
+    seed, so each patch is contiguous and matches the pocket regions in size.
+    """
+    pool = (prob <= torch.quantile(prob, neg_quantile)) & ~exclude
+    if allowed is not None:
+        pool &= allowed
+    pool = pool.nonzero().squeeze(1)
     if k <= 0 or len(pool) == 0:
         return []
     pts = xyz[pool]
-    dist = start_dist[pool].clone()
-    if torch.isinf(dist).all():
-        first = int(torch.randint(len(pool), (1,), generator=generator))
+    if exclude.any():
+        dist = torch.cdist(pts, xyz[exclude]).min(1).values ** 2
+        seeds = [int(torch.argmax(dist))]
     else:
-        first = int(torch.argmax(dist))
-    out = [first]
-    dist = torch.minimum(dist, ((pts - pts[first]) ** 2).sum(-1))
-    while len(out) < min(k, len(pool)):
+        dist = torch.full((len(pool),), float("inf"))
+        seeds = [int(torch.randint(len(pool), (1,), generator=generator))]
+    dist = torch.minimum(dist, ((pts - pts[seeds[0]]) ** 2).sum(-1))
+    while len(seeds) < min(k, len(pool)):
         nxt = int(torch.argmax(dist))
         if dist[nxt] <= 0:
             break
-        out.append(nxt)
+        seeds.append(nxt)
         dist = torch.minimum(dist, ((pts - pts[nxt]) ** 2).sum(-1))
-    return pool[torch.tensor(out)].tolist()
+    size = min(size, len(xyz))
+    return [torch.cdist(pts[s:s + 1], xyz)[0].topk(size, largest=False).indices
+            for s in seeds]
 
 
 @torch.no_grad()
-def select_anchors(xyz, scores, k_pos, k_neg, nms_radius, neg_quantile=0.5,
-                   neg_allowed=None, temperature=None, forced=None, generator=None):
-    """Choose K = k_pos + k_neg anchor points on one protein surface.
+def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, link_radius=2.0,
+                   smooth_radius=2.0, min_points=20, neg_quantile=0.5,
+                   neg_size=None, neg_exclusion=4.0, neg_allowed=None,
+                   forced=None, dup_overlap=0.5, generator=None):
+    """Pocket and negative regions on one protein surface.
 
-    xyz          (N, 3) surface points
-    scores       (N,)   pocket logits (any monotone score works)
-    nms_radius   A; no two pocket candidates closer than this, and no negative
-                 closer than this to a pocket candidate
-    neg_quantile negatives come from points scoring at or below this quantile
-    neg_allowed  (N,) bool, optional extra restriction on negatives (e.g. flat)
-    temperature  None: strict ranking. > 0: sample candidates in proportion to
-                 softmax(score / T) before suppression, so training explores
-                 beyond the current top-ranked regions
-    forced       (F,) point indices taken as pocket candidates first, e.g. the
-                 point nearest the true ligand during training
+    xyz (N, 3), prob (N,) pocket probabilities in [0, 1].
+    forced: list of index tensors taken as pocket regions first.
+    neg_size: points per negative region; default the median pocket-region
+    size, or 4 * min_points when there are none.
+    neg_exclusion: A; negative points must be this far from every pocket region.
 
-    Returns (idx, is_pos): (K,) long, -1 where fewer than K points qualified,
-    and (K,) bool, True for pocket-candidate slots.
+    Returns (regions, is_pos): a list of up to k_pos + k_neg index tensors
+    (pocket regions first), and a bool tensor marking which are pocket regions.
     """
-    dev = xyz.device
     xyz = xyz.detach().float().cpu()
-    scores = scores.detach().float().cpu()
-    n = len(xyz)
+    prob = prob.detach().float().cpu()
 
-    blocked = torch.zeros(n, dtype=torch.bool)
-    pos = []
-    if forced is not None and len(forced):
-        pos = _nms(xyz, torch.as_tensor(forced).cpu(), k_pos, nms_radius, blocked)
-    pos += _nms(xyz, _gumbel_order(scores, temperature, generator),
-                k_pos - len(pos), nms_radius, blocked)
+    pos = [torch.as_tensor(f).long().cpu() for f in (forced or [])][:k_pos]
+    taken = torch.zeros(len(xyz), dtype=torch.bool)
+    for f in pos:
+        taken[f] = True
+    for r in watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius):
+        if len(pos) == k_pos:
+            break
+        if taken[r].float().mean() > dup_overlap:
+            continue
+        pos.append(r)
 
-    pool_mask = scores <= torch.quantile(scores, neg_quantile)
-    if neg_allowed is not None:
-        pool_mask &= neg_allowed.detach().cpu()
-    if pos:
-        d_pos = torch.cdist(xyz, xyz[pos]).min(1).values
-        pool_mask &= d_pos >= nms_radius
-        start = d_pos ** 2
-    else:
-        start = torch.full((n,), float("inf"))
-    neg = _farthest(xyz, pool_mask.nonzero().squeeze(1), k_neg, start, generator)
+    in_pos = torch.zeros(len(xyz), dtype=torch.bool)
+    for r in pos:
+        in_pos[r] = True
+    exclude = in_pos.clone()
+    if in_pos.any() and neg_exclusion > 0:
+        exclude = torch.cdist(xyz, xyz[in_pos]).min(1).values < neg_exclusion
+    if neg_size is None:
+        neg_size = int(torch.tensor([len(r) for r in pos]).median()) if pos else 4 * min_points
+    neg = negative_regions(xyz, prob, k_neg, neg_size, exclude, neg_quantile,
+                           None if neg_allowed is None else neg_allowed.detach().cpu(),
+                           generator)
 
-    idx = torch.full((k_pos + k_neg,), -1, dtype=torch.long)
-    idx[: len(pos)] = torch.tensor(pos, dtype=torch.long)
-    idx[k_pos : k_pos + len(neg)] = torch.tensor(neg, dtype=torch.long)
-    is_pos = torch.zeros(k_pos + k_neg, dtype=torch.bool)
-    is_pos[:k_pos] = True
-    return idx.to(dev), is_pos.to(dev)
+    is_pos = torch.tensor([True] * len(pos) + [False] * len(neg), dtype=torch.bool)
+    return pos + neg, is_pos
 
 
-def pool_at_anchors(xyz, emb, idx, radius, sigma=None):
-    """Gaussian-weighted mean of point embeddings around each anchor.
-
-    Weights exp(-d^2 / 2 sigma^2) within `radius`, zero beyond; sigma defaults
-    to radius / 2. Rows for missing anchors (idx == -1) are zero.
-    Differentiable in `emb`. Returns (K, E).
-    """
-    sigma = sigma or radius / 2
-    valid = idx >= 0
-    d2 = torch.cdist(xyz[idx.clamp(min=0)], xyz) ** 2
-    w = torch.exp(-d2 / (2 * sigma * sigma)) * (d2 < radius * radius)
-    w = w * valid[:, None]
-    w = w / w.sum(1, keepdim=True).clamp_min(1e-8)
-    return w @ emb
+# ----------------------------------------------------------------------------
+# pooling and evaluation
+# ----------------------------------------------------------------------------
+def pool_regions(emb, prob, regions, eps=1e-6):
+    """Probability-weighted mean of point embeddings over each region -> (R, E).
+    Differentiable in emb and prob."""
+    out = []
+    for r in regions:
+        r = r.to(emb.device)
+        w = prob[r] + eps
+        out.append((w[:, None] * emb[r]).sum(0) / w.sum())
+    return torch.stack(out) if out else emb.new_zeros(0, emb.shape[1])
 
 
 @torch.no_grad()
-def anchor_pocket_overlap(xyz, idx, pocket_mask, radius):
-    """Fraction of each anchor's neighbourhood (within radius) that is labelled
-    pocket. The training-time link between an anchor and a ligand: the anchor
-    that overlaps the ligand's pocket most is that ligand's positive.
-    Returns (K,), 0 for missing anchors."""
-    d2 = torch.cdist(xyz[idx.clamp(min=0)], xyz) ** 2
-    near = d2 < radius * radius
-    frac = (near & pocket_mask[None, :]).sum(1) / near.sum(1).clamp_min(1)
-    return frac * (idx >= 0)
+def region_overlap(regions, pocket_mask):
+    """Per region: (fraction of the region that is pocket, fraction of the
+    pocket the region covers). Training uses these to decide which region is a
+    ligand's positive; evaluation uses them for pocket recall."""
+    pocket_mask = pocket_mask.cpu()
+    n_pocket = max(int(pocket_mask.sum()), 1)
+    prec = torch.tensor([float(pocket_mask[r.cpu()].float().mean()) for r in regions])
+    cover = torch.tensor([float(pocket_mask[r.cpu()].sum()) / n_pocket for r in regions])
+    return prec, cover
