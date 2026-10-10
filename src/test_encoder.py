@@ -154,22 +154,46 @@ def auroc(score, label):
     return float((ranks[label].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
-def region_hit(out, items, min_cover=0.5, min_prec=0.3):
-    """Per item: rank (1-based) of the first PREDICTED pocket region covering
-    >= min_cover of the labelled pocket with precision >= min_prec, else 0."""
+def average_precision(score, label):
+    """Area under the precision-recall curve; nan if there are no positives.
+    Stricter than AUROC when positives are rare (~2% of a surface)."""
+    import torch
+
+    label = label.bool()
+    n_pos = int(label.sum())
+    if not n_pos:
+        return float("nan")
+    hits = label[torch.argsort(score, descending=True)].float()
+    precision = torch.cumsum(hits, 0) / torch.arange(1, len(hits) + 1)
+    return float((precision * hits).sum() / n_pos)
+
+
+def region_stats(out, items, min_cover=0.5, min_prec=0.3):
+    """Per item, over the PREDICTED pocket regions (nothing forced):
+        hit      rank (1-based) of the first region covering >= min_cover of
+                 the labelled pocket at >= min_prec precision, else 0
+        n, size  number of regions and their mean size in points
+        cover, prec   coverage and precision of the region that best matches
+                 the pocket (highest intersection-over-union), 0 if none
+    """
     from anchors import region_overlap
 
-    ranks = []
+    stats = []
     for b, it in enumerate(items):
         base = int((out["batch"] == b).nonzero()[0])
-        regs = [r - base for r, p in zip(out["anchor_regions"][b], out["anchor_is_pos"][b]) if p]
-        hit = 0
+        regs = [(r - base).cpu() for r, p in zip(out["anchor_regions"][b], out["anchor_is_pos"][b]) if p]
+        st = {"hit": 0, "n": len(regs), "size": np.nan, "cover": 0.0, "prec": 0.0}
         if regs:
-            prec, cover = region_overlap([r.cpu() for r in regs], it["pocket"])
+            prec, cover = region_overlap(regs, it["pocket"])
+            sizes = np.array([len(r) for r in regs], dtype=float)
+            inter = prec.numpy() * sizes
+            iou = inter / (sizes + float(it["pocket"].sum()) - inter)
+            best = int(np.argmax(iou))
             ok = ((cover >= min_cover) & (prec >= min_prec)).nonzero()
-            hit = int(ok[0]) + 1 if len(ok) else 0
-        ranks.append(hit)
-    return ranks
+            st.update(hit=int(ok[0]) + 1 if len(ok) else 0, size=sizes.mean(),
+                      cover=float(cover[best]), prec=float(prec[best]))
+        stats.append(st)
+    return stats
 
 
 def make_encoder(a, device):
@@ -178,7 +202,9 @@ def make_encoder(a, device):
     from surface_encoder import EncoderConfig, SurfaceEncoder
 
     torch.manual_seed(a.seed)
-    enc = SurfaceEncoder(EncoderConfig(k_pos=a.k_pos, k_neg=a.k_neg)).to(device)
+    enc = SurfaceEncoder(EncoderConfig(
+        k_pos=a.k_pos, k_neg=a.k_neg, region_threshold=a.threshold,
+        region_top_fraction=None if a.top_fraction <= 0 else a.top_fraction)).to(device)
     if a.pretrained:
         print(f"loaded {len(enc.load_pretrained())} pretrained tensors")
     return enc
@@ -243,7 +269,7 @@ def overfit(a):
 
     def evaluate(group):
         enc.eval()
-        aucs, hits = [], []
+        aucs, aps, stats = [], [], []
         with torch.no_grad():
             for s in range(0, len(group), a.batch):
                 chunk = group[s:s + a.batch]
@@ -251,23 +277,29 @@ def overfit(a):
                 for b, it in enumerate(chunk):
                     m = out["batch"] == b
                     aucs.append(auroc(out["pocket_logit"][m].cpu(), it["pocket"]))
-                hits += region_hit(out, chunk)
+                    aps.append(average_precision(out["pocket_logit"][m].cpu(), it["pocket"]))
+                stats += region_stats(out, chunk)
         enc.train()
-        hits = np.array(hits)
-        return (np.nanmean(aucs), (hits > 0).mean(), (hits == 1).mean())
+        col = lambda k: np.array([st[k] for st in stats], dtype=float)
+        hits, sizes = col("hit"), col("size")
+        sizes = sizes[~np.isnan(sizes)]
+        return (f"{np.nanmean(aucs):6.3f} {np.nanmean(aps):6.3f} {(hits > 0).mean():5.2f} "
+                f"{(hits == 1).mean():5.2f} {col('n').mean():5.1f} {sizes.mean() if len(sizes) else float('nan'):6.0f} "
+                f"{col('cover').mean():6.2f} {col('prec').mean():6.2f}")
 
-    print(f"\n{'step':>5s} {'loss':>8s} {'train AUROC':>12s} {'region hit':>11s} {'top-1':>6s}"
-          + (f" {'held AUROC':>11s} {'hit':>6s} {'top-1':>6s}" if held else ""))
+    tf = enc.cfg.region_top_fraction
+    print(f"regions grown from "
+          + (f"each protein's top {tf:.0%} of points" if tf is not None
+             else f"points with p >= {enc.cfg.region_threshold}"))
+    print(f"\n{'step':>5s} {'set':5s} {'loss':>7s} {'AUROC':>6s} {'AP':>6s} {'hit':>5s} {'top1':>5s} "
+          f"{'#reg':>5s} {'size':>6s} {'cover':>6s} {'prec':>6s}")
     rng = np.random.default_rng(a.seed)
     for step in range(a.steps + 1):
         if step % a.eval_every == 0:
-            row = f"{step:5d} {loss_val if step else float('nan'):8.4f} "
-            auc, hit, top1 = evaluate(train)
-            row += f"{auc:12.3f} {hit:11.2f} {top1:6.2f}"
+            loss_txt = f"{loss_val:7.4f}" if step else f"{'':7s}"
+            print(f"{step:5d} {'train':5s} {loss_txt} {evaluate(train)}", flush=True)
             if held:
-                auc, hit, top1 = evaluate(held)
-                row += f" {auc:11.3f} {hit:6.2f} {top1:6.2f}"
-            print(row, flush=True)
+                print(f"{'':5s} {'held':5s} {'':7s} {evaluate(held)}", flush=True)
         if step == a.steps:
             break
         chunk = [train[i] for i in rng.choice(len(train), min(a.batch, len(train)), replace=False)]
@@ -279,8 +311,11 @@ def overfit(a):
         loss.backward()
         opt.step()
         loss_val = loss.detach().item()
-    print("\nregion hit = a predicted pocket region covers >=50% of the labelled pocket at "
-          ">=30% precision; top-1 = it is the highest-ranked region")
+    print("\nAP     average precision of the per-point pocket score (stricter than AUROC at ~2% positives)"
+          "\nhit    a predicted pocket region covers >=50% of the labelled pocket at >=30% precision"
+          "\ntop1   that region is the model's highest-ranked one"
+          "\n#reg   predicted pocket regions per protein; size = their mean size in points"
+          "\ncover / prec   coverage and precision of the best-matching region (by IoU)")
 
 
 def main():
@@ -306,6 +341,11 @@ def main():
                        help="start features + conv from the published checkpoint")
         p.add_argument("--k_pos", type=int, default=8)
         p.add_argument("--k_neg", type=int, default=8)
+        p.add_argument("--top_fraction", type=float, default=0.05,
+                       help="grow pocket regions from each protein's top fraction of "
+                            "points; 0 = use --threshold instead")
+        p.add_argument("--threshold", type=float, default=0.5,
+                       help="absolute probability threshold, used when --top_fraction is 0")
         p.add_argument("--seed", type=int, default=0)
         if name == "overfit":
             p.add_argument("--holdout", type=int, default=0)

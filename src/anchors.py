@@ -6,12 +6,17 @@ and shape follow the pocket instead of a fixed radius.
 
     pocket regions   1. smooth the per-point pocket probability over
                         `smooth_radius`, so noise does not split a pocket
-                     2. flood from the highest-probability points down: a point
-                        above `threshold` joins the region of its strongest
+                     2. candidates: this protein's top `top_fraction` of
+                        points by smoothed probability (rank-based, so it
+                        does not depend on how the head is calibrated - a
+                        pos_weighted loss inflates every probability), or
+                        those above an absolute `threshold` if one is given
+                     3. flood from the highest-probability points down: a
+                        candidate joins the region of its strongest
                         already-assigned neighbour within `link_radius`, or
                         starts a region if it has none. Two pockets joined by a
                         lower ridge stay two regions (watershed)
-                     3. drop regions under `min_points`; rank by total
+                     4. drop regions under `min_points`; rank by total
                         probability; keep the top k_pos
     negative regions low-probability patches, seeded by farthest-point sampling
                      away from the pocket regions, each the median size of
@@ -60,12 +65,16 @@ def smooth(values, offsets, nbrs):
 # ----------------------------------------------------------------------------
 # region construction
 # ----------------------------------------------------------------------------
-def watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius):
+def watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
+                      top_fraction=None):
     """Pocket regions from a probability map -> list of index tensors, ranked
-    by total (smoothed) probability, highest first."""
+    by total (smoothed) probability, highest first. top_fraction, when given,
+    replaces `threshold` with this protein's (1 - top_fraction) quantile."""
     if smooth_radius > 0:
         prob = smooth(prob, *radius_neighbors(xyz, smooth_radius))
     off, nb = radius_neighbors(xyz, link_radius)
+    if top_fraction is not None:
+        threshold = float(torch.quantile(prob, 1 - top_fraction))
 
     label = torch.full((len(xyz),), -1, dtype=torch.long)
     cand = (prob >= threshold).nonzero().squeeze(1)
@@ -120,13 +129,15 @@ def negative_regions(xyz, prob, k, size, exclude, neg_quantile, allowed, generat
 
 
 @torch.no_grad()
-def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, link_radius=2.0,
+def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, link_radius=2.0,
                    smooth_radius=2.0, min_points=20, neg_quantile=0.5,
                    neg_size=None, neg_exclusion=4.0, neg_allowed=None,
                    forced=None, dup_overlap=0.5, generator=None):
     """Pocket and negative regions on one protein surface.
 
     xyz (N, 3), prob (N,) pocket probabilities in [0, 1].
+    top_fraction: grow regions from this fraction of the protein's points
+    (highest smoothed probability); overrides `threshold` when given.
     forced: list of index tensors taken as pocket regions first.
     neg_size: points per negative region; default the median pocket-region
     size, or 4 * min_points when there are none.
@@ -142,7 +153,8 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, link_radius=2.0,
     taken = torch.zeros(len(xyz), dtype=torch.bool)
     for f in pos:
         taken[f] = True
-    for r in watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius):
+    for r in watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
+                               top_fraction):
         if len(pos) == k_pos:
             break
         if taken[r].float().mean() > dup_overlap:

@@ -62,7 +62,8 @@ class EncoderConfig:
     # (5) region anchors (see anchors.py)
     k_pos: int = 8
     k_neg: int = 8
-    region_threshold: float = 0.5          # pocket probability to join a region
+    region_top_fraction: float | None = 0.05  # grow regions from each protein's top 5% ...
+    region_threshold: float = 0.5             # ... or, if top_fraction is None, from p >= this
     link_radius: float = 2.0               # A; points closer are neighbours
     smooth_radius: float = 2.0             # A; probability smoothing
     min_region_points: int = 20
@@ -177,6 +178,7 @@ class SurfaceEncoder(nn.Module):
                 neg_ok = h <= torch.quantile(h, c.neg_flat_quantile)
             regions, pos = select_regions(
                 xyz[sel], prob[sel], c.k_pos, c.k_neg, threshold=c.region_threshold,
+                top_fraction=c.region_top_fraction,
                 link_radius=c.link_radius, smooth_radius=c.smooth_radius,
                 min_points=c.min_region_points, neg_quantile=c.neg_quantile,
                 neg_exclusion=c.neg_exclusion, neg_allowed=neg_ok,

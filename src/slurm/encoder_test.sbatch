@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=01:30:00
 #SBATCH --output=encoder_test_%j.log
 # Needs $WORK/encoder_test/items.tsv from (CPU venv):
 #   python src/test_encoder.py prepare --index datasets/dataset_v1/index.parquet --n 48 --out encoder_test/
@@ -28,8 +28,11 @@ sys.exit(0 if cap in archs else 'this container cannot run on ' + cap + '; pin t
 echo "=== smoke ==="
 $RUN smoke --items $ITEMS --n 8
 
-echo "=== overfit, fresh weights ==="
+echo "=== overfit, fresh weights, regions from each protein's top 5% ==="
 $RUN overfit --items $ITEMS --n 32 --holdout 16 --steps 300
 
-echo "=== overfit, features + conv from the published checkpoint ==="
+echo "=== overfit, pretrained start, regions from each protein's top 5% ==="
 $RUN overfit --items $ITEMS --n 32 --holdout 16 --steps 300 --pretrained
+
+echo "=== control: overfit, pretrained start, OLD fixed threshold p >= 0.5 ==="
+$RUN overfit --items $ITEMS --n 32 --holdout 16 --steps 300 --pretrained --top_fraction 0
