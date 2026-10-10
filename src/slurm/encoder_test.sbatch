@@ -1,0 +1,24 @@
+#!/bin/bash
+#SBATCH --partition=alpha
+#SBATCH --qos=test
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=01:00:00
+#SBATCH --output=encoder_test_%j.log
+# Needs $WORK/encoder_test/items.tsv from (CPU venv):
+#   python src/test_encoder.py prepare --index datasets/dataset_v1/index.parquet --n 48 --out encoder_test/
+set -e
+module load apptainer
+cd $WORK
+RUN="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER $WORK/dmasif_sandbox python $WORK/src/test_encoder.py"
+ITEMS=$WORK/encoder_test/items.tsv
+
+echo "=== smoke ==="
+$RUN smoke --items $ITEMS --n 8
+
+echo "=== overfit, fresh weights ==="
+$RUN overfit --items $ITEMS --n 32 --holdout 16 --steps 300
+
+echo "=== overfit, features + conv from the published checkpoint ==="
+$RUN overfit --items $ITEMS --n 32 --holdout 16 --steps 300 --pretrained
