@@ -81,12 +81,29 @@ Conclusions: point-level pocket scoring works and generalises (AP ~20x the
 (7-8 small regions, best covers 20-30%) under either threshold; region hit
 fails on coverage. The earlier "oversized regions" hypothesis was wrong.
 
+## Region-selector experiment (set up, not yet run)
+
+Back-of-envelope from the table: the labelled pocket is ~160-170 points (prec x
+size / cover), so regions of ~50 points with prec ~0.7 are pieces of the right
+pocket. Three ways of grouping candidates are now in `anchors.pocket_regions`
+(`method=`, also `EncoderConfig.region_method`; default unchanged):
+
+1. `watershed` + `persistence` (ToMATo merging; quantile units, 0 = old behaviour)
+2. `components`: P2Rank-style single-linkage clusters, ranked by sum p^2
+3. `ball`: greedy NMS balls of fixed radius, optional mean-shift centring
+
+Selection has no gradient, so all three are compared on one trained head:
+`src/slurm/region_test.sbatch` trains (pretrained, 300 steps), dumps the
+probability maps (`test_encoder.py overfit --dump`), then runs
+`src/region_sweep.py` over a grid of settings. It also reports two oracles: the
+labelled pockets' size / extent / pieces, and the candidate union's cover
+(the ceiling for options 1-2). Metrics add probability-weighted cover/prec and
+P2Rank's DCC (< 4 A). Prepare 96 items first so there are 64 held-out.
+
 ## Next steps
 
-1. Persistence-based merging in `anchors.watershed_regions` (merge two flooded
-   regions when the dip between them is shallow), plus larger smoothing as an
-   option; rerun the encoder test with a few merge settings. Target: 1-2
-   regions per protein, size ~ pocket size, cover > 0.5 at prec > 0.3.
+1. Run `region_test.sbatch`; pick a selector. Target: 1-2 regions per
+   protein, size ~ pocket size, cover > 0.5 at prec > 0.3.
 2. Default to the pretrained start.
 3. Then: ligand encoder + contrastive loss; full-scale surface extraction and
    `labels.py` over dataset_v1; dataset_v2 (per-entry dedup, larger eval).

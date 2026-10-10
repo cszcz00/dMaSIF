@@ -9,7 +9,8 @@
     overfit   GPU container. Train on the pocket labels alone for a few hundred
               steps. Passing means the stack can learn: training AUROC near 1
               and predicted regions recovering the labelled pockets. Optional
-              held-out items show whether anything generalises.
+              held-out items show whether anything generalises. --dump saves
+              the final probability maps for region_sweep.py.
 
 Pocket labels: surface points within --cutoff A of a ligand heavy atom, the
 same rule as labels.py. Surfaces are sampled once per item and reused, so the
@@ -196,6 +197,33 @@ def region_stats(out, items, min_cover=0.5, min_prec=0.3):
     return stats
 
 
+def dump_maps(enc, train, held, a):
+    """Save each item's surface, pocket probabilities and labels, so region
+    selectors can be compared offline on the same maps (region_sweep.py)."""
+    import torch
+
+    from surface_encoder import config_dict
+
+    enc.eval()
+    maps = []
+    with torch.no_grad():
+        for split, group in (("train", train), ("held", held)):
+            for s in range(0, len(group), a.batch):
+                chunk = group[s:s + a.batch]
+                out = enc(to_batch(chunk, a.device))
+                for b, it in enumerate(chunk):
+                    m = out["batch"] == b
+                    maps.append({"id": it["id"], "split": split,
+                                 "xyz": it["xyz"].float(),
+                                 "prob": torch.sigmoid(out["pocket_logit"][m]).float().cpu(),
+                                 "pocket": it["pocket"].bool(),
+                                 "lig": torch.from_numpy(it["lig"]).float()})
+    enc.train()
+    Path(a.dump).parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"maps": maps, "args": vars(a), "config": config_dict(enc.cfg)}, a.dump)
+    print(f"\n{a.dump}: probability maps for {len(train)} train / {len(held)} held-out items")
+
+
 def make_encoder(a, device):
     import torch
 
@@ -311,6 +339,8 @@ def overfit(a):
         loss.backward()
         opt.step()
         loss_val = loss.detach().item()
+    if a.dump:
+        dump_maps(enc, train, held, a)
     print("\nAP     average precision of the per-point pocket score (stricter than AUROC at ~2% positives)"
           "\nhit    a predicted pocket region covers >=50% of the labelled pocket at >=30% precision"
           "\ntop1   that region is the model's highest-ranked one"
@@ -353,6 +383,9 @@ def main():
             p.add_argument("--batch", type=int, default=4)
             p.add_argument("--lr", type=float, default=1e-3)
             p.add_argument("--eval_every", type=int, default=50)
+            p.add_argument("--dump", default="",
+                           help="after training, save per-item probability maps here "
+                                "(.pt) for region_sweep.py")
     a = ap.parse_args()
     {"prepare": prepare, "smoke": smoke, "overfit": overfit}[a.cmd](a)
 

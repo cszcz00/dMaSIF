@@ -11,13 +11,29 @@ and shape follow the pocket instead of a fixed radius.
                         does not depend on how the head is calibrated - a
                         pos_weighted loss inflates every probability), or
                         those above an absolute `threshold` if one is given
-                     3. flood from the highest-probability points down: a
-                        candidate joins the region of its strongest
-                        already-assigned neighbour within `link_radius`, or
-                        starts a region if it has none. Two pockets joined by a
-                        lower ridge stay two regions (watershed)
+                     3. group candidates into regions, by `method`:
+                        watershed   flood from the highest-probability points
+                                    down: a candidate joins the region of its
+                                    strongest already-assigned neighbour within
+                                    `link_radius`, or starts a region if it has
+                                    none. When a candidate touches two regions,
+                                    the one with the lower peak is merged in if
+                                    its peak stands less than `persistence`
+                                    above the candidate (ToMATo). persistence
+                                    is in per-protein quantile units: 0 never
+                                    merges (plain watershed), >= top_fraction
+                                    merges everything connected
+                        components  single-linkage clusters of candidates at
+                                    `link_radius` (P2Rank); ranked by sum p^2
+                        ball        greedy NMS: centre a ball of `ball_radius`
+                                    on the strongest unsuppressed candidate
+                                    (optionally moved by `ball_shift` mean-shift
+                                    steps over candidates), take every surface
+                                    point inside, suppress candidates inside,
+                                    repeat. Fixed size; ranked by seed strength
                      4. drop regions under `min_points`; rank by total
-                        probability; keep the top k_pos
+                        probability (unless the method says otherwise);
+                        keep the top k_pos
     negative regions low-probability patches, seeded by farthest-point sampling
                      away from the pocket regions, each the median size of
                      the pocket regions so size cannot tell them apart
@@ -30,7 +46,7 @@ also trains the pocket head. Region construction itself is discrete and runs
 without gradients, on a CPU copy (its loops would stall a GPU).
 
 Depends on: torch.
-Imported by: surface_encoder.py.
+Imported by: surface_encoder.py, region_sweep.py.
 """
 
 import torch
@@ -62,38 +78,168 @@ def smooth(values, offsets, nbrs):
     return out / offsets.diff().clamp_min(1)
 
 
+# `cache`, where accepted, is a dict reused across calls on the SAME xyz and
+# prob (region_sweep.py runs many selectors per protein); None recomputes.
+def _neighbors(xyz, radius, cache=None):
+    key = ("nbr", float(radius))
+    if cache is None or key not in cache:
+        nbrs = radius_neighbors(xyz, radius)
+        if cache is None:
+            return nbrs
+        cache[key] = nbrs
+    return cache[key]
+
+
+def smoothed(xyz, prob, radius, cache=None):
+    """prob averaged over `radius`; unchanged when radius <= 0."""
+    if radius <= 0:
+        return prob
+    key = ("smooth", float(radius))
+    if cache is None or key not in cache:
+        out = smooth(prob, *_neighbors(xyz, radius, cache))
+        if cache is None:
+            return out
+        cache[key] = out
+    return cache[key]
+
+
+def candidates(prob, threshold, top_fraction=None):
+    """Bool mask of candidate points: the top `top_fraction` by prob, or
+    prob >= threshold when top_fraction is None."""
+    if top_fraction is not None:
+        threshold = float(torch.quantile(prob, 1 - top_fraction))
+    return prob >= threshold
+
+
 # ----------------------------------------------------------------------------
 # region construction
 # ----------------------------------------------------------------------------
+REGION_METHODS = ("watershed", "components", "ball")
+
+
 def watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
-                      top_fraction=None):
+                      top_fraction=None, persistence=0.0, rank_by="sum", cache=None):
     """Pocket regions from a probability map -> list of index tensors, ranked
-    by total (smoothed) probability, highest first. top_fraction, when given,
-    replaces `threshold` with this protein's (1 - top_fraction) quantile."""
-    if smooth_radius > 0:
-        prob = smooth(prob, *radius_neighbors(xyz, smooth_radius))
-    off, nb = radius_neighbors(xyz, link_radius)
-    if top_fraction is not None:
-        threshold = float(torch.quantile(prob, 1 - top_fraction))
+    by total (smoothed) probability, highest first (sum of squares when
+    rank_by="sumsq"). top_fraction, when given, replaces `threshold` with this
+    protein's (1 - top_fraction) quantile.
+
+    persistence: merge threshold in quantile units of this protein's smoothed
+    probability. 0 is plain watershed; float("inf") merges every connected
+    candidate (single-linkage connected components)."""
+    prob = smoothed(xyz, prob, smooth_radius, cache)
+    off, nb = _neighbors(xyz, link_radius, cache)
+    cand = candidates(prob, threshold, top_fraction).nonzero().squeeze(1)
+    order = cand[torch.argsort(prob[cand], descending=True)]
+    # height of each point as its quantile on this protein, so persistence
+    # does not depend on how the head is calibrated
+    height = torch.empty(len(xyz))
+    height[torch.argsort(prob)] = torch.arange(len(xyz), dtype=torch.float) / max(len(xyz), 1)
 
     label = torch.full((len(xyz),), -1, dtype=torch.long)
-    cand = (prob >= threshold).nonzero().squeeze(1)
-    order = cand[torch.argsort(prob[cand], descending=True)]
-    n_regions = 0
+    parent, peak = [], []  # union-find over region ids; peak height per region
+
+    def find(r):
+        while parent[r] != r:
+            parent[r] = parent[parent[r]]
+            r = parent[r]
+        return r
+
     for i in order.tolist():
         nbr = nb[off[i]:off[i + 1]]
         lab = label[nbr]
         nbr, lab = nbr[lab >= 0], lab[lab >= 0]
-        if len(lab):
-            label[i] = lab[torch.argmax(prob[nbr])]
-        else:
-            label[i] = n_regions
-            n_regions += 1
+        if not len(lab):
+            label[i] = len(parent)
+            parent.append(len(parent))
+            peak.append(float(height[i]))
+            continue
+        label[i] = lab[torch.argmax(prob[nbr])]
+        if persistence <= 0:
+            continue
+        h = float(height[i])
+        for r in {find(int(x)) for x in lab.tolist()}:
+            a, b = find(int(label[i])), find(r)
+            if a == b:
+                continue
+            low, high = (a, b) if peak[a] < peak[b] else (b, a)
+            if peak[low] - h < persistence:
+                parent[low] = high
 
-    regions = [(label == r).nonzero().squeeze(1) for r in range(n_regions)]
+    if not parent:
+        return []
+    root = torch.tensor([find(r) for r in range(len(parent))])
+    assigned = label >= 0
+    label[assigned] = root[label[assigned]]
+    regions = [(label == r).nonzero().squeeze(1) for r in root.unique().tolist()]
     regions = [r for r in regions if len(r) >= min_points]
-    regions.sort(key=lambda r: -float(prob[r].sum()))
+    weight = prob ** 2 if rank_by == "sumsq" else prob
+    regions.sort(key=lambda r: -float(weight[r].sum()))
     return regions
+
+
+def component_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
+                      top_fraction=None, cache=None):
+    """P2Rank-style pockets: connected components of the candidates at
+    link_radius, ranked by sum of squared (smoothed) probability."""
+    return watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
+                             top_fraction, persistence=float("inf"), rank_by="sumsq",
+                             cache=cache)
+
+
+def ball_regions(xyz, prob, threshold, radius, min_points, smooth_radius,
+                 top_fraction=None, shift=1, suppress=None, cache=None):
+    """Greedy NMS balls -> list of index tensors, in seed order (strongest
+    first). Seed: the highest smoothed-probability candidate not yet
+    suppressed. Centre: the seed, moved by `shift` mean-shift steps (centroid
+    of the candidates within `radius`, weighted by probability), so it can sit
+    in the pocket's void rather than on its rim. Region: every surface point
+    within `radius` of the centre, candidate or not. Then candidates within
+    `suppress` (default `radius`) of the centre are removed.
+
+    Euclidean, not geodesic: a ball can reach across a thin cleft. Pooling
+    is probability-weighted, so low-probability points inside count little."""
+    prob = smoothed(xyz, prob, smooth_radius, cache)
+    cand = candidates(prob, threshold, top_fraction)
+    w_cand = prob * cand
+    r2 = radius * radius
+    s2 = r2 if suppress is None else suppress * suppress
+    avail = cand.clone()
+    regions = []
+    while avail.any():
+        idx = avail.nonzero().squeeze(1)
+        seed = int(idx[torch.argmax(prob[idx])])
+        centre = xyz[seed]
+        for _ in range(shift):
+            inside = ((xyz - centre) ** 2).sum(-1) < r2
+            w = w_cand[inside]
+            if float(w.sum()) <= 0:
+                break
+            centre = (w[:, None] * xyz[inside]).sum(0) / w.sum()
+        d2 = ((xyz - centre) ** 2).sum(-1)
+        avail &= d2 >= s2
+        avail[seed] = False  # always progress, even if the centre moved away
+        region = (d2 < r2).nonzero().squeeze(1)
+        if len(region) >= min_points:
+            regions.append(region)
+    return regions
+
+
+def pocket_regions(xyz, prob, method="watershed", threshold=0.5, top_fraction=None,
+                   link_radius=2.0, smooth_radius=2.0, min_points=20, persistence=0.0,
+                   ball_radius=10.0, ball_shift=1, cache=None):
+    """Ranked pocket regions by `method` (see REGION_METHODS and the module
+    docstring). Parameters a method does not use are ignored."""
+    if method == "watershed":
+        return watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
+                                 top_fraction, persistence=persistence, cache=cache)
+    if method == "components":
+        return component_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
+                                 top_fraction, cache=cache)
+    if method == "ball":
+        return ball_regions(xyz, prob, threshold, ball_radius, min_points, smooth_radius,
+                            top_fraction, shift=ball_shift, cache=cache)
+    raise ValueError(f"unknown region method {method!r}; expected one of {REGION_METHODS}")
 
 
 def negative_regions(xyz, prob, k, size, exclude, neg_quantile, allowed, generator):
@@ -132,12 +278,15 @@ def negative_regions(xyz, prob, k, size, exclude, neg_quantile, allowed, generat
 def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, link_radius=2.0,
                    smooth_radius=2.0, min_points=20, neg_quantile=0.5,
                    neg_size=None, neg_exclusion=4.0, neg_allowed=None,
-                   forced=None, dup_overlap=0.5, generator=None):
+                   forced=None, dup_overlap=0.5, generator=None,
+                   method="watershed", persistence=0.0, ball_radius=10.0, ball_shift=1):
     """Pocket and negative regions on one protein surface.
 
     xyz (N, 3), prob (N,) pocket probabilities in [0, 1].
     top_fraction: grow regions from this fraction of the protein's points
     (highest smoothed probability); overrides `threshold` when given.
+    method, persistence, ball_radius, ball_shift: how candidates become
+    regions, see pocket_regions().
     forced: list of index tensors taken as pocket regions first.
     neg_size: points per negative region; default the median pocket-region
     size, or 4 * min_points when there are none.
@@ -153,8 +302,8 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
     taken = torch.zeros(len(xyz), dtype=torch.bool)
     for f in pos:
         taken[f] = True
-    for r in watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
-                               top_fraction):
+    for r in pocket_regions(xyz, prob, method, threshold, top_fraction, link_radius,
+                            smooth_radius, min_points, persistence, ball_radius, ball_shift):
         if len(pos) == k_pos:
             break
         if taken[r].float().mean() > dup_overlap:
