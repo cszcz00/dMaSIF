@@ -1,5 +1,8 @@
 Bootstrap: docker
-From: nvcr.io/nvidia/pytorch:24.10-py3
+# 25.06: PyTorch built with CUDA 12.9, which includes Blackwell (sm_120). The
+# cluster sends single-GPU jobs to the RTX PRO 6000 Blackwell pool, which the
+# previous base (24.10, CUDA 12.6, up to sm_90) could not run on.
+From: nvcr.io/nvidia/pytorch:25.06-py3
 
 %post
     pip install --no-cache-dir "numpy<2" pykeops==2.2.3 torch_geometric biopython plyfile tqdm

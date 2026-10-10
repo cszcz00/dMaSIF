@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=alpha
 #SBATCH --qos=test
-#SBATCH --gres=gpu:nvidia_h100_80gb_hbm3:1   # typed: a generic gpu:1 is routed to the Blackwell pool, which this container (CUDA 12.6) cannot run on; nvidia_h200 also works
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=00:15:00
