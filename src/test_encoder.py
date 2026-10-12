@@ -10,7 +10,8 @@
               steps. Passing means the stack can learn: training AUROC near 1
               and predicted regions recovering the labelled pockets. Optional
               held-out items show whether anything generalises. --dump saves
-              the final probability maps for region_sweep.py.
+              the final probability maps (and point embeddings) for
+              region_sweep.py; --save_ckpt saves the encoder for apo_eval.py.
 
 Pocket labels: surface points within --cutoff A of a ligand heavy atom, the
 same rule as labels.py. Surfaces are sampled once per item and reused, so the
@@ -216,12 +217,40 @@ def dump_maps(enc, train, held, a):
                     maps.append({"id": it["id"], "split": split,
                                  "xyz": it["xyz"].float(),
                                  "prob": torch.sigmoid(out["pocket_logit"][m]).float().cpu(),
+                                 "emb": out["point_emb"][m].float().cpu(),
                                  "pocket": it["pocket"].bool(),
                                  "lig": torch.from_numpy(it["lig"]).float()})
     enc.train()
     Path(a.dump).parent.mkdir(parents=True, exist_ok=True)
     torch.save({"maps": maps, "args": vars(a), "config": config_dict(enc.cfg)}, a.dump)
     print(f"\n{a.dump}: probability maps for {len(train)} train / {len(held)} held-out items")
+
+
+def save_checkpoint(enc, train, a):
+    """Weights + config + the training items, so later evaluations (apo_eval.py)
+    reuse exactly this head and can tell which receptors it has seen."""
+    import torch
+
+    from surface_encoder import config_dict
+
+    Path(a.save_ckpt).parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state_dict": enc.state_dict(), "config": config_dict(enc.cfg),
+                "args": vars(a), "train_ids": [it["id"] for it in train]}, a.save_ckpt)
+    print(f"\n{a.save_ckpt}: encoder checkpoint ({len(train)} training items)")
+
+
+def load_checkpoint(path, device):
+    """Encoder from save_checkpoint() -> (encoder in eval mode, checkpoint dict)."""
+    import torch
+
+    from surface_encoder import EncoderConfig, SurfaceEncoder
+
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    cfg = dict(ckpt["config"])
+    cfg["curvature_scales"] = tuple(cfg["curvature_scales"])
+    enc = SurfaceEncoder(EncoderConfig(**cfg))
+    enc.load_state_dict(ckpt["state_dict"])
+    return enc.to(device).eval(), ckpt
 
 
 def make_encoder(a, device):
@@ -341,6 +370,8 @@ def overfit(a):
         loss_val = loss.detach().item()
     if a.dump:
         dump_maps(enc, train, held, a)
+    if a.save_ckpt:
+        save_checkpoint(enc, train, a)
     print("\nAP     average precision of the per-point pocket score (stricter than AUROC at ~2% positives)"
           "\nhit    a predicted pocket region covers >=50% of the labelled pocket at >=30% precision"
           "\ntop1   that region is the model's highest-ranked one"
@@ -386,6 +417,8 @@ def main():
             p.add_argument("--dump", default="",
                            help="after training, save per-item probability maps here "
                                 "(.pt) for region_sweep.py")
+            p.add_argument("--save_ckpt", default="",
+                           help="after training, save the encoder here (.pt) for apo_eval.py")
     a = ap.parse_args()
     {"prepare": prepare, "smoke": smoke, "overfit": overfit}[a.cmd](a)
 

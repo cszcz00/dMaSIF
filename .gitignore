@@ -8,6 +8,7 @@ meta/
 meta_*/
 /datasets/
 /encoder_test/
+/apo_test/
 inspect*.txt
 *.log
 *.out

@@ -101,7 +101,7 @@ def load_protein_atoms(path, chains=None, keep_hydrogens=True, merge_models=Fals
     structure = parser.get_structure(path.stem, str(path))
 
     xyz, types = [], []
-    chain_ids, resnums, icodes, resnames, names = [], [], [], [], []
+    chain_ids, resnums, icodes, resnames, names, bfactors = [], [], [], [], [], []
     n_skipped_element = 0
     for label, chain in _iter_chains(structure, merge_models):
         if chains and label not in chains:
@@ -126,6 +126,7 @@ def load_protein_atoms(path, chains=None, keep_hydrogens=True, merge_models=Fals
                 icodes.append(res.id[2].strip())
                 resnames.append(res.get_resname())
                 names.append(atom.get_id())
+                bfactors.append(atom.get_bfactor())
 
     if not xyz:
         raise ValueError(f"No protein atoms found in {path} (chains={chains})")
@@ -138,6 +139,8 @@ def load_protein_atoms(path, chains=None, keep_hydrogens=True, merge_models=Fals
         "atom_icode": np.asarray(icodes),
         "atom_resname": np.asarray(resnames),
         "atom_name": np.asarray(names),
+        # B-factor column as written; AlphaFold models store per-residue pLDDT here
+        "atom_bfactor": np.asarray(bfactors, dtype=np.float32),
         "n_skipped_element": n_skipped_element,
     }
 

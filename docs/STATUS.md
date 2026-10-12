@@ -120,9 +120,32 @@ per-protein paired differences vs the ball leader with bootstrap intervals,
 and results by pocket-size thirds. Rerun on the saved maps:
 `SWEEP_ONLY=1 sbatch src/slurm/region_test.sbatch`.
 
+## Apo vs holo test (set up, not yet run)
+
+PLINDER's links (downloaded to `$PLINDER_DIR/links/kind={apo,pred}/links.parquet`
+and `linked_structures/{apo,pred}.zip`) pair holo systems with apo PDB chains
+(up to 5 each) and AlphaFold models. On dataset_v1: apo links for 10,974
+systems (test 143, val 31), AlphaFold for 12,076. Apo pocket lDDT median 94
+(10% below 79); ~5% of links place the holo ligand into clashes (closed pocket).
+The zips hold one `<id>.cif` per linked chain in its OWN frame (not superposed).
+
+- `src/apo_pairs.py` (CPU): single-chain receptors, pocket identity >= 95,
+  strata A_near (pocket lDDT >= 95) / B_mild / C_large (< 85) / D_closed
+  (clash), 100 each, one per target protein, plus every val/test system
+  (`eval`); excludes the head's training receptors -> `apo_test/pairs.tsv`.
+- `src/apo_eval.py` (container): holo, holo rotated + resampled (noise floor),
+  apo, AlphaFold (pLDDT < 70 removed). Linked chains are matched by sequence
+  alignment, superposed on holo pocket C-alphas, trimmed to matched residues;
+  labels from the holo ligand. Reports AUROC/AP, site-vector cosine, and per
+  selector the top region's DCC, IoU, shift and vector cosine vs holo.
+- `test_encoder.py overfit --save_ckpt` saves the head; the dump now also
+  carries point embeddings. `src/slurm/apo_test.sbatch` trains once if the
+  checkpoint is missing, then evaluates.
+
 ## Next steps
 
-1. Run the follow-up sweep; pick the selector and make it the encoder default.
+1. Run the follow-up sweep and the apo test; pick the selector and make it
+   the encoder default.
 2. Decide how anchors are used in training: label predicted regions by IoU
    with the labelled pocket (positive / ignore / negative) instead of forcing
    the label in, so training and inference see the same kind of region; and
