@@ -31,6 +31,16 @@ and shape follow the pocket instead of a fixed radius.
                                     steps over candidates), take every surface
                                     point inside, suppress candidates inside,
                                     repeat. Fixed size; ranked by seed strength
+                                    (or `ball_rank` sum / sumsq inside the ball)
+                        nms         score-then-suppress balls: mean shift from
+                                    every candidate gives proposal centres;
+                                    each ball scored by the probability inside
+                                    it (`nms_score`); greedy NMS by point-set
+                                    IoU (`nms_iou`); stop below `nms_alpha` x
+                                    the best score
+                        compball    components choose and rank the pockets;
+                                    each becomes a ball of `ball_radius` at its
+                                    weighted centroid
                      4. drop regions under `min_points`; rank by total
                         probability (unless the method says otherwise);
                         keep the top k_pos
@@ -114,7 +124,7 @@ def candidates(prob, threshold, top_fraction=None):
 # ----------------------------------------------------------------------------
 # region construction
 # ----------------------------------------------------------------------------
-REGION_METHODS = ("watershed", "components", "ball")
+REGION_METHODS = ("watershed", "components", "ball", "nms", "compball")
 
 
 def watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
@@ -188,7 +198,7 @@ def component_regions(xyz, prob, threshold, link_radius, min_points, smooth_radi
 
 
 def ball_regions(xyz, prob, threshold, radius, min_points, smooth_radius,
-                 top_fraction=None, shift=1, suppress=None, cache=None):
+                 top_fraction=None, shift=1, suppress=None, rank_by="seed", cache=None):
     """Greedy NMS balls -> list of index tensors, in seed order (strongest
     first). Seed: the highest smoothed-probability candidate not yet
     suppressed. Centre: the seed, moved by `shift` mean-shift steps (centroid
@@ -196,6 +206,9 @@ def ball_regions(xyz, prob, threshold, radius, min_points, smooth_radius,
     in the pocket's void rather than on its rim. Region: every surface point
     within `radius` of the centre, candidate or not. Then candidates within
     `suppress` (default `radius`) of the centre are removed.
+
+    rank_by: "seed" keeps seed order; "sum" / "sumsq" re-rank the balls by the
+    total (squared) smoothed probability inside them.
 
     Euclidean, not geodesic: a ball can reach across a thin cleft. Pooling
     is probability-weighted, so low-probability points inside count little."""
@@ -222,14 +235,145 @@ def ball_regions(xyz, prob, threshold, radius, min_points, smooth_radius,
         region = (d2 < r2).nonzero().squeeze(1)
         if len(region) >= min_points:
             regions.append(region)
+    if rank_by != "seed":
+        weight = prob ** 2 if rank_by == "sumsq" else prob
+        regions.sort(key=lambda r: -float(weight[r].sum()))
     return regions
+
+
+def _mean_shift(pts, w, radius, iters=30, tol=0.01):
+    """Flat-kernel mean shift started from every point of `pts`, weighted by
+    w, run until no centre moves more than `tol` A -> (M, 3) end points."""
+    x = pts.clone()
+    r2 = radius * radius
+    for _ in range(iters):
+        k = (torch.cdist(x, pts) ** 2 < r2).float() * w
+        s = k.sum(1, keepdim=True)
+        new = torch.where(s > 0, (k @ pts) / s.clamp_min(1e-12), x)
+        moved = float((new - x).norm(dim=1).max())
+        x = new
+        if moved < tol:
+            break
+    return x
+
+
+def ball_proposals(xyz, prob, threshold, radius, smooth_radius, top_fraction=None,
+                   merge=2.0, cache=None):
+    """Ball proposals for nms_regions -> (centres (U, 3), members (U, N) bool).
+
+    Mean shift (radius `radius`) from every candidate over the candidates,
+    weighted by smoothed probability, so each start climbs to a local centre
+    of candidate mass - for a concave pocket, a point in its void. End points
+    within `merge` A of an already kept one (strongest start first) are the
+    same proposal. Members: every surface point within `radius` of a centre.
+    Depends only on the map and these arguments, so it is cached."""
+    key = ("proposals", float(radius), float(smooth_radius), top_fraction, float(threshold),
+           float(merge))
+    if cache is not None and key in cache:
+        return cache[key]
+    p = smoothed(xyz, prob, smooth_radius, cache)
+    cand = candidates(p, threshold, top_fraction).nonzero().squeeze(1)
+    if len(cand) == 0:
+        out = (xyz.new_zeros(0, 3), torch.zeros(0, len(xyz), dtype=torch.bool))
+    else:
+        ends = _mean_shift(xyz[cand], p[cand], radius)
+        kept = []
+        for i in torch.argsort(p[cand], descending=True).tolist():
+            if kept and float((torch.stack(kept) - ends[i]).norm(dim=1).min()) < merge:
+                continue
+            kept.append(ends[i])
+        centres = torch.stack(kept)
+        out = (centres, torch.cdist(centres, xyz) ** 2 < radius * radius)
+    if cache is not None:
+        cache[key] = out
+    return out
+
+
+def _nms(members, scores, iou_max, alpha, min_points):
+    """Greedy non-maximum suppression over point sets -> list of index tensors.
+    Highest score first; a set whose IoU with any kept set exceeds iou_max is
+    dropped; stop at the first set scoring below alpha x the best one."""
+    sizes = members.sum(1)
+    kept, best = [], None
+    for j in torch.argsort(scores, descending=True).tolist():
+        if int(sizes[j]) < min_points:
+            continue
+        if best is None:
+            best = float(scores[j])
+        elif float(scores[j]) < alpha * best:
+            break
+        if kept:
+            inter = (members[kept] & members[j]).sum(1)
+            iou = inter.float() / (sizes[kept] + sizes[j] - inter).float()
+            if float(iou.max()) > iou_max:
+                continue
+        kept.append(j)
+    return [members[j].nonzero().squeeze(1) for j in kept]
+
+
+def nms_regions(xyz, prob, threshold, radius, min_points, smooth_radius, top_fraction=None,
+                score="sum", iou_max=0.3, alpha=0.0, merge=2.0, cache=None):
+    """Score-then-suppress balls -> list of index tensors, best first.
+
+    1. proposals: mean-shift centres of candidate mass (ball_proposals)
+    2. score each ball by the total smoothed probability of the surface
+       points inside it ("sum"), or of its squares ("sumsq", favours balls of
+       confidently high points over balls of many middling ones)
+    3. greedy NMS: keep the best ball, drop balls overlapping a kept one by
+       IoU > iou_max, stop below alpha x the best score (alpha 0: no stop)."""
+    centres, members = ball_proposals(xyz, prob, threshold, radius, smooth_radius,
+                                      top_fraction, merge, cache)
+    if len(centres) == 0:
+        return []
+    p = smoothed(xyz, prob, smooth_radius, cache)
+    weight = p ** 2 if score == "sumsq" else p
+    return _nms(members, members.float() @ weight, iou_max, alpha, min_points)
+
+
+def component_ball_regions(xyz, prob, threshold, link_radius, radius, min_points,
+                           smooth_radius, top_fraction=None, shift=0, iou_max=0.3,
+                           cache=None):
+    """Balls placed on P2Rank-style components -> list of index tensors.
+    Components (component_regions) choose and rank the pockets; each becomes
+    a ball of `radius` around its probability-weighted centroid, moved by
+    `shift` mean-shift steps over the candidates. A ball overlapping a better
+    ranked one by IoU > iou_max is dropped."""
+    comps = component_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
+                              top_fraction, cache=cache)
+    if not comps:
+        return []
+    p = smoothed(xyz, prob, smooth_radius, cache)
+    w_cand = p * candidates(p, threshold, top_fraction)
+    r2 = radius * radius
+    centres = []
+    for c in comps:
+        centre = (p[c][:, None] * xyz[c]).sum(0) / p[c].sum().clamp_min(1e-12)
+        for _ in range(shift):
+            inside = ((xyz - centre) ** 2).sum(-1) < r2
+            w = w_cand[inside]
+            if float(w.sum()) <= 0:
+                break
+            centre = (w[:, None] * xyz[inside]).sum(0) / w.sum()
+        centres.append(centre)
+    members = torch.cdist(torch.stack(centres), xyz) ** 2 < r2
+    rank = torch.arange(len(centres), 0, -1, dtype=torch.float)  # keep component order
+    return _nms(members, rank, iou_max, 0.0, min_points)
 
 
 def pocket_regions(xyz, prob, method="watershed", threshold=0.5, top_fraction=None,
                    link_radius=2.0, smooth_radius=2.0, min_points=20, persistence=0.0,
-                   ball_radius=10.0, ball_shift=1, cache=None):
+                   ball_radius=10.0, ball_shift=1, ball_rank="seed", nms_score="sum",
+                   nms_iou=0.3, nms_alpha=0.0, merge_radius=2.0, cache=None):
     """Ranked pocket regions by `method` (see REGION_METHODS and the module
     docstring). Parameters a method does not use are ignored."""
+    if method == "nms":
+        return nms_regions(xyz, prob, threshold, ball_radius, min_points, smooth_radius,
+                           top_fraction, score=nms_score, iou_max=nms_iou, alpha=nms_alpha,
+                           merge=merge_radius, cache=cache)
+    if method == "compball":
+        return component_ball_regions(xyz, prob, threshold, link_radius, ball_radius,
+                                      min_points, smooth_radius, top_fraction,
+                                      shift=ball_shift, iou_max=nms_iou, cache=cache)
     if method == "watershed":
         return watershed_regions(xyz, prob, threshold, link_radius, min_points, smooth_radius,
                                  top_fraction, persistence=persistence, cache=cache)
@@ -238,7 +382,7 @@ def pocket_regions(xyz, prob, method="watershed", threshold=0.5, top_fraction=No
                                  top_fraction, cache=cache)
     if method == "ball":
         return ball_regions(xyz, prob, threshold, ball_radius, min_points, smooth_radius,
-                            top_fraction, shift=ball_shift, cache=cache)
+                            top_fraction, shift=ball_shift, rank_by=ball_rank, cache=cache)
     raise ValueError(f"unknown region method {method!r}; expected one of {REGION_METHODS}")
 
 
@@ -279,14 +423,15 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
                    smooth_radius=2.0, min_points=20, neg_quantile=0.5,
                    neg_size=None, neg_exclusion=4.0, neg_allowed=None,
                    forced=None, dup_overlap=0.5, generator=None,
-                   method="watershed", persistence=0.0, ball_radius=10.0, ball_shift=1):
+                   method="watershed", persistence=0.0, ball_radius=10.0, ball_shift=1,
+                   ball_rank="seed", nms_score="sum", nms_iou=0.3, nms_alpha=0.0):
     """Pocket and negative regions on one protein surface.
 
     xyz (N, 3), prob (N,) pocket probabilities in [0, 1].
     top_fraction: grow regions from this fraction of the protein's points
     (highest smoothed probability); overrides `threshold` when given.
-    method, persistence, ball_radius, ball_shift: how candidates become
-    regions, see pocket_regions().
+    method, persistence, ball_*, nms_*: how candidates become regions, see
+    pocket_regions().
     forced: list of index tensors taken as pocket regions first.
     neg_size: points per negative region; default the median pocket-region
     size, or 4 * min_points when there are none.
@@ -303,7 +448,8 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
     for f in pos:
         taken[f] = True
     for r in pocket_regions(xyz, prob, method, threshold, top_fraction, link_radius,
-                            smooth_radius, min_points, persistence, ball_radius, ball_shift):
+                            smooth_radius, min_points, persistence, ball_radius, ball_shift,
+                            ball_rank, nms_score, nms_iou, nms_alpha):
         if len(pos) == k_pos:
             break
         if taken[r].float().mean() > dup_overlap:

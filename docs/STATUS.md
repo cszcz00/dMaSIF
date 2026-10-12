@@ -1,6 +1,6 @@
 # Project status (handoff)
 
-Last updated after the second encoder test (job on alphagpu51). Branch:
+Last updated after the region-selector sweep (job 129929). Branch:
 `claude/sharp-franklin-42hmhj`. Read this first in a new session.
 
 ## Goal
@@ -81,29 +81,52 @@ Conclusions: point-level pocket scoring works and generalises (AP ~20x the
 (7-8 small regions, best covers 20-30%) under either threshold; region hit
 fails on coverage. The earlier "oversized regions" hypothesis was wrong.
 
-## Region-selector experiment (set up, not yet run)
+## Region-selector experiment (job 129929, alphagpu53)
 
-Back-of-envelope from the table: the labelled pocket is ~160-170 points (prec x
-size / cover), so regions of ~50 points with prec ~0.7 are pieces of the right
-pocket. Three ways of grouping candidates are now in `anchors.pocket_regions`
-(`method=`, also `EncoderConfig.region_method`; default unchanged):
+`src/slurm/region_test.sbatch`: train the head once (pretrained, 300 steps, 32
+train / 64 held-out), dump probability maps (`test_encoder.py overfit --dump`),
+then `src/region_sweep.py` scores every selector setting on the same maps.
+Methods live in `anchors.pocket_regions` (`method=`, also
+`EncoderConfig.region_method`; default still the old watershed).
 
-1. `watershed` + `persistence` (ToMATo merging; quantile units, 0 = old behaviour)
-2. `components`: P2Rank-style single-linkage clusters, ranked by sum p^2
-3. `ball`: greedy NMS balls of fixed radius, optional mean-shift centring
+Head: held AUROC 0.937, AP 0.470 (reproduces the 16-item result).
 
-Selection has no gradient, so all three are compared on one trained head:
-`src/slurm/region_test.sbatch` trains (pretrained, 300 steps), dumps the
-probability maps (`test_encoder.py overfit --dump`), then runs
-`src/region_sweep.py` over a grid of settings. It also reports two oracles: the
-labelled pockets' size / extent / pieces, and the candidate union's cover
-(the ceiling for options 1-2). Metrics add probability-weighted cover/prec and
-P2Rank's DCC (< 4 A). Prepare 96 items first so there are 64 held-out.
+Oracles (held): labelled pocket ~260 points (2.8% of the surface), extent ~18 A,
+Rg ~6 A; one piece at 3 A linkage (2 A splits off slivers). Candidate union
+covers 0.68 of the pocket at top 5% (prec 0.38), 0.80 at top 8%; smoothing
+radius makes no difference.
+
+| held-out, 64 | #reg | size | iou | cover | prec | hit | top1 | iou1 | dcc1 | dccA |
+|---|---|---|---|---|---|---|---|---|---|---|
+| old watershed (pers 0, link 2) | 7.2 | 53 | 0.18 | 0.20 | 0.65 | 0.00 | 0.00 | 0.16 | 0.23 | 0.58 |
+| watershed link 3, pers 0.02 | 1.7 | 373 | 0.39 | 0.66 | 0.48 | 0.73 | 0.69 | 0.35 | 0.38 | 0.47 |
+| components top 5%, link 3 | 1.5 | 406 | 0.38 | 0.68 | 0.45 | 0.70 | 0.66 | 0.34 | 0.33 | 0.41 |
+| ball R 8, 2 mean-shift steps | 7.1 | 293 | 0.53 | 0.70 | 0.63 | 0.84 | 0.64 | 0.34 | 0.44 | 0.77 |
+
+Conclusions: fragmentation was the whole problem for watershed/components -
+merged, they reach the candidate ceiling, but regions are ~1.5x the pocket
+(prec ~0.46). Balls (R 8 ~ pocket extent) give the best best-region (IoU 0.53,
+prec 0.63) and find the pocket most often, but always make ~7 balls and rank
+them by seed strength: top-ranked region is a tie across methods (top1
+0.64-0.69, iou1 ~0.34). Mean-shift centring always helps; smoothing barely
+matters; the head (top 5% misses 1/3 of the pocket) is now the limit.
+
+Follow-up, implemented, not yet run: `nms` (score-then-suppress: mean-shift
+proposals from every candidate, ball score = probability inside, greedy NMS by
+point-set IoU, stop below alpha x best), balls re-ranked by probability inside
+(`ball_rank`), and `compball` (components choose and rank, a ball shapes each).
+The sweep now also reports `on` (regions >= 30% pocket, i.e. duplicates),
+per-protein paired differences vs the ball leader with bootstrap intervals,
+and results by pocket-size thirds. Rerun on the saved maps:
+`SWEEP_ONLY=1 sbatch src/slurm/region_test.sbatch`.
 
 ## Next steps
 
-1. Run `region_test.sbatch`; pick a selector. Target: 1-2 regions per
-   protein, size ~ pocket size, cover > 0.5 at prec > 0.3.
-2. Default to the pretrained start.
-3. Then: ligand encoder + contrastive loss; full-scale surface extraction and
+1. Run the follow-up sweep; pick the selector and make it the encoder default.
+2. Decide how anchors are used in training: label predicted regions by IoU
+   with the labelled pocket (positive / ignore / negative) instead of forcing
+   the label in, so training and inference see the same kind of region; and
+   whether a ligand is scored against the top anchor or the best-matching one.
+3. Default to the pretrained start.
+4. Then: ligand encoder + contrastive loss; full-scale surface extraction and
    `labels.py` over dataset_v1; dataset_v2 (per-entry dedup, larger eval).

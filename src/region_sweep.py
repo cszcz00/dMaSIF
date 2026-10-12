@@ -1,7 +1,7 @@
 """Compare pocket-region selectors (anchors.py) on saved probability maps.
 
-Region selection has no gradient and no learned parameters, so all three
-options can be scored against the SAME trained pocket head: train once with
+Region selection has no gradient and no learned parameters, so every method
+can be scored against the SAME trained pocket head: train once with
 
     test_encoder.py overfit ... --dump maps.pt
 
@@ -12,7 +12,12 @@ then run every selector setting here over those maps. CPU only.
                 top_fraction merges everything connected
     components  option 2: P2Rank-style single-linkage clusters, ranked by
                 sum p^2
-    ball        option 3: greedy NMS balls of fixed radius
+    ball        option 3: greedy balls of fixed radius, seed order (the
+                reference, marked +), or re-ranked by probability inside
+    nms         score-then-suppress balls: mean-shift proposals, scored by
+                probability inside, NMS by point-set IoU, optional stop at
+                alpha x the best score
+    compball    components choose and rank the pockets, a ball shapes each
 
 Two oracle blocks come first, independent of any selector:
     pocket      the labelled pockets: points, share of the surface, extent
@@ -33,8 +38,19 @@ Per selector setting, over each protein's top --k_pos predicted regions:
     iou1          IoU of the top-ranked region
     dcc1, dccA    top-ranked / any region's probability-weighted centre within
                   4 A of the ligand centroid (P2Rank's DCC criterion)
+    on            regions that are >= 30% pocket. Above 1 means duplicates of
+                  the pocket, which training would have to label positive or
+                  ignore, not negative
     ms            selector time per protein, excluding neighbour lists and
-                  smoothing (shared by every setting, built once per protein)
+                  smoothing (shared by every setting, built once per protein);
+                  nms includes building its proposals
+
+Then, per method, the best setting by each --select metric, and for each:
+    paired        per-protein difference from the reference (+) on the same
+                  proteins: mean and 95% bootstrap interval. An interval that
+                  excludes 0 is a real difference on this sample
+    by size       top1 / hit / iou within thirds of the proteins by labelled
+                  pocket size, to see whether misses are small or large pockets
 
 Example (container, or any env with torch + numpy):
     python src/region_sweep.py --maps encoder_test/maps.pt \\
@@ -52,14 +68,18 @@ import torch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from anchors import (REGION_METHODS, _neighbors, candidates, pocket_regions,  # noqa: E402
-                     smoothed, watershed_regions)
+from anchors import (REGION_METHODS, _neighbors, ball_proposals, candidates,  # noqa: E402
+                     pocket_regions, smoothed, watershed_regions)
 
 METRICS = ["n", "size", "iou", "cover", "prec", "wcov", "wprec",
-           "hit", "top1", "iou1", "dcc1", "dccA", "ms"]
+           "hit", "top1", "iou1", "dcc1", "dccA", "on", "ms"]
+PAIRED = ["iou", "prec", "hit", "top1", "iou1", "dcc1", "dccA", "n"]
 # the encoder's current selector (EncoderConfig defaults), marked * in tables
 BASELINE = dict(method="watershed", top_fraction=0.05, smooth_radius=2.0,
                 link_radius=2.0, persistence=0.0)
+# the leader of the first sweep, marked + ; paired comparisons are against it
+REFERENCE = dict(method="ball", top_fraction=0.05, smooth_radius=2.0,
+                 ball_radius=8.0, ball_shift=2)
 
 
 # ----------------------------------------------------------------------------
@@ -85,17 +105,41 @@ def grid(methods):
                 for shift in (0, 2):
                     out.append(dict(method="ball", top_fraction=0.05, smooth_radius=sm,
                                     ball_radius=rad, ball_shift=shift))
+        for rad in (8.0, 10.0):
+            for rank in ("sum", "sumsq"):
+                out.append(dict(method="ball", top_fraction=0.05, smooth_radius=2.0,
+                                ball_radius=rad, ball_shift=2, ball_rank=rank))
+    if "nms" in methods:
+        for rad in (7.0, 8.0, 9.0, 10.0):
+            for sc in ("sum", "sumsq"):
+                for iou in (0.1, 0.3):
+                    for alpha in (0.0, 0.3, 0.6):
+                        out.append(dict(method="nms", top_fraction=0.05, smooth_radius=2.0,
+                                        ball_radius=rad, nms_score=sc, nms_iou=iou,
+                                        nms_alpha=alpha))
+    if "compball" in methods:
+        for rad in (8.0, 10.0):
+            for shift in (0, 2):
+                out.append(dict(method="compball", top_fraction=0.05, smooth_radius=2.0,
+                                link_radius=3.0, ball_radius=rad, ball_shift=shift))
     return out
 
 
 SHORT = {"top_fraction": "tf", "smooth_radius": "sm", "link_radius": "link",
-         "persistence": "pers", "ball_radius": "R", "ball_shift": "shift"}
+         "persistence": "pers", "ball_radius": "R", "ball_shift": "shift",
+         "ball_rank": "rank", "nms_score": "score", "nms_iou": "iou", "nms_alpha": "alpha"}
 
 
 def name(s):
-    star = "*" if s == BASELINE else " "
-    return star + s["method"] + " " + " ".join(f"{SHORT[k]}={v:g}" for k, v in s.items()
-                                               if k != "method")
+    mark = "*" if s == BASELINE else "+" if s == REFERENCE else " "
+    return mark + s["method"] + " " + " ".join(
+        f"{SHORT[k]}={v:g}" if isinstance(v, (int, float)) else f"{SHORT[k]}={v}"
+        for k, v in s.items() if k != "method")
+
+
+def group(s):
+    """Family a setting belongs to, for 'best per method'."""
+    return s["method"] + (" re-ranked" if "ball_rank" in s else "")
 
 
 # ----------------------------------------------------------------------------
@@ -152,31 +196,55 @@ def score(regions, it, a):
               prec=float(prec[b]), wcov=float(w_in[b] / prob[pocket].sum()),
               wprec=float(w_in[b] / (w_all[b] + 1e-12)), hit=float(ok.any()),
               top1=float(ok[0]), iou1=float(iou[0]), dcc1=float(dcc[0] < a.dcc),
-              dccA=float((dcc < a.dcc).any()))
+              dccA=float((dcc < a.dcc).any()), on=float((prec >= a.min_prec).sum()))
     return st
 
 
 def warm(it, settings, cache):
-    """Build every neighbour list and smoothed map the settings need, once."""
-    for s in settings:
+    """Build every neighbour list, smoothed map and nms proposal set the
+    settings need, once -> {setting index: ms spent on its proposals}."""
+    proposal_ms, extra = {}, {}
+    for j, s in enumerate(settings):
         smoothed(it["xyz"], it["prob"], s["smooth_radius"], cache)
-        if s["method"] != "ball":
+        if "link_radius" in s:
             _neighbors(it["xyz"], s["link_radius"], cache)
+        if s["method"] == "nms":
+            key = (s["ball_radius"], s["smooth_radius"], s["top_fraction"])
+            if key not in proposal_ms:
+                t = time.perf_counter()
+                ball_proposals(it["xyz"], it["prob"], 0.5, s["ball_radius"], s["smooth_radius"],
+                               s["top_fraction"], 2.0, cache)
+                proposal_ms[key] = 1e3 * (time.perf_counter() - t)
+            extra[j] = proposal_ms[key]
+    return extra
+
+
+def paired(a_rows, b_rows, metric, n_boot=2000, seed=0):
+    """Mean per-protein difference a - b and its 95% bootstrap interval."""
+    d = np.array([x[metric] - y[metric] for x, y in zip(a_rows, b_rows)], dtype=float)
+    d = d[~np.isnan(d)]
+    if not len(d):
+        return np.nan, np.nan, np.nan
+    boot = d[np.random.default_rng(seed).integers(0, len(d), (n_boot, len(d)))].mean(1)
+    return d.mean(), np.percentile(boot, 2.5), np.percentile(boot, 97.5)
 
 
 # ----------------------------------------------------------------------------
 # reporting
 # ----------------------------------------------------------------------------
+W = 56  # setting-name column
+
+
 def fmt_row(label, vals):
-    return (f"{label:44s} {vals['n']:5.1f} {vals['size']:6.0f} {vals['iou']:5.2f} "
+    return (f"{label:{W}s} {vals['n']:5.1f} {vals['size']:6.0f} {vals['iou']:5.2f} "
             f"{vals['cover']:5.2f} {vals['prec']:5.2f} {vals['wcov']:5.2f} {vals['wprec']:5.2f} "
             f"{vals['hit']:5.2f} {vals['top1']:5.2f} {vals['iou1']:5.2f} {vals['dcc1']:5.2f} "
-            f"{vals['dccA']:5.2f} {vals['ms']:6.0f}")
+            f"{vals['dccA']:5.2f} {vals['on']:5.1f} {vals['ms']:6.0f}")
 
 
-HEADER = (f"{'setting':44s} {'#reg':>5s} {'size':>6s} {'iou':>5s} {'cover':>5s} {'prec':>5s} "
+HEADER = (f"{'setting':{W}s} {'#reg':>5s} {'size':>6s} {'iou':>5s} {'cover':>5s} {'prec':>5s} "
           f"{'wcov':>5s} {'wprec':>5s} {'hit':>5s} {'top1':>5s} {'iou1':>5s} {'dcc1':>5s} "
-          f"{'dccA':>5s} {'ms':>6s}")
+          f"{'dccA':>5s} {'on':>5s} {'ms':>6s}")
 
 
 def mean_stats(rows):
@@ -197,7 +265,9 @@ def main():
     ap.add_argument("--min_prec", type=float, default=0.3)
     ap.add_argument("--dcc", type=float, default=4.0, help="A; DCC success cutoff")
     ap.add_argument("--select_on", default="held",
-                    help="split whose mean IoU picks each method's best setting")
+                    help="split on which each method's best setting is picked")
+    ap.add_argument("--select", default="iou,top1",
+                    help="metrics that pick each method's best setting, one summary each")
     a = ap.parse_args()
 
     blob = torch.load(a.maps, map_location="cpu", weights_only=False)
@@ -218,17 +288,17 @@ def main():
         cache = {}
         pocket_rows[it["split"]].append(pocket_oracle(it))
         cand_rows[it["split"]].append(candidate_oracle(it, cache))
-        warm(it, settings, cache)
+        extra = warm(it, settings, cache)
         for j, s in enumerate(settings):
             t = time.perf_counter()
             regions = pocket_regions(it["xyz"], it["prob"], min_points=a.min_points,
                                      cache=cache, **s)
             ms = 1e3 * (time.perf_counter() - t)
             st = score(regions, it, a)
-            st["ms"] = ms
+            st["ms"] = ms + extra.get(j, 0.0)
             results[it["split"]][j].append(st)
             per_item.append({"id": it["id"], "split": it["split"], "setting": name(s).strip(),
-                             **st})
+                             "pocket_pts": int(it["pocket"].sum()), **st})
         print(f"  {n + 1}/{len(items)} {it['id']} ({len(it['xyz'])} points) "
               f"{time.time() - t0:.0f}s", flush=True)
 
@@ -253,29 +323,67 @@ def main():
             print(f"  {sm:6g} " + " ".join(f"{x:>13s}" for x in cells))
 
         print("\n" + HEADER)
-        method = None
+        fam = None
         for s, rows in zip(settings, results[sp]):
-            if s["method"] != method:
-                method = s["method"]
-                print(f"--- {method}")
+            if group(s) != fam:
+                fam = group(s)
+                print(f"--- {fam}")
             print(fmt_row(name(s), mean_stats(rows)))
 
     sel = a.select_on if pocket_rows.get(a.select_on) else splits[0]
-    print(f"\n===== best setting per method, by mean IoU on {sel} =====")
-    print(f"{'':6s}" + HEADER)
-    for m in a.methods.split(","):
-        idx = [j for j, s in enumerate(settings) if s["method"] == m]
-        if not idx:
-            continue
-        best = max(idx, key=lambda j: mean_stats(results[sel][j])["iou"])
-        for sp in splits:
-            if results[sp][best]:
-                print(f"{sp:6s}" + fmt_row(name(settings[best]), mean_stats(results[sp][best])))
-    if BASELINE in settings:
-        j = settings.index(BASELINE)
-        for sp in splits:
-            if results[sp][j]:
-                print(f"{sp:6s}" + fmt_row(name(BASELINE), mean_stats(results[sp][j])))
+    families = list(dict.fromkeys(group(s) for s in settings))
+    marked = [x for x in (REFERENCE, BASELINE) if x in settings]
+    chosen = []  # setting indices to compare, in order of first appearance
+    for metric in a.select.split(","):
+        print(f"\n===== best setting per method, by mean {metric} on {sel} =====")
+        print(f"{'':6s}" + HEADER)
+        for fam in families:
+            idx = [j for j, s in enumerate(settings) if group(s) == fam]
+            best = max(idx, key=lambda j: mean_stats(results[sel][j])[metric])
+            chosen.append(best)
+            for sp in splits:
+                if results[sp][best]:
+                    print(f"{sp:6s}" + fmt_row(name(settings[best]),
+                                               mean_stats(results[sp][best])))
+        for x in marked:
+            j = settings.index(x)
+            for sp in splits:
+                if results[sp][j]:
+                    print(f"{sp:6s}" + fmt_row(name(x), mean_stats(results[sp][j])))
+    chosen = list(dict.fromkeys(chosen))
+
+    if REFERENCE in settings and results[sel][settings.index(REFERENCE)]:
+        ref = settings.index(REFERENCE)
+        print(f"\n===== paired difference from {name(REFERENCE).strip()} on {sel}: "
+              f"mean [95% bootstrap interval] over the same proteins =====")
+        print(f"{'setting':{W}s} " + " ".join(f"{m:>19s}" for m in PAIRED))
+        for j in chosen:
+            if j == ref:
+                continue
+            cells = []
+            for m in PAIRED:
+                d, lo, hi = paired(results[sel][j], results[sel][ref], m)
+                flag = "!" if lo > 0 or hi < 0 else " "
+                cells.append(f"{d:+5.2f} [{lo:+5.2f},{hi:+5.2f}]{flag}")
+            print(f"{name(settings[j]):{W}s} " + " ".join(f"{c:>19s}" for c in cells))
+        print("! = interval excludes 0")
+
+    sizes = np.array([r["points"] for r in pocket_rows[sel]], dtype=float)
+    if len(sizes) >= 6:
+        cuts = np.quantile(sizes, [1 / 3, 2 / 3])
+        third = np.digitize(sizes, cuts)
+        labels = [f"<{cuts[0]:.0f}", f"{cuts[0]:.0f}-{cuts[1]:.0f}", f">{cuts[1]:.0f}"]
+        print(f"\n===== by labelled pocket size on {sel} (points; thirds of proteins): "
+              f"top1 / hit / iou =====")
+        print(f"{'setting':{W}s} " + " ".join(f"{x:>18s}" for x in labels))
+        show = chosen + [settings.index(x) for x in marked if settings.index(x) not in chosen]
+        for j in show:
+            cells = []
+            for t in range(3):
+                rows = [r for r, k in zip(results[sel][j], third) if k == t]
+                ms = mean_stats(rows)
+                cells.append(f"{ms['top1']:4.2f} / {ms['hit']:4.2f} / {ms['iou']:4.2f}")
+            print(f"{name(settings[j]):{W}s} " + " ".join(f"{c:>18s}" for c in cells))
 
     if a.out:
         lines = ["\t".join(["split", "setting", "items"] + METRICS)]
@@ -288,7 +396,7 @@ def main():
         Path(a.out).write_text("\n".join(lines) + "\n")
         print(f"\n{a.out}")
     if a.per_item:
-        cols = ["id", "split", "setting"] + METRICS
+        cols = ["id", "split", "setting", "pocket_pts"] + METRICS
         Path(a.per_item).write_text(
             "\t".join(cols) + "\n"
             + "".join("\t".join(str(r[c]) for c in cols) + "\n" for r in per_item))

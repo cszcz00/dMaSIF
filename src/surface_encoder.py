@@ -64,10 +64,14 @@ class EncoderConfig:
     k_neg: int = 8
     region_top_fraction: float | None = 0.05  # grow regions from each protein's top 5% ...
     region_threshold: float = 0.5             # ... or, if top_fraction is None, from p >= this
-    region_method: str = "watershed"       # watershed | components | ball (anchors.py)
+    region_method: str = "watershed"       # watershed | components | ball | nms | compball
     region_persistence: float = 0.0        # watershed merge threshold, quantile units
-    region_ball_radius: float = 10.0       # A; ball method
+    region_ball_radius: float = 10.0       # A; ball, nms, compball
     region_ball_shift: int = 1             # mean-shift steps for the ball centre
+    region_ball_rank: str = "seed"         # ball: seed | sum | sumsq
+    region_nms_score: str = "sum"          # nms: sum | sumsq of probability in the ball
+    region_nms_iou: float = 0.3            # nms / compball: suppress above this IoU
+    region_nms_alpha: float = 0.0          # nms: stop below alpha x best score
     link_radius: float = 2.0               # A; points closer are neighbours
     smooth_radius: float = 2.0             # A; probability smoothing
     min_region_points: int = 20
@@ -188,7 +192,9 @@ class SurfaceEncoder(nn.Module):
                 neg_exclusion=c.neg_exclusion, neg_allowed=neg_ok,
                 forced=None if forced is None else forced[b], generator=generator,
                 method=c.region_method, persistence=c.region_persistence,
-                ball_radius=c.region_ball_radius, ball_shift=c.region_ball_shift)
+                ball_radius=c.region_ball_radius, ball_shift=c.region_ball_shift,
+                ball_rank=c.region_ball_rank, nms_score=c.region_nms_score,
+                nms_iou=c.region_nms_iou, nms_alpha=c.region_nms_alpha)
             n = len(regions)
             if n:
                 vec[b, :n] = pool_regions(emb[sel], prob[sel], regions)

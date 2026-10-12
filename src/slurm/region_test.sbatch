@@ -18,6 +18,7 @@
 #
 # Overrides: N_TRAIN (32), N_HOLD (64), STEPS (300).
 # SWEEP_ONLY=1 reuses an existing maps.pt and only reruns step 2.
+# SWEEP_ARGS passes extra options to region_sweep.py, e.g. "--methods ball,nms,compball".
 set -e
 module load apptainer
 cd $WORK
@@ -40,4 +41,4 @@ fi
 
 echo "=== region sweep: watershed+persistence / components / NMS balls ==="
 $EXEC python $WORK/src/region_sweep.py --maps $MAPS \
-    --out $OUT/region_sweep_${STEPS}.tsv --per_item $OUT/region_items_${STEPS}.tsv
+    --out $OUT/region_sweep_${STEPS}.tsv --per_item $OUT/region_items_${STEPS}.tsv ${SWEEP_ARGS:-}
