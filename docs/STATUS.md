@@ -9,8 +9,10 @@ training (branch `claude/model-training`, which starts from the same commit).
 Contrastive protein-ligand retrieval. Protein side: dMaSIF surface features +
 convolution (retrained), a per-point pocket head, and K pooled **region**
 anchors per protein compared against ligand vectors. Built and tested: the
-protein encoder up to the anchors. **Not built yet: the ligand encoder, the
-contrastive loss, the training loop, full-scale data loading.**
+protein encoder up to the anchors. Built, not yet run: the ligand encoder
+(`src/ligand_encoder.py`) and the frozen-anchor retrieval probe that picks
+between its arms. **Not built yet: the contrastive training loop over both
+sides, and full-scale data loading.**
 
 ## How we work
 
@@ -107,6 +109,54 @@ regions: low-probability patches, farthest-point seeded, sized like the pocket
 regions. In training the labelled pocket is currently `forced` in as the first
 positive region (see open decisions).
 
+## Ligand encoder (`src/ligand_encoder.py`, `src/ligand_features.py`)
+
+Decision: **a small encoder trained from scratch, with fingerprint baselines as
+controls**, not an off-the-shelf pretrained model. The reasons are all about
+matching the protein side:
+
+- **Capacity.** The protein branch is dMaSIFConv_seg at 16 dims over 3 layers
+  (~10^5 parameters). dataset_v1 has 8,378 distinct ligands and heavy target
+  concentration, so a large ligand branch can drive the loss down by
+  memorising ligands, and `max` over anchors lets it ignore the protein. Every
+  arm here is 10^5-10^6 parameters.
+- **Cost.** A step is thousands of surface points through KeOps plus CPU region
+  selection; a ligand is ~30 heavy atoms. Freezing the ligand side would save
+  nothing and give up the gradient, so every arm trains end-to-end.
+- **Evidence.** A 2026 benchmark of 25 pretrained embedding models over 25
+  datasets (arXiv 2508.06199) finds nearly all of them no better than plain
+  ECFP under frozen-embedding evaluation, with GNN-learned representations
+  weaker than fingerprints. DrugCLIP's own ablation (DrugBA, same Uni-Mol
+  encoder, regression objective: 69.5 vs 80.9 AUROC on DUD-E) says the
+  contrastive formulation carried its result, not the pretrained encoder.
+  So a pretrained encoder would cost a container rebuild, a 2048-dim
+  projection and unknown PLINDER leakage for little expected gain.
+
+Arms, all mapping to one 128-dim normalised vector and differing by one config
+field (`LigandConfig.arm`):
+
+| arm | input | params | role |
+|---|---|---|---|
+| `fp` | ECFP4 2048 -> MLP | 1.11 M | baseline; fingerprints already exist |
+| `fp_linear` | ECFP4 2048 -> Linear | 0.26 M | capacity control for `fp` |
+| `desc` | 33 physchem descriptors -> MLP | 0.04 M | size / polarity / shape only |
+| `fp_desc` | both, concatenated | 1.13 M | does shape add to substructure |
+| `gnn` | GINE over the heavy-atom graph | 0.32 M | the intended model |
+| `frozen` | a precomputed embedding -> Linear | varies | unused unless `--lig_emb` is given |
+
+`fp`'s parameters are nearly all in the first layer of a 2048-wide input, so
+`fp` vs `gnn` is not capacity-matched on its own; `fp_linear` separates "more
+parameters" from "better features". `desc` exists because ECFP identifies
+substructures but says nothing about extent or polarity, which is what a
+surface patch can be complementary to.
+
+Features are 2D and hydrogen-free, from `ligand_features.py` in the CPU venv
+(rdkit), packed into one `ligand_feats.npz` of plain arrays so the container
+never needs rdkit. 2D deliberately: the crystal pose would leak the answer,
+since a screening candidate has no pose. GINE is implemented directly on
+`index_add_` / `scatter_reduce` instead of importing PyG, so the whole ligand
+side and every test of it runs on plain CPU torch.
+
 ## Results so far
 
 **Pocket head** (pretrained start, 300 steps, 32 training receptors, pocket BCE
@@ -139,7 +189,24 @@ head (candidates miss 1/3 of the pocket) is now the main limit.
 1. **Follow-up sweep** (nms, re-ranked balls, compball, duplicate count `on`,
    paired bootstrap vs the ball leader, results by pocket size):
    `SWEEP_ONLY=1 sbatch src/slurm/region_test.sbatch`.
-2. **Apo vs holo test**: `python src/apo_pairs.py --links $PLINDER_DIR/links
+2. **Ligand-arm probe** (`src/slurm/probe_retrieval.sbatch`), **blocked on the
+   apo test's checkpoint** `encoder_test/head_pretrained_300.pt`. Which ligand
+   encoder pairs with real surface anchors, on FROZEN protein anchors, in one
+   GPU pass plus minutes of CPU. First, in the CPU venv:
+   ```
+   python src/probe_retrieval.py prepare --index datasets/dataset_v1/index.parquet \
+       --exclude encoder_test/items.tsv --n 1500 --out probe/
+   python src/ligand_features.py --index datasets/dataset_v1/index.parquet --out probe/
+   ```
+   then `LIMIT=10 sbatch src/slurm/probe_retrieval.sbatch` as a check, then the
+   full run. `PROBE_ONLY=1` reruns only the arm comparison on an existing
+   `anchors.pt`, so arms and hyperparameters can be swept without the GPU.
+   Read `probe/arms.tsv`: `mrr` against `mrr0` (untrained) and `chance`
+   (random), `oracle_mrr` for the headroom in anchor ranking rather than in the
+   ligand encoder. These numbers rank the arms; they do NOT predict end-to-end
+   performance, because the protein side is frozen and its head saw 32
+   receptors for 300 steps.
+3. **Apo vs holo test**: `python src/apo_pairs.py --links $PLINDER_DIR/links
    --index datasets/dataset_v1/index.parquet --exclude encoder_test/items.tsv
    --out apo_test/` (CPU), then `LIMIT=10 sbatch src/slurm/apo_test.sbatch`
    as a check, then the full run. First run trains + saves the head checkpoint
@@ -151,26 +218,47 @@ head (candidates miss 1/3 of the pocket) is now the main limit.
 
 ## Open design decisions (needed for training)
 
+Decisions 2-5 now have a WORKING IMPLEMENTATION in `probe_retrieval.py`,
+exercised only against frozen anchors so far. The training loop should reuse
+those functions rather than re-deriving them.
+
 1. **Which selector** becomes the default (after the pending sweep + apo test).
-2. **How a ligand is scored against a protein's anchors**: top-ranked anchor
-   only, or max over pocket anchors (multiple-instance). Decides whether top-1
-   or hit metrics matter and how strict the selector's stopping rule is.
-3. **Training labels for regions**: replace "force the labelled pocket in" with
-   labels on the selector's own regions by IoU with the labelled pocket
-   (positive / ignore / negative), so training and inference see the same kind
-   of region. Near-duplicates of the pocket (`on` > 1) must be ignored, not
-   used as negatives.
-4. **Other real sites**: a receptor can bind other ligands elsewhere
-   (`labels.py` builds `receptor_union`); those regions must not be negatives.
-5. **Batch negatives**: mask same-cluster ligands/pockets
-   (`pli_unique_qcov__95__strong__component`, `system_pocket_UniProt`) and
-   balance sampling across targets.
+   Still open. It is a config field everywhere, not code: the probe's sbatch
+   passes the sweep's current leader (`--region_method ball --ball_radius 8
+   --ball_shift 2`) and `EncoderConfig`'s default is left at the old
+   `watershed` so earlier results stay reproducible.
+2. **How a ligand is scored against a protein's anchors**: settled as **max
+   over the selector's pocket anchors** (multiple-instance,
+   `ProbeModel.scores`), because anchor recall is far above top-1 for balls
+   (hit 0.84 vs top1 0.64). Negative patches are never scored at inference.
+   `--oracle` reports the score restricted to pocket-matching anchors, which
+   bounds what better anchor RANKING could buy.
+3. **Training labels for regions**: implemented in
+   `probe_retrieval.region_labels`. positive = cover >= 0.5 and prec >= 0.3
+   (the `hit` rule); ignore = any other region with cover or prec >= 0.1,
+   near-duplicates included; negative = the rest. Nothing is forced in.
+   Still open: what to do when NO region is positive (the design proposes a
+   fallback ball at the labelled pocket's centroid, shaped like the selector's
+   own regions, with the rate logged); the probe simply reports the rate.
+4. **Other real sites**: handled by `--other_ligands`, a `labels.py` output
+   directory, read for its `lig_xyz` COORDINATES. Note `receptor_union.npz`
+   cannot be used for this: it stores point INDICES against the surface it was
+   written on, and anything that resamples a surface gets unrelated points -
+   the failure labels.py's own docstring warns about.
+5. **Batch negatives**: implemented. `mask_pairs` masks a pair sharing a target
+   group (`system_pocket_UniProt`, falling back to
+   `pli_unique_qcov__95__strong__component`), the same ligand, or ECFP4
+   Tanimoto >= 0.8; masked pairs leave the denominator entirely rather than
+   training as negatives. `sample_weights(alpha=1)` makes sampling uniform over
+   targets and `draw_batch` allows at most one row per group per batch.
 
 ## Next steps (model training, on `claude/model-training`)
 
-1. Ligand encoder (none exists yet; ECFP4 fingerprints are in
-   `meta/ligand_fps.npy` / `datasets/dataset_v1/ligand_fps.npy` as a baseline
-   input) and the contrastive loss over anchor vectors.
+1. Run the ligand-arm probe (pending job 2) once the checkpoint exists, pick
+   the arm, and record the table here. Then the contrastive loss over anchor
+   vectors in a real training loop: `probe_retrieval.info_nce` and its
+   false-negative masking are written and self-tested, but against frozen
+   anchors only.
 2. Data pipeline for full-scale training: surfaces cached once
    (`src/extract.py` -> `feats/`), pocket labels (`src/labels.py` +
    `pocket_qc.parquet`), a dataset/loader with target-balanced sampling.
@@ -194,8 +282,11 @@ head (candidates miss 1/3 of the pocket) is now the main limit.
 | `probe_pocket.py` | earlier probe: do frozen dMaSIF embeddings separate pockets |
 | `dmasif_compat.py` | imports the vendored dMaSIF under modern PyTorch |
 | `surface_encoder.py` | protein encoder (`EncoderConfig`, `SurfaceEncoder`, `pocket_loss`) |
+| `ligand_features.py` | SMILES -> ECFP4 + descriptors + 2D graph, packed (CPU venv, rdkit) |
+| `ligand_encoder.py` | ligand arms (`LigandConfig`, `LigandEncoder`, `LigandData`); `python src/ligand_encoder.py` self-tests |
+| `probe_retrieval.py` | frozen-anchor retrieval probe: `prepare` / `dump` / `probe` / `selftest` |
 | `anchors.py` | region selectors, negatives, pooling |
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
-| `slurm/` | `encoder_test`, `region_test`, `apo_test`, build / fetch / smoke jobs; `dmasif.def` container |
+| `slurm/` | `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, build / fetch / smoke jobs; `dmasif.def` container |

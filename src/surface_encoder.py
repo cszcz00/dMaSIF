@@ -148,6 +148,11 @@ class SurfaceEncoder(nn.Module):
             point_emb     (N, E)       conv output
             pocket_logit  (N,)         per-point pocket score
             anchor_vec    (B, K, D)    the representation-space vectors
+            anchor_pooled (B, K, E)    the pooled region embeddings BEFORE the
+                                       projection. Dumped by probe_retrieval.py:
+                                       the projection is the part the contrastive
+                                       loss has to learn, so freezing its current
+                                       random weights would freeze noise.
             anchor_valid  (B, K)       False for empty slots
             anchor_is_pos (B, K)       True for pocket regions, False for negatives
             anchor_center (B, K, 3)    probability-weighted region centroid
@@ -210,7 +215,8 @@ class SurfaceEncoder(nn.Module):
         return {
             "xyz": xyz, "normals": normals, "batch": batch,
             "input_feats": feats, "point_emb": emb, "pocket_logit": logit,
-            "anchor_vec": out * valid[..., None], "anchor_valid": valid,
+            "anchor_vec": out * valid[..., None], "anchor_pooled": vec,
+            "anchor_valid": valid,
             "anchor_is_pos": is_pos, "anchor_center": center, "anchor_size": size,
             "anchor_regions": all_regions,
         }
