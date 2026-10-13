@@ -1,155 +1,201 @@
 # Project status (handoff)
 
-Last updated after the region-selector sweep (job 129929). Branch:
-`claude/sharp-franklin-42hmhj`. Read this first in a new session.
+Read this first in a new session. Last updated 2026-10-13, at the hand-off from
+the anchor-selection work (branch `claude/sharp-franklin-42hmhj`) to model
+training (branch `claude/model-training`, which starts from the same commit).
 
 ## Goal
 
 Contrastive protein-ligand retrieval. Protein side: dMaSIF surface features +
 convolution (retrained), a per-point pocket head, and K pooled **region**
-anchors per protein compared against ligand vectors. Ligand side and the
-contrastive loss are **not built yet**.
+anchors per protein compared against ligand vectors. Built and tested: the
+protein encoder up to the anchors. **Not built yet: the ligand encoder, the
+contrastive loss, the training loop, full-scale data loading.**
+
+## How we work
+
+- The user runs everything on the HPC (sbatch / login node). Claude writes
+  code, commits and pushes; it does not run jobs. Changes reach the HPC by
+  `git pull` on the working branch.
+- Every experiment gets: a script with a docstring saying what it measures and
+  how to read it, an sbatch file, and results recorded here.
+- Prefer comparing methods on the SAME trained head / maps (dump once, sweep
+  offline on CPU) over retraining per variant.
 
 ## Layout and environments
 
 - Repo root = `$WORK` = `/mnt/home/cjs2301/dmasif` on the HPC. `dMaSIF/` is the
-  vendored upstream (+ PyTorch 2 fixes), `src/` is ours. Data dirs
-  (`meta/ structures/ systems/ datasets/ feats/ keops_cache/`) are gitignored.
-- CPU work: `~/venvs/plinder` (`envs/cpu-requirements.txt`). GPU work: the
-  Apptainer container `dmasif_sandbox` from `src/slurm/dmasif.def`.
-- Container base is **NGC PyTorch 25.06** (CUDA 12.9, Python 3.12, torch 2.8,
-  PyG 2.8, pykeops 2.2.3, numpy 1.26). Rebuilt because the cluster sends every
-  single-GPU job (`--gres=gpu:1`) to the **RTX PRO 6000 Blackwell** pool
-  (sm_120); typed GRES requests get rewritten back to that pool. Verified with
-  `SMOKE_TEST_PASSED` on alphagpu52.
-- `$KEOPS_CACHE_FOLDER` must be set in the submitting shell; jobs pass it in.
+  vendored upstream (+ PyTorch 2 fixes), `src/` is ours. Data and outputs
+  (`meta/ structures/ systems/ datasets/ feats/ keops_cache/ encoder_test/
+  apo_test/`) are gitignored.
+- CPU work: `~/venvs/plinder` (`envs/cpu-requirements.txt`; pandas, pyarrow,
+  rdkit; **no torch, no Biopython**). GPU work: Apptainer container
+  `$WORK/dmasif_sandbox` from `src/slurm/dmasif.def`: NGC PyTorch 25.06 (CUDA
+  12.9, Python 3.12, torch 2.8, PyG 2.8, pykeops 2.2.3, numpy 1.26, Biopython).
+  Single-GPU jobs land on the RTX PRO 6000 Blackwell pool (sm_120); the
+  container is built for it.
+- `$KEOPS_CACHE_FOLDER` and `$PLINDER_DIR` must be set in the submitting shell.
+- Log noise that is harmless: `not a valid test operator` and the nvidia-smi
+  bind-mount INFO lines (container entrypoint).
 
-## Data (all downloaded, verified by `src/inspect_data.py`)
+## Data
 
-- `meta/manifest.parquet`: 341,945 rows (one per system x proper ligand),
-  307,337 systems, 223,972 receptors, PLINDER 2024-06/v2, loose build of
-  `src/build_manifest.py` (`pass_*` flags, `strict_rep`).
-- `structures/<receptor_key>.cif`: PLINDER receptor.cif = whole protein chains
-  with any atom within 6 A of any system ligand, from one biological assembly,
-  plus PLIP-interacting waters. No ligands.
-- `systems/<system_id>/`: `system.cif` (receptor + ligand chains, same frame)
-  and `ligand_files/<chain>.sdf` (crystal coordinates, bond orders checked
-  against SMILES; not generated conformers).
-- IDs: `system_id = pdb__assembly__receptorchains__ligandchains`, chains are
+PLINDER 2024-06/v2. Local copy `$PLINDER_DIR = /mnt/home/cjs2301/plinder/2024-06/v2`:
+
+| folder | contents |
+|---|---|
+| `index/annotation_table.parquet` | PLINDER's main table, 1 GB, ~745 columns, one row per (system, ligand) |
+| `splits/split.parquet` | system_id -> train / val / test (+ uniqueness) |
+| `fingerprints/ligands_per_system.parquet` | per-system ligand info incl. SMILES |
+| `links/kind={apo,pred}/links.parquet` | holo system (`reference_system_id`) -> apo PDB chain / AlphaFold model (`id`), with pocket_lddt, pocket_fident, clash checks. 433,865 apo / 163,816 pred rows; up to 5 apo links per system |
+| `linked_structures/{apo,pred}.zip` (+ unpacked `apo/`, `pred/`) | one `<id>.cif` per linked chain, 29,270 apo / 11,687 AlphaFold; each in its OWN frame (not superposed); every linked id has a file |
+
+Ours, under `$WORK`:
+- `meta/manifest.parquet` (`src/build_manifest.py`): 341,945 rows (system x
+  proper ligand), 37 PLINDER columns + split + `pass_*` filter flags,
+  `pass_all`, `strict_rep`, `receptor_key`; plus `receptors.txt`,
+  `ligand_fps.npy` (ECFP4).
+- `structures/<receptor_key>.cif`: PLINDER receptor.cif (chains with an atom
+  within 6 A of a system ligand, one biological assembly, + PLIP waters; no
+  ligand). `systems/<system_id>/`: `system.cif` + `ligand_files/<chain>.sdf`
+  (crystal coordinates). Fetched by `src/fetch_structures.py`.
+- IDs: `system_id = pdb__assembly__receptorchains__ligandchains`, chains
   `<copy>.<label_asym_id>`; `ligand_id = pdb__assembly__ligandchain`;
-  `receptor_key` (ours) = first three fields.
+  `receptor_key` = first three fields.
 
 ## Dataset
 
-`configs/datasets/dataset_v1.yaml` -> `datasets/dataset_v1/` (built, provenance
-clean at f06c952): `strict_rep` and `n_ligand_chains == 1`. 21,209
+`configs/datasets/dataset_v1.yaml` -> `datasets/dataset_v1/index.parquet`
+(`src/build_dataset.py`, receptor input policy `plinder_receptor` in
+`src/receptor_inputs.py`): `strict_rep` and one ligand chain. 21,209
 interactions, 19,782 receptors, 8,378 ligands; splits 20,810 / 94 / 305.
 
 Known issues, not yet acted on:
 - val/test far too small (PLINDER's own val/test are 891 / 1,120 overall).
-- Symmetry copies survive dedup (TRP: 507 rows from 57 entries, each its own
-  cluster); proposed `pdb_id` dedup -> dataset_v2.
-- Heavy target concentration (PDE10A 747, SARS-CoV-2 Mpro 538, BACE1 418;
-  pocket cluster c0 = 14%); handle by balanced sampling and same-cluster
-  negative masking in training, not by deleting rows.
-- Hydrogens inconsistent across structures (tests strip them).
+- Symmetry copies survive dedup (TRP: 507 rows from 57 entries); proposed
+  per-`pdb_id` dedup -> dataset_v2.
+- Heavy target concentration (PDE10A 747, SARS-CoV-2 Mpro 538, BACE1 418);
+  handle by balanced sampling and same-cluster negative masking, not deletion.
+- Hydrogens inconsistent across structures (encoder tests strip them).
+- Receptor input lacks assembly chains PLINDER did not assign, so some buried
+  interfaces look exposed (`full_assembly` policy reserved, not implemented).
 
 ## Protein encoder (`src/surface_encoder.py`, `src/anchors.py`)
 
-atoms -> dMaSIF surface -> curvatures + AtomNet_MP (16 feats) -> dMaSIFConv_seg
-(trainable; `load_pretrained()` starts from the search checkpoint) -> pocket head
-(per-point logit) -> region anchors -> probability-weighted pooling -> projection.
+Input: receptor atoms only (`extract.load_protein_atoms`: protein residues +
+MSE, elements C/H/O/N/S/Se, first model) as coordinates + 6-way element one-hot.
+The ligand is used only for labels (surface points within 4 A of a ligand heavy
+atom).
 
-Regions (`select_regions`): smooth probabilities, take candidates (default each
-protein's top 5%, `region_top_fraction`; or absolute `region_threshold`),
-watershed flooding, drop < 20 points, keep top `k_pos` by mass; `k_neg`
-low-probability negative regions sized like the pocket regions; labelled pocket
-can be `forced` in during training.
+atoms -> dMaSIF surface (no grad; can be cached) -> 10 curvatures + 6 AtomNet_MP
+chemistry features -> dMaSIFConv_seg (16-dim point embeddings; `load_pretrained()`
+starts from the published search checkpoint, then trains) -> pocket head (logit
+per point) -> region anchors -> probability-weighted pooling -> projection MLP
+-> K = k_pos + k_neg (8 + 8) normalised 128-dim vectors. The projection is
+untrained so far (only pocket BCE has been used).
 
-## Test results (`src/test_encoder.py`, `src/slurm/encoder_test.sbatch`)
+Region selection (`anchors.pocket_regions`, `EncoderConfig.region_method`;
+default still the OLD `watershed` until a winner is picked):
+- `watershed` (+ `persistence`, ToMATo merging in per-protein quantile units)
+- `components` (P2Rank-style single linkage, ranked by sum p^2)
+- `ball` (greedy fixed-radius balls, mean-shift centring, `ball_rank`)
+- `nms` (score-then-suppress: mean-shift proposals from every candidate, score =
+  probability inside, NMS by point-set IoU, stop below alpha x best)
+- `compball` (components pick and rank pockets, a ball shapes each)
+All work on candidates = each protein's top 5% after smoothing. Negative
+regions: low-probability patches, farthest-point seeded, sized like the pocket
+regions. In training the labelled pocket is currently `forced` in as the first
+positive region (see open decisions).
 
-32 train / 16 held-out receptors, 300 steps, pocket BCE (pos_weight 42) only.
+## Results so far
 
-| held-out, step 300 | AUROC | AP | #reg | size | cover | prec | hit |
-|---|---|---|---|---|---|---|---|
-| fresh, top 5% | 0.935 | 0.408 | 6.9 | 51 | 0.23 | 0.73 | 0.06 |
-| pretrained, top 5% | 0.950 | 0.470 | 6.9 | 48 | 0.20 | 0.71 | 0.00 |
-| pretrained, p >= 0.5 | 0.945 | 0.459 | 7.9 | 75 | 0.22 | 0.61 | 0.00 |
+**Pocket head** (pretrained start, 300 steps, 32 training receptors, pocket BCE
+pos_weight ~42): held-out AUROC 0.937, AP 0.470 on 64 receptors (AP ~20x the
+0.023 base rate); reproduces the 16-receptor test (0.950 / 0.470). Pretrained
+start beats fresh weights.
 
-Conclusions: point-level pocket scoring works and generalises (AP ~20x the
-0.023 base rate); pretrained start is better. Regions **fragment** the pocket
-(7-8 small regions, best covers 20-30%) under either threshold; region hit
-fails on coverage. The earlier "oversized regions" hypothesis was wrong.
+**Region selectors** (`src/region_sweep.py`, job 129929; 64 held-out receptors):
+- Labelled pocket ~260 points (2.8% of surface), extent ~18 A, Rg ~6 A; one
+  piece at 3 A linkage.
+- Candidate ceiling: top 5% covers 0.68 of the pocket (prec 0.38); top 8% 0.80.
 
-## Region-selector experiment (job 129929, alphagpu53)
-
-`src/slurm/region_test.sbatch`: train the head once (pretrained, 300 steps, 32
-train / 64 held-out), dump probability maps (`test_encoder.py overfit --dump`),
-then `src/region_sweep.py` scores every selector setting on the same maps.
-Methods live in `anchors.pocket_regions` (`method=`, also
-`EncoderConfig.region_method`; default still the old watershed).
-
-Head: held AUROC 0.937, AP 0.470 (reproduces the 16-item result).
-
-Oracles (held): labelled pocket ~260 points (2.8% of the surface), extent ~18 A,
-Rg ~6 A; one piece at 3 A linkage (2 A splits off slivers). Candidate union
-covers 0.68 of the pocket at top 5% (prec 0.38), 0.80 at top 8%; smoothing
-radius makes no difference.
-
-| held-out, 64 | #reg | size | iou | cover | prec | hit | top1 | iou1 | dcc1 | dccA |
+| held-out | #reg | size | iou | cover | prec | hit | top1 | iou1 | dcc1 | dccA |
 |---|---|---|---|---|---|---|---|---|---|---|
-| old watershed (pers 0, link 2) | 7.2 | 53 | 0.18 | 0.20 | 0.65 | 0.00 | 0.00 | 0.16 | 0.23 | 0.58 |
+| old watershed | 7.2 | 53 | 0.18 | 0.20 | 0.65 | 0.00 | 0.00 | 0.16 | 0.23 | 0.58 |
 | watershed link 3, pers 0.02 | 1.7 | 373 | 0.39 | 0.66 | 0.48 | 0.73 | 0.69 | 0.35 | 0.38 | 0.47 |
 | components top 5%, link 3 | 1.5 | 406 | 0.38 | 0.68 | 0.45 | 0.70 | 0.66 | 0.34 | 0.33 | 0.41 |
-| ball R 8, 2 mean-shift steps | 7.1 | 293 | 0.53 | 0.70 | 0.63 | 0.84 | 0.64 | 0.34 | 0.44 | 0.77 |
+| ball R 8, shift 2 | 7.1 | 293 | 0.53 | 0.70 | 0.63 | 0.84 | 0.64 | 0.34 | 0.44 | 0.77 |
 
-Conclusions: fragmentation was the whole problem for watershed/components -
-merged, they reach the candidate ceiling, but regions are ~1.5x the pocket
-(prec ~0.46). Balls (R 8 ~ pocket extent) give the best best-region (IoU 0.53,
-prec 0.63) and find the pocket most often, but always make ~7 balls and rank
-them by seed strength: top-ranked region is a tie across methods (top1
-0.64-0.69, iou1 ~0.34). Mean-shift centring always helps; smoothing barely
-matters; the head (top 5% misses 1/3 of the pocket) is now the limit.
+(iou/cover/prec of the best-matching region; hit = some region covers >= 0.5 at
+prec >= 0.3; top1/iou1/dcc1 = the top-ranked region; dcc = centre within 4 A of
+the ligand centroid.) Fragmentation was the whole problem for watershed /
+components; merged, they hit the candidate ceiling but overshoot the pocket.
+Balls give the best region shape and precision but rank weakly; on the
+top-ranked region all methods tie. Leader so far: balls R 8 + mean shift. The
+head (candidates miss 1/3 of the pocket) is now the main limit.
 
-Follow-up, implemented, not yet run: `nms` (score-then-suppress: mean-shift
-proposals from every candidate, ball score = probability inside, greedy NMS by
-point-set IoU, stop below alpha x best), balls re-ranked by probability inside
-(`ball_rank`), and `compball` (components choose and rank, a ball shapes each).
-The sweep now also reports `on` (regions >= 30% pocket, i.e. duplicates),
-per-protein paired differences vs the ball leader with bootstrap intervals,
-and results by pocket-size thirds. Rerun on the saved maps:
-`SWEEP_ONLY=1 sbatch src/slurm/region_test.sbatch`.
+## Pending jobs (submitted or ready, results not recorded yet)
 
-## Apo vs holo test (set up, not yet run)
+1. **Follow-up sweep** (nms, re-ranked balls, compball, duplicate count `on`,
+   paired bootstrap vs the ball leader, results by pocket size):
+   `SWEEP_ONLY=1 sbatch src/slurm/region_test.sbatch`.
+2. **Apo vs holo test**: `python src/apo_pairs.py --links $PLINDER_DIR/links
+   --index datasets/dataset_v1/index.parquet --exclude encoder_test/items.tsv
+   --out apo_test/` (CPU), then `LIMIT=10 sbatch src/slurm/apo_test.sbatch`
+   as a check, then the full run. First run trains + saves the head checkpoint
+   `encoder_test/head_pretrained_300.pt`. `src/apo_eval.py` evaluates holo,
+   holo rotated + resampled (noise floor), apo and AlphaFold (pLDDT < 70
+   dropped); linked chains are sequence-aligned, superposed on holo pocket
+   C-alphas and trimmed to matched residues (placement verified on synthetic
+   proteins); labels from the holo ligand. Strata by apo pocket lDDT / clash.
 
-PLINDER's links (downloaded to `$PLINDER_DIR/links/kind={apo,pred}/links.parquet`
-and `linked_structures/{apo,pred}.zip`) pair holo systems with apo PDB chains
-(up to 5 each) and AlphaFold models. On dataset_v1: apo links for 10,974
-systems (test 143, val 31), AlphaFold for 12,076. Apo pocket lDDT median 94
-(10% below 79); ~5% of links place the holo ligand into clashes (closed pocket).
-The zips hold one `<id>.cif` per linked chain in its OWN frame (not superposed).
+## Open design decisions (needed for training)
 
-- `src/apo_pairs.py` (CPU): single-chain receptors, pocket identity >= 95,
-  strata A_near (pocket lDDT >= 95) / B_mild / C_large (< 85) / D_closed
-  (clash), 100 each, one per target protein, plus every val/test system
-  (`eval`); excludes the head's training receptors -> `apo_test/pairs.tsv`.
-- `src/apo_eval.py` (container): holo, holo rotated + resampled (noise floor),
-  apo, AlphaFold (pLDDT < 70 removed). Linked chains are matched by sequence
-  alignment, superposed on holo pocket C-alphas, trimmed to matched residues;
-  labels from the holo ligand. Reports AUROC/AP, site-vector cosine, and per
-  selector the top region's DCC, IoU, shift and vector cosine vs holo.
-- `test_encoder.py overfit --save_ckpt` saves the head; the dump now also
-  carries point embeddings. `src/slurm/apo_test.sbatch` trains once if the
-  checkpoint is missing, then evaluates.
+1. **Which selector** becomes the default (after the pending sweep + apo test).
+2. **How a ligand is scored against a protein's anchors**: top-ranked anchor
+   only, or max over pocket anchors (multiple-instance). Decides whether top-1
+   or hit metrics matter and how strict the selector's stopping rule is.
+3. **Training labels for regions**: replace "force the labelled pocket in" with
+   labels on the selector's own regions by IoU with the labelled pocket
+   (positive / ignore / negative), so training and inference see the same kind
+   of region. Near-duplicates of the pocket (`on` > 1) must be ignored, not
+   used as negatives.
+4. **Other real sites**: a receptor can bind other ligands elsewhere
+   (`labels.py` builds `receptor_union`); those regions must not be negatives.
+5. **Batch negatives**: mask same-cluster ligands/pockets
+   (`pli_unique_qcov__95__strong__component`, `system_pocket_UniProt`) and
+   balance sampling across targets.
 
-## Next steps
+## Next steps (model training, on `claude/model-training`)
 
-1. Run the follow-up sweep and the apo test; pick the selector and make it
-   the encoder default.
-2. Decide how anchors are used in training: label predicted regions by IoU
-   with the labelled pocket (positive / ignore / negative) instead of forcing
-   the label in, so training and inference see the same kind of region; and
-   whether a ligand is scored against the top anchor or the best-matching one.
-3. Default to the pretrained start.
-4. Then: ligand encoder + contrastive loss; full-scale surface extraction and
-   `labels.py` over dataset_v1; dataset_v2 (per-entry dedup, larger eval).
+1. Ligand encoder (none exists yet; ECFP4 fingerprints are in
+   `meta/ligand_fps.npy` / `datasets/dataset_v1/ligand_fps.npy` as a baseline
+   input) and the contrastive loss over anchor vectors.
+2. Data pipeline for full-scale training: surfaces cached once
+   (`src/extract.py` -> `feats/`), pocket labels (`src/labels.py` +
+   `pocket_qc.parquet`), a dataset/loader with target-balanced sampling.
+3. Training script + sbatch with checkpoints, validation retrieval metrics,
+   and the pocket loss kept as an auxiliary term.
+4. dataset_v2 (per-entry dedup, larger val/test, e.g. PLINDER's own val/test).
+5. Later: train with apo / AlphaFold receptors as augmentation if the apo test
+   shows a large holo-apo gap.
+
+## Code map (`src/`)
+
+| file | what |
+|---|---|
+| `build_manifest.py` | PLINDER annotation table -> `meta/manifest.parquet` |
+| `fetch_structures.py` | download receptor / system files the manifest needs |
+| `build_dataset.py`, `receptor_inputs.py`, `configs/datasets/*.yaml` | spec-driven dataset builds with provenance |
+| `ids.py` | ID parsing, ligand chain / SDF lookup, surface tags |
+| `inspect_data.py`, `sanity.py` | read-only data checks |
+| `extract.py` | atom loader (`load_protein_atoms`, now with B-factors) and batch dMaSIF feature extraction |
+| `labels.py` | pocket labels for cached surfaces + QC table |
+| `probe_pocket.py` | earlier probe: do frozen dMaSIF embeddings separate pockets |
+| `dmasif_compat.py` | imports the vendored dMaSIF under modern PyTorch |
+| `surface_encoder.py` | protein encoder (`EncoderConfig`, `SurfaceEncoder`, `pocket_loss`) |
+| `anchors.py` | region selectors, negatives, pooling |
+| `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
+| `region_sweep.py` | offline selector comparison on dumped maps |
+| `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
+| `slurm/` | `encoder_test`, `region_test`, `apo_test`, build / fetch / smoke jobs; `dmasif.def` container |
