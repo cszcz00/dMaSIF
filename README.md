@@ -21,12 +21,30 @@ The upstream README is at `dMaSIF/README.md`.
 
 ## Environments
 
+Rule of thumb: **pandas or rdkit -> the venv, torch -> the container.**
+
 | Where | For | Defined by |
 |---|---|---|
-| `~/venvs/plinder` (CPU) | `build_manifest`, `fetch_structures`, `build_dataset`, `labels`, `sanity` | `envs/cpu-requirements.txt` |
-| `dmasif_sandbox` container (GPU) | `extract`, `probe_pocket` | `src/slurm/dmasif.def` |
+| `~/venvs/plinder` (CPU) | `build_manifest`, `fetch_structures`, `build_dataset`, `labels`, `sanity`, `inspect_data`, `apo_pairs`, `ligand_features`, and the `prepare` modes of `test_encoder` / `probe_retrieval` | `envs/cpu-requirements.txt` |
+| `dmasif_sandbox` container, GPU | `extract`, `probe_pocket`, `test_encoder smoke/overfit`, `apo_eval`, `probe_retrieval dump`, `region_sweep` | `src/slurm/dmasif.def` |
+| `dmasif_sandbox` container, **CPU is enough** | the self-tests: `chemotype.py`, `ligand_encoder.py`, `probe_retrieval.py selftest` | same container |
 
 Not conda `base`: nothing in the pipeline assumes it.
+
+The self-tests need torch but no GPU, so they run on the login node. Pass
+`OMP_NUM_THREADS` explicitly, because `--cleanenv` strips it:
+
+```bash
+module load apptainer
+apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python src/chemotype.py
+```
+
+`python src/chemotype.py --tables` checks the pharmacophore typing with numpy
+alone, so it runs in either environment.
+
+GPU jobs go through `src/slurm/*.sbatch`, which carry the right
+`--nv --cleanenv --env KEOPS_CACHE_FOLDER=...` incantation; `$KEOPS_CACHE_FOLDER`
+and `$PLINDER_DIR` must be set in the submitting shell.
 
 ## Building a dataset
 
