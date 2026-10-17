@@ -596,6 +596,10 @@ def sample_weights(groups, alpha):
     alpha 1 makes sampling uniform over TARGETS, which is the whole point:
     PDE10A has 747 rows in dataset_v1 and would otherwise dominate every batch.
     alpha 0 is plain row-uniform sampling, kept so the effect is measurable.
+
+    This is the DEFINITION of alpha. draw_batch() implements the same
+    distribution group-first, because it also needs one-row-per-group and
+    cannot afford a rejection loop; see its docstring for the equivalence.
     """
     groups = np.asarray(groups)
     uniq, inv, counts = np.unique(groups, return_inverse=True, return_counts=True)
@@ -603,24 +607,50 @@ def sample_weights(groups, alpha):
     return w / w.sum()
 
 
-def draw_batch(rng, rows, weights, groups, size):
+def group_index(groups):
+    """Row positions bucketed by target group -> (member arrays, counts).
+
+    Built once per split and reused every step. The obvious alternative, a
+    boolean compare per group per step, is O(rows x groups) and would dominate
+    the step at dataset_v1's scale.
+    """
+    groups = np.asarray(groups)
+    _, inv, counts = np.unique(groups, return_inverse=True, return_counts=True)
+    order = np.argsort(inv, kind="stable")
+    return np.split(order, np.cumsum(counts)[:-1]), counts
+
+
+def draw_batch(rng, members, counts, size, alpha=1.0):
     """Up to `size` rows, at most one per target group.
 
-    Two rows of the same group would be masked against each other anyway, so
-    allowing them would spend batch slots on pairs that carry no gradient.
+    Groups are chosen first, then one row within each. That is EQUIVALENT to
+    the per-row weighting of sample_weights(): a row weight of count^-alpha
+    sums to count^(1-alpha) over a group, so drawing groups with that
+    probability and then uniformly inside the group gives the same per-row
+    distribution - at O(size) instead of a rejection loop.
+
+    Two rows of the same group would be masked against each other anyway, so a
+    batch never spends two slots on a pair that carries no gradient.
+
+    The group-first form also avoids a real hazard. numpy's weighted choice
+    WITHOUT replacement is a rejection loop that must find every element it
+    returns, so asking it for (nearly) the whole population with skewed weights
+    can take unboundedly long - dataset_v1 pairs PDE10A's 747 rows against
+    singletons, a 700x weight spread. When `size` covers every group there is
+    nothing to sample, so permute instead.
     """
-    order = rng.choice(len(rows), size=min(len(rows), 8 * size), replace=False,
-                       p=weights / weights.sum())
-    chosen, seen = [], set()
-    for i in order:
-        g = groups[i]
-        if g in seen:
-            continue
-        seen.add(g)
-        chosen.append(int(i))
-        if len(chosen) == size:
-            break
-    return np.asarray(chosen)
+    n = len(members)
+    k = min(size, n)
+    if k >= n:
+        chosen = rng.permutation(n)
+    else:
+        w = counts.astype(np.float64) ** (1.0 - alpha)
+        chosen = rng.choice(n, size=k, replace=False, p=w / w.sum())
+    out = np.empty(k, dtype=np.int64)
+    for i, c in enumerate(chosen):
+        m = members[c]
+        out[i] = m[rng.integers(len(m))]
+    return out
 
 
 def encode_ligands(model, data, fp_rows, device):
@@ -698,24 +728,25 @@ def train_arm(arm, data, train_rows, val_rows, a):
     model = ProbeModel(pooled.shape[2], cfg, a.map, a.tau, a.device)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.weight_decay)
 
-    groups = data["group"][train_rows]
-    weights = sample_weights(groups, a.alpha)
+    members, counts = group_index(data["group"][train_rows])
     rng = np.random.default_rng(a.seed)
     _, valid, is_pos, _ = data["tensors"]
     history, losses = [], []
+    t0 = time.time()
     for step in range(a.steps + 1):
         if step % a.eval_every == 0 or step == a.steps:
             met = evaluate(model, data, val_rows, a)
             met.update(step=step, loss=float(np.mean(losses[-a.eval_every:]))
                        if losses else float("nan"))
             history.append(met)
-            print(f"  {arm:10s} {step:6d} loss {met['loss']:7.4f}  "
+            print(f"  {arm:10s} {step:6d} {time.time() - t0:5.0f}s "
+                  f"loss {met['loss']:7.4f}  "
                   f"val MRR {met['mrr']:.3f} (chance {met['chance']:.3f})  "
                   f"top1 {met['top1']:.3f}  site {met['site']:.3f}", flush=True)
         if step == a.steps:
             break
 
-        idx = draw_batch(rng, train_rows, weights, groups, a.batch)
+        idx = draw_batch(rng, members, counts, a.batch, a.alpha)
         rows = train_rows[idx]
         rows_t = torch.as_tensor(rows, device=pooled.device)
         usable = (valid & is_pos)[rows_t]
@@ -1050,8 +1081,11 @@ def main():
     p.add_argument("--tmp", default="probe_selftest")
     p.add_argument("--min_mrr", type=float, default=0.25)
     add_probe_args(p)
-    p.set_defaults(steps=600, eval_every=200, arms="fp,fp_linear,desc,fp_desc,gnn",
-                   val_frac=0.3, oracle=True)
+    # Cheap on purpose: this is a wiring check, not a benchmark. fp's 2048-wide
+    # first layer dominates on CPU, so the step count and batch are what make
+    # the difference between 20 seconds and 15 minutes.
+    p.set_defaults(steps=300, eval_every=50, batch=32,
+                   arms="fp,fp_linear,desc,fp_desc,gnn", val_frac=0.3, oracle=True)
 
     a = ap.parse_args()
     {"prepare": prepare, "dump": dump, "probe": probe, "selftest": selftest}[a.cmd](a)
