@@ -348,7 +348,7 @@ def selftest():
         v = enc(b)
         assert v.shape == (len(rows), 128), f"{arm}: {v.shape}"
         assert torch.isfinite(v).all(), f"{arm}: non-finite output"
-        norms = v.norm(dim=-1)
+        norms = v.norm(dim=-1).detach()   # printed below, after backward()
         # the unparseable row has no atoms and an all-zero fingerprint path;
         # it must still come back finite, which is what normalize(0) risks
         v.sum().backward()
