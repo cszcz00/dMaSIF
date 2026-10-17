@@ -51,6 +51,17 @@ echo "items: $(($(wc -l < $OUT/items.tsv) - 1)); arms: $ARMS"
 
 if [ "${PROBE_ONLY:-0}" != "1" ]; then
     [ -f "$CKPT" ] || { echo "missing checkpoint $CKPT (produce it with test_encoder.py --save_ckpt)"; exit 1; }
+    # A 10-item pass first, in the SAME job. The full dump is ~40 min for 1500
+    # items, and `dump` has never run on a GPU, so a shape error would otherwise
+    # cost a whole queue wait to discover. set -e aborts before the full pass.
+    if [ -z "${LIMIT:-}" ] && [ "${SKIP_SMOKE:-0}" != "1" ]; then
+        echo "=== 1a. dump smoke: first ${SMOKE_LIMIT:-10} items ==="
+        $EXEC python $WORK/src/probe_retrieval.py dump \
+            --items $OUT/items.tsv --ckpt $CKPT --out $OUT/anchors_smoke.pt \
+            --limit ${SMOKE_LIMIT:-10} \
+            ${OTHER_LIGANDS:+--other_ligands $OTHER_LIGANDS} $REGION_ARGS
+        echo "smoke dump ok"
+    fi
     echo "=== 1. dump frozen anchors from $CKPT ==="
     $EXEC python $WORK/src/probe_retrieval.py dump \
         --items $OUT/items.tsv --ckpt $CKPT --out $ANCHORS \
