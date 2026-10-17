@@ -52,8 +52,12 @@ and shape follow the pocket instead of a fixed radius.
                      dropped as duplicates
 
 Pooling weights each point by its pocket probability, so the downstream loss
-also trains the pocket head. Region construction itself is discrete and runs
-without gradients, on a CPU copy (its loops would stall a GPU).
+also trains the pocket head. `pool_regions` can return one weighted mean per
+region (the original), mean + standard deviation, or means in equal-count
+radial shells around the region's own centroid, which is the only one of the
+three that keeps any of the arrangement INSIDE a region. Region construction
+itself is discrete and runs without gradients, on a CPU copy (its loops would
+stall a GPU).
 
 Depends on: torch.
 Imported by: surface_encoder.py, region_sweep.py.
@@ -514,15 +518,90 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
 # ----------------------------------------------------------------------------
 # pooling and evaluation
 # ----------------------------------------------------------------------------
-def pool_regions(emb, prob, regions, eps=1e-6):
-    """Probability-weighted mean of point embeddings over each region -> (R, E).
-    Differentiable in emb and prob."""
+POOL_MODES = ("mean", "mean_std", "shells")
+
+
+def pooled_width(emb_dims, mode="mean", n_shells=3):
+    """Width of pool_regions' output for one embedding width."""
+    if mode == "mean":
+        return emb_dims
+    if mode == "mean_std":
+        return 2 * emb_dims
+    if mode == "shells":
+        return n_shells * emb_dims
+    raise ValueError(f"unknown pool mode {mode!r}; expected one of {POOL_MODES}")
+
+
+def pool_regions(emb, prob, regions, eps=1e-6, mode="mean", xyz=None, n_shells=3):
+    """Probability-weighted pooling of point embeddings over each region.
+
+    mode:
+      mean      one weighted mean per region -> (R, E). The original.
+      mean_std  weighted mean and weighted standard deviation -> (R, 2E). A
+                mean says what the patch is made of on average; the spread
+                says whether it is uniform or mixed, which one mean cannot.
+      shells    n_shells weighted means, in equal-COUNT shells by distance
+                from the region's weighted centroid -> (R, n_shells * E).
+                Needs `xyz`.
+
+    `shells` exists because a single mean over ~290 points discards all spatial
+    arrangement inside the region. Pocket DETECTION does not need it - one
+    number per point is the answer - but ligand DISCRIMINATION does: the same
+    composition arranged rim-out versus centre-out is a different pocket. Three
+    radial means are the cheapest ordering that is still rigid-motion
+    invariant: distance to the region's own centroid uses no external frame, so
+    the output is unchanged by rotating or translating the protein, and the
+    shells are indexed inner-to-outer rather than by any point order.
+
+    Equal-count rather than fixed-radius shells: region size and shape vary by
+    selector (a watershed region follows the pocket, a ball is fixed at R), so
+    fixed edges would leave outer shells empty for small regions. Equal counts
+    guarantee every shell is populated for any region of at least n_shells
+    points.
+
+    Differentiable in emb and prob under every mode; the shell assignment
+    itself is discrete and taken without gradient, like region selection.
+    """
+    if mode not in POOL_MODES:
+        raise ValueError(f"unknown pool mode {mode!r}; expected one of {POOL_MODES}")
+    width = pooled_width(emb.shape[1], mode, n_shells)
+    if not regions:
+        return emb.new_zeros(0, width)
+    if mode == "shells" and xyz is None:
+        raise ValueError("pool mode 'shells' needs xyz for the region's own distances")
+
     out = []
     for r in regions:
         r = r.to(emb.device)
         w = prob[r] + eps
-        out.append((w[:, None] * emb[r]).sum(0) / w.sum())
-    return torch.stack(out) if out else emb.new_zeros(0, emb.shape[1])
+        e = emb[r]
+        mean = (w[:, None] * e).sum(0) / w.sum()
+        if mode == "mean":
+            out.append(mean)
+        elif mode == "mean_std":
+            var = (w[:, None] * (e - mean) ** 2).sum(0) / w.sum()
+            # clamped off zero, not at it: sqrt has an infinite derivative at 0,
+            # so a region whose embeddings happen to agree exactly would send a
+            # NaN back through the whole conv
+            out.append(torch.cat([mean, var.clamp_min(1e-12).sqrt()]))
+        else:
+            p = xyz[r]
+            with torch.no_grad():
+                c = (w[:, None] * p).sum(0) / w.sum()
+                d = (p - c).norm(dim=-1)
+                order = torch.argsort(d)
+                parts = [t for t in torch.tensor_split(order, n_shells) if len(t)]
+            shells = []
+            for s in range(n_shells):
+                if s < len(parts):
+                    ws = w[parts[s]]
+                    shells.append((ws[:, None] * e[parts[s]]).sum(0) / ws.sum())
+                else:
+                    # fewer points than shells: repeat the outermost populated
+                    # one rather than emit a structural zero
+                    shells.append(shells[-1] if shells else mean)
+            out.append(torch.cat(shells))
+    return torch.stack(out)
 
 
 @torch.no_grad()

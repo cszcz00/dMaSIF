@@ -7,7 +7,8 @@
           ──(4) pocket head──> one logit per point, trained as "pocket-ness"
           ──(5) region anchors: k_pos pocket regions grown from the pocket
                 map (watershed) + k_neg low-probability regions of matched size
-          ──(6) probability-weighted pooling per region + projection──> (K, D)
+          ──(6) probability-weighted pooling per region (one mean, mean+std,
+                or radial shells) + projection──> (K, D)
 
 Steps 1-3 are dMaSIF's own classes, instantiated here with fresh weights, so
 everything from the chemistry network onward trains. load_pretrained() can
@@ -36,7 +37,7 @@ sys.path.insert(0, str(HERE))
 
 import chemotype  # noqa: E402
 import dmasif_compat  # noqa: E402
-from anchors import pool_regions, select_regions  # noqa: E402
+from anchors import pool_regions, pooled_width, select_regions  # noqa: E402
 
 DEFAULT_REPO = HERE.parent / "dMaSIF"
 
@@ -84,7 +85,18 @@ class EncoderConfig:
     neg_quantile: float = 0.5
     neg_exclusion: float = 4.0             # A; negatives keep off pocket regions
     neg_flat_quantile: float | None = None # e.g. 0.5: negative seeds on flatter half
-    # (6) output
+    # (6) pooling and output
+    pool_mode: str = "mean"      # mean | mean_std | shells (anchors.pool_regions)
+    n_shells: int = 3            # pool_mode "shells": radial shells per region
+    # Standardisation of the pooled vector before the projection. "none" is the
+    # original path; "batch" is a BatchNorm1d over the batch's USABLE anchors,
+    # which subtracts the per-feature mean the whole dataset shares. Worth
+    # having because ~88% of a pooled vector is one shared direction (different
+    # proteins sit at cosine 0.993), so an unnormalised projection has to learn
+    # to subtract a constant before it can read the 12% that distinguishes
+    # proteins. Learned running statistics rather than statistics fitted once,
+    # because the encoder trains and anything fitted up front goes stale.
+    anchor_norm: str = "none"    # none | batch
     out_dim: int = 128
     normalize: bool = True
     repo: str = field(default=str(DEFAULT_REPO))
@@ -98,6 +110,11 @@ class EncoderConfig:
     @property
     def in_channels(self):
         return 2 * len(self.curvature_scales) + self.atom_dims + self.chemo_dims
+
+    @property
+    def pooled_dims(self):
+        """Width of a pooled region vector, which pool_mode decides."""
+        return pooled_width(self.emb_dims, self.pool_mode, self.n_shells)
 
 
 def _mlp(i, h, o):
@@ -121,7 +138,12 @@ class SurfaceEncoder(nn.Module):
                                    n_layers=cfg.n_layers, radius=cfg.radius)
         self.dropout = nn.Dropout(cfg.dropout)
         self.pocket_head = _mlp(E, cfg.head_hidden, 1)
-        self.project = _mlp(E, max(cfg.out_dim, E), cfg.out_dim)
+        Pd = cfg.pooled_dims
+        # named pool_norm, not anchor_norm: cfg.anchor_norm is the string that
+        # chose it, and two attributes of one name would be a trap
+        self.pool_norm = (nn.BatchNorm1d(Pd) if cfg.anchor_norm == "batch"
+                          else nn.Identity())
+        self.project = _mlp(Pd, max(cfg.out_dim, Pd), cfg.out_dim)
 
     # ------------------------------------------------------------------ (1)
     @torch.no_grad()
@@ -165,8 +187,42 @@ class SurfaceEncoder(nn.Module):
             parts.append(chemo.to(curv.dtype))
         return torch.cat(parts, dim=1).contiguous()
 
+    # ------------------------------------------------------------------ (6)
+    def project_anchors(self, pooled, valid):
+        """(B, K, P) pooled region vectors -> (B, K, out_dim) anchor vectors.
+
+        Only the USABLE slots go through the normalisation and the projection;
+        empty slots come back as zeros. Padding must not reach a BatchNorm,
+        whose statistics it would otherwise set.
+
+        Public because the training loop sometimes has one more region than the
+        selector produced - the fallback anchor at a missed pocket - and the
+        normalisation has to see the batch's anchors ONCE, all together. Hence
+        forward(project=False): the caller assembles the full pooled tensor and
+        calls this itself, rather than running the tail twice on different data.
+        """
+        out = pooled.new_zeros(*pooled.shape[:-1], self.cfg.out_dim)
+        if not bool(valid.any()):
+            return out
+        flat = pooled[valid]
+        norm = self.pool_norm
+        if self.training and len(flat) < 2 and isinstance(norm, nn.BatchNorm1d):
+            # A BatchNorm in training mode refuses a single sample, and a whole
+            # batch yielding one region is possible on a small smoke run. Use
+            # the running statistics for that step rather than dying hours in.
+            norm.eval()
+            flat = norm(flat)
+            norm.train()
+        else:
+            flat = norm(flat)
+        flat = self.project(flat)
+        if self.cfg.normalize:
+            flat = F.normalize(flat, dim=-1)
+        out[valid] = flat
+        return out
+
     # ------------------------------------------------------------- (2)-(6)
-    def forward(self, P, forced=None, generator=None):
+    def forward(self, P, forced=None, generator=None, project=True):
         """P: dict with atom_xyz (M,3), atomtypes (M,6) one-hot, batch_atoms (M,),
         and optionally a cached surface: xyz (N,3), normals (N,3), batch (N,).
         P["region_cache"]: optional list of per-protein dicts that persist the
@@ -174,15 +230,20 @@ class SurfaceEncoder(nn.Module):
         forced: optional list, per protein, of lists of point-index tensors
         (LOCAL to that protein) taken as pocket regions first, e.g. the
         labelled pocket during training.
+        project: False returns anchor_vec None and leaves the pooled vectors to
+        the caller's own project_anchors() call - see that method.
 
         Returns a dict:
             xyz, normals, batch        the surface used
             input_feats   (N, 16)      curvatures + chemistry
             point_emb     (N, E)       conv output
             pocket_logit  (N,)         per-point pocket score
-            anchor_vec    (B, K, D)    the representation-space vectors
-            anchor_pooled (B, K, E)    the pooled region embeddings BEFORE the
-                                       projection. Dumped by probe_retrieval.py:
+            anchor_vec    (B, K, D)    the representation-space vectors, or
+                                       None when project=False
+            anchor_pooled (B, K, P)    the pooled region embeddings BEFORE the
+                                       normalisation and projection, P =
+                                       cfg.pooled_dims. Dumped by
+                                       probe_retrieval.py:
                                        the projection is the part the contrastive
                                        loss has to learn, so freezing its current
                                        random weights would freeze noise.
@@ -211,7 +272,7 @@ class SurfaceEncoder(nn.Module):
         K = c.k_pos + c.k_neg
         n_prot = int(batch.max()) + 1
         flat_col = 2 * (len(c.curvature_scales) - 1)  # mean curvature, largest scale
-        vec = emb.new_zeros(n_prot, K, emb.shape[1])
+        vec = emb.new_zeros(n_prot, K, c.pooled_dims)
         center = xyz.new_zeros(n_prot, K, 3)
         size = torch.zeros(n_prot, K, dtype=torch.long, device=xyz.device)
         is_pos = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
@@ -242,20 +303,20 @@ class SurfaceEncoder(nn.Module):
                 cache=None if caches is None else caches[b])
             n = len(regions)
             if n:
-                vec[b, :n] = pool_regions(emb[sel], prob[sel], regions)
+                vec[b, :n] = pool_regions(emb[sel], prob[sel], regions,
+                                          mode=c.pool_mode, xyz=xyz[sel],
+                                          n_shells=c.n_shells)
                 center[b, :n] = pool_regions(xyz[sel], prob[sel].detach(), regions)
                 size[b, :n] = torch.tensor([len(r) for r in regions], device=xyz.device)
                 is_pos[b, :n] = pos.to(xyz.device)
                 valid[b, :n] = True
             all_regions.append([sel[r.to(sel.device)] for r in regions])
 
-        out = self.project(vec)
-        if c.normalize:
-            out = F.normalize(out, dim=-1)
+        out = self.project_anchors(vec, valid) if project else None
         return {
             "xyz": xyz, "normals": normals, "batch": batch,
             "input_feats": feats, "point_emb": emb, "pocket_logit": logit,
-            "anchor_vec": out * valid[..., None], "anchor_pooled": vec,
+            "anchor_vec": out, "anchor_pooled": vec,
             "anchor_valid": valid,
             "anchor_is_pos": is_pos, "anchor_center": center, "anchor_size": size,
             "anchor_regions": all_regions,
