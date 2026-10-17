@@ -515,6 +515,44 @@ def split_by_group(groups, val_frac, seed, tol=0.25):
     return np.nonzero(~in_val)[0], np.nonzero(in_val)[0]
 
 
+def anchor_spread(vecs, max_n=1500, seed=0):
+    """How much do different proteins' anchor vectors actually differ?
+
+    `median_cos` is directly comparable to the reference apo_eval prints (0.993
+    for ball_R8 on holo): for random 16-dim unit vectors it would be ~0, so a
+    value near 1 means the space is a narrow cone and the projection has to
+    recover a small residual rather than read off a spread-out code.
+
+    `shared` is ||mean of the unit vectors||, the cleanest single statement of
+    the problem: 1.0 means every protein points the same way, ~0 means the
+    directions are isotropic. `eff_dims` is the participation ratio of the
+    centred spectrum, (sum lambda)^2 / sum lambda^2 - the effective number of
+    dimensions in use, out of emb_dims.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    # The pairwise matrix is n^2 and torch.quantile has a size cap, so bound it.
+    if len(vecs) > max_n:
+        g = torch.Generator().manual_seed(seed)
+        sel = torch.randperm(len(vecs), generator=g)[:max_n].to(vecs.device)
+        vecs = vecs[sel]
+    U = F.normalize(vecs.float(), dim=1)
+    n = len(U)
+    eye = torch.eye(n, dtype=torch.bool, device=U.device)
+    off = (U @ U.T)[~eye]
+    m = U.mean(0)
+    Uc = F.normalize(U - m, dim=1)
+    offc = (Uc @ Uc.T)[~eye]
+    lam = torch.linalg.svdvals(U - m) ** 2
+    return {"n": n, "median_cos": float(off.median()),
+            "p90_cos": float(off.quantile(0.9)),
+            "shared": float(m.norm()),
+            "median_cos_centred": float(offc.median()),
+            "eff_dims": float(lam.sum() ** 2 / (lam ** 2).sum().clamp_min(1e-12)),
+            "dims": U.shape[1]}
+
+
 class ProbeModel:
     """The two trainable pieces: the projection onto frozen anchors, and the
     ligand encoder. Kept as a plain holder so the optimiser and the state dict
@@ -535,6 +573,29 @@ class ProbeModel:
         self.logit_scale = nn.Parameter(
             torch.log(torch.tensor(1.0 / tau, device=device)))
         self.device = device
+        # Standardisation of the frozen anchors, fitted on TRAIN proteins only.
+        # Identity until set_anchor_norm() says otherwise, so the default path
+        # is unchanged.
+        self.anchor_mean = torch.zeros(emb_dim, device=device)
+        self.anchor_std = torch.ones(emb_dim, device=device)
+
+    def set_anchor_norm(self, pooled, usable, mode):
+        """Fit anchor standardisation on these proteins' usable anchors.
+
+        Worth having because ~88% of a real pooled vector is one shared
+        direction (apo_eval: different proteins sit at cosine 0.993), which a
+        projection starting from random init has to learn to subtract. Centring
+        hands it that for free. Fitted on the TRAIN split alone, so the val
+        proteins contribute nothing to the statistics.
+        """
+        if mode == "none":
+            return
+        x = pooled[usable].float()
+        if not len(x):
+            return
+        self.anchor_mean = x.mean(0)
+        if mode == "whiten":
+            self.anchor_std = x.std(0).clamp_min(1e-6)
 
     def parameters(self):
         return (list(self.project.parameters()) + list(self.ligand.parameters())
@@ -548,7 +609,8 @@ class ProbeModel:
         """(B, K, E) pooled embeddings -> (B, K, D) normalised anchor vectors."""
         import torch.nn.functional as F
 
-        return F.normalize(self.project(pooled), dim=-1) * valid[..., None]
+        x = (pooled - self.anchor_mean) / self.anchor_std
+        return F.normalize(self.project(x), dim=-1) * valid[..., None]
 
     def scores(self, pooled, usable, lig_vec):
         """max over each protein's usable anchors of cos(anchor, ligand), scaled.
@@ -568,7 +630,9 @@ class ProbeModel:
     def state_dict(self):
         return {"project": self.project.state_dict(),
                 "ligand": self.ligand.state_dict(),
-                "logit_scale": self.logit_scale.detach().cpu()}
+                "logit_scale": self.logit_scale.detach().cpu(),
+                "anchor_mean": self.anchor_mean.detach().cpu(),
+                "anchor_std": self.anchor_std.detach().cpu()}
 
 
 def stack_records(records, device):
@@ -726,6 +790,9 @@ def train_arm(arm, data, train_rows, val_rows, a):
                        gnn_layers=a.gnn_layers,
                        frozen_dim=data["frozen_dim"] if arm == "frozen" else 0)
     model = ProbeModel(pooled.shape[2], cfg, a.map, a.tau, a.device)
+    _, valid0, is_pos0, _ = data["tensors"]
+    tr = torch.as_tensor(train_rows, device=pooled.device)
+    model.set_anchor_norm(pooled[tr], (valid0 & is_pos0)[tr], a.anchor_norm)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.weight_decay)
 
     members, counts = group_index(data["group"][train_rows])
@@ -827,6 +894,32 @@ def probe(a):
           f"{len(set(data['group'][val_rows]))} groups)")
     data["ligands"].set_scaler(data["fp_row"][train_rows])
     print("descriptor standardisation fitted on the TRAIN ligands only")
+
+    # Are the frozen anchors discriminative at all? This decides whether the arm
+    # table below says anything about ligand encoders, or only about the protein
+    # side's collapse. Computed on the TOP-ranked pocket anchor per protein, the
+    # same vector apo_eval's reference cosine uses.
+    pooled_t, valid_t, is_pos_t, _ = data["tensors"]
+    top = []
+    for i in range(len(pooled_t)):
+        k = (valid_t[i] & is_pos_t[i]).nonzero().flatten()
+        if len(k):
+            top.append(pooled_t[i, int(k[0])])
+    if len(top) > 2:
+        sp = anchor_spread(torch.stack(top))
+        print(f"\nfrozen anchor spread over {sp['n']} proteins, {sp['dims']} dims "
+              f"(top-ranked pocket anchor each):")
+        print(f"  median cosine between DIFFERENT proteins   {sp['median_cos']:+.3f} "
+              f"(p90 {sp['p90_cos']:+.3f})   apo_eval reference: +0.993")
+        print(f"  shared direction ||mean of unit vectors||  {sp['shared']:.3f} "
+              f"(1 = all identical, 0 = isotropic)")
+        print(f"  after centring, median cosine              {sp['median_cos_centred']:+.3f}")
+        print(f"  effective dimensions in use                {sp['eff_dims']:.1f} of {sp['dims']}")
+        if sp["median_cos"] > 0.9:
+            print("  [warn] the anchors are a narrow cone: a weak arm table here is")
+            print("         the protein side, not the ligand encoders. Compare")
+            print("         --anchor_norm center / whiten against none.")
+    print(f"anchor standardisation: {a.anchor_norm}")
 
     arms = [s.strip() for s in a.arms.split(",") if s.strip()]
     if "frozen" in arms and not data["frozen_dim"]:
@@ -1042,6 +1135,11 @@ def add_probe_args(p):
     p.add_argument("--gnn_layers", type=int, default=4)
     p.add_argument("--map", default="mlp", choices=["mlp", "linear"],
                    help="shape of the trainable projection on the frozen anchors")
+    p.add_argument("--anchor_norm", default="none",
+                   choices=["none", "center", "whiten"],
+                   help="standardise the frozen anchors before the projection, "
+                        "fitted on the train split. Default none, so a first run "
+                        "is the baseline to compare against")
     p.add_argument("--tau", type=float, default=0.07)
     p.add_argument("--alpha", type=float, default=1.0,
                    help="target-balanced sampling exponent; 1 = uniform over groups")
