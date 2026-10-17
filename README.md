@@ -25,9 +25,9 @@ Rule of thumb: **pandas or rdkit -> the venv, torch -> the container.**
 
 | Where | For | Defined by |
 |---|---|---|
-| `~/venvs/plinder` (CPU) | `build_manifest`, `fetch_structures`, `build_dataset`, `labels`, `sanity`, `inspect_data`, `apo_pairs`, `ligand_features`, and the `prepare` modes of `test_encoder` / `probe_retrieval` | `envs/cpu-requirements.txt` |
-| `dmasif_sandbox` container, GPU | `extract`, `probe_pocket`, `test_encoder smoke/overfit`, `apo_eval`, `probe_retrieval dump`, `region_sweep` | `src/slurm/dmasif.def` |
-| `dmasif_sandbox` container, **CPU is enough** | the self-tests: `chemotype.py`, `ligand_encoder.py`, `probe_retrieval.py selftest` | same container |
+| `~/venvs/plinder` (CPU) | `build_manifest`, `fetch_structures`, `build_dataset`, `labels`, `sanity`, `inspect_data`, `apo_pairs`, `ligand_features`, and the `prepare` modes of `test_encoder` / `probe_retrieval` / `train` | `envs/cpu-requirements.txt` |
+| `dmasif_sandbox` container, GPU | `extract`, `probe_pocket`, `test_encoder smoke/overfit`, `apo_eval`, `probe_retrieval dump`, `region_sweep`, `train cache/train/eval` | `src/slurm/dmasif.def` |
+| `dmasif_sandbox` container, **CPU is enough** | the self-tests: `chemotype.py`, `ligand_encoder.py`, `probe_retrieval.py selftest`, `train.py selftest` | same container |
 
 Not conda `base`: nothing in the pipeline assumes it.
 

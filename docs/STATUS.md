@@ -1,18 +1,21 @@
 # Project status (handoff)
 
-Read this first in a new session. Last updated 2026-10-13, at the hand-off from
-the anchor-selection work (branch `claude/sharp-franklin-42hmhj`) to model
-training (branch `claude/model-training`, which starts from the same commit).
+Read this first in a new session. Last updated 2026-10-17 on
+`claude/model-training`, after the chemo ablation and the ligand-arm probe came
+back and the contrastive training loop was written.
 
 ## Goal
 
 Contrastive protein-ligand retrieval. Protein side: dMaSIF surface features +
 convolution (retrained), a per-point pocket head, and K pooled **region**
-anchors per protein compared against ligand vectors. Built and tested: the
-protein encoder up to the anchors. Built, not yet run: the ligand encoder
-(`src/ligand_encoder.py`) and the frozen-anchor retrieval probe that picks
-between its arms. **Not built yet: the contrastive training loop over both
-sides, and full-scale data loading.**
+anchors per protein compared against ligand vectors.
+
+Built and tested: the protein encoder up to the anchors, the region selectors,
+the apo/holo/AlphaFold evaluation, the ligand encoder and the frozen-anchor
+probe that ranks its arms. Built and self-tested but **never run on a GPU: the
+contrastive training loop** (`src/train.py`, `src/train_data.py`) and its data
+pipeline. That is the next job to submit, and the first thing to do in a new
+session is read "Training loop" below and then run the three self-tests.
 
 ## How we work
 
@@ -95,9 +98,22 @@ chemistry features (+ 12 optional pharmacophore channels, `cfg.chemo`, see
 starts from the published search checkpoint, then trains; `inflate=True`
 zero-pads the three input-side tensors so extra channels keep the pretrained
 function exactly at init) -> pocket head (logit
-per point) -> region anchors -> probability-weighted pooling -> projection MLP
--> K = k_pos + k_neg (8 + 8) normalised 128-dim vectors. The projection is
-untrained so far (only pocket BCE has been used).
+per point) -> region anchors -> probability-weighted pooling -> optional
+normalisation -> projection MLP -> K = k_pos + k_neg (8 + 8) normalised
+128-dim vectors.
+
+Pooling is one weighted mean per region by default (`cfg.pool_mode="mean"`),
+and can be `mean_std` or `shells` - see `anchors.pool_regions`. The
+normalisation before the projection is identity by default and a BatchNorm1d
+over the batch's real anchors with `cfg.anchor_norm="batch"`. Both default to
+the original behaviour so every earlier result reproduces, and both exist for
+the 0.993 collapse described below. `project_anchors()` is public and
+`forward(project=False)` exists so a caller can add an anchor of its own - the
+training loop's fallback ball - and put the whole set through one
+normalisation.
+
+Everything from the pocket head onward trained only on pocket BCE until
+`train.py`; the projection has never seen a contrastive gradient.
 
 Region selection (`anchors.pocket_regions`, `EncoderConfig.region_method`;
 default still the OLD `watershed` until a winner is picked):
@@ -228,57 +244,223 @@ training. Practical consequences: centre and whiten pooled vectors before the
 projection, and report the cosine spread / effective rank alongside any
 retrieval metric.
 
-## Pending jobs (submitted or ready, results not recorded yet)
+## Chemo ablation (DONE, job 139099: the pharmacophore channels do NOT help)
 
-0. **`encoder_test/head_pretrained_300.pt` now EXISTS** - the apo test's first
-   step wrote it, so nothing is blocked on it any more.
-   `src/slurm/head_ckpt.sbatch` rebuilds just that checkpoint (30 min, `test`
-   QoS) if it is ever lost, without the 4 h apo evaluation.
-1. **Follow-up sweep** (nms, re-ranked balls, compball, duplicate count `on`,
-   paired bootstrap vs the ball leader, results by pocket size):
-   `SWEEP_ONLY=1 sbatch src/slurm/region_test.sbatch`. Largely superseded by
-   the apo test, which scored all six selectors across all four versions.
-   Note it only runs `region_sweep.py`, which is CPU-only, so it does not need
-   the `--gres=gpu:1` / `--nv` the sbatch requests.
-2. **Chemo ablation** (`src/slurm/chemo_test.sbatch`): do the pharmacophore
-   channels raise the head's ceiling? Two arms, same items and seed, 16 vs 28
-   input channels. Read the `candidates` oracle row in each `region_sweep`
-   output - top-5% coverage of the labelled pocket, 0.68 today, the ceiling
-   capping every selector. `ARM=base` / `ARM=chemo` splits it across two jobs
-   if the QoS walltime is tight.
-3. **Ligand-arm probe** (`src/slurm/probe_retrieval.sbatch`), now unblocked.
-   Which ligand
-   encoder pairs with real surface anchors, on FROZEN protein anchors, in one
-   GPU pass plus minutes of CPU. First, in the CPU venv:
-   ```
-   python src/probe_retrieval.py prepare --index datasets/dataset_v1/index.parquet \
-       --exclude encoder_test/items.tsv --n 1500 --out probe/
-   python src/ligand_features.py --index datasets/dataset_v1/index.parquet --out probe/
-   ```
-   then `LIMIT=10 sbatch src/slurm/probe_retrieval.sbatch` as a check, then the
-   full run. `PROBE_ONLY=1` reruns only the arm comparison on an existing
-   `anchors.pt`, so arms and hyperparameters can be swept without the GPU.
-   Read `probe/arms.tsv`: `mrr` against `mrr0` (untrained) and `chance`
-   (random), `oracle_mrr` for the headroom in anchor ranking rather than in the
-   ligand encoder. These numbers rank the arms; they do NOT predict end-to-end
-   performance, because the protein side is frozen and its head saw 32
-   receptors for 300 steps.
-4. **Apo vs holo test: DONE**, results above. To re-run:
-   `python src/apo_pairs.py --links $PLINDER_DIR/links
-   --index datasets/dataset_v1/index.parquet --exclude encoder_test/items.tsv
-   --out apo_test/` (CPU), then `LIMIT=10 sbatch src/slurm/apo_test.sbatch`
-   as a check, then the full run. First run trains + saves the head checkpoint
-   `encoder_test/head_pretrained_300.pt`. `src/apo_eval.py` evaluates holo,
-   holo rotated + resampled (noise floor), apo and AlphaFold (pLDDT < 70
-   dropped); linked chains are sequence-aligned, superposed on holo pocket
-   C-alphas and trimmed to matched residues (placement verified on synthetic
-   proteins); labels from the holo ligand. Strata by apo pocket lDDT / clash.
+`src/slurm/chemo_test.sbatch`, two arms on the same 32 train / 64 held-out
+items, same seed, same 300 steps, differing only in the conv's input width:
+16 channels (10 curvature + 6 AtomNet) against 28 (+ 12 `chemotype.py`).
+The GPU paths it was written to exercise all worked: `inflate=True` widened the
+three input tensors 16 -> 28, 110 pretrained tensors loaded, no parameter was
+left without a gradient.
+
+The headline is the **candidate ceiling**, the union of each protein's top 5%
+of smoothed points, which caps every selector:
+
+| held-out, smooth 2 | top 3% | top 5% | top 8% | top 10% |
+|---|---|---|---|---|
+| base (16 ch) | 0.48 / 0.45 | **0.67** / 0.38 | 0.80 / 0.28 | 0.83 / 0.23 |
+| chemo (28 ch) | 0.48 / 0.45 | 0.66 / 0.38 | 0.78 / 0.28 | 0.82 / 0.23 |
+
+(cover / precision.) Unmoved, if anything marginally worse. So is everything
+else:
+
+| held-out at step 300 | base | chemo |
+|---|---|---|
+| per-point AUROC | 0.937 | 0.937 |
+| per-point AP | 0.467 | 0.474 |
+| `ball_R8` iou / cover / prec / hit / dccA | 0.54 / 0.72 / 0.63 / 0.86 / 0.77 | 0.51 / 0.69 / 0.61 / 0.80 / 0.72 |
+
+**But the training numbers say why, and it is not "the features are useless".**
+The chemo arm fits the TRAINING set better and generalises identically: train
+AP 0.540 against 0.523, train hit 0.12 against 0.03. That is extra input
+capacity being spent on memorisation - 28 channels against **32 training
+proteins**. The ablation is conclusive that the channels do not help at this
+scale and genuinely inconclusive about whether they help with real training
+data. `cfg.chemo` stays off by default; re-test once `train.py` has run at
+scale.
+
+It also rules something out. The 0.68 ceiling is NOT structural - pocket share
+is 2.8%, so at top 5% a perfect ranker would reach cover 1.0 - and better input
+features do not move it. The limit is the per-point ranking (AP 0.47), and most
+plausibly the training set size.
+
+The selector result **reproduced** on this independently trained head:
+`ball_R8` held-out iou 0.54 (first sweep: 0.53), cover 0.72 (0.70), prec 0.63
+(0.63), hit 0.86 (0.84), dccA 0.77 (0.77). The paired bootstrap sharpens the
+known trade-off: `watershed pers=0.02` beats `ball_R8` on **top1 by +0.09
+[+0.02, +0.19]**, interval excluding zero, while losing dccA by 0.38. Balls
+recall, watershed ranks. Re-ranking balls (`rank=sum`) is a wash on every
+metric, every interval including zero.
+
+One number to carry into training: `ball_R8` has `on` = 4.0, i.e. four regions
+per protein that are at least 30% pocket. Those must be IGNORED, not trained as
+negatives - which is what `train_data.region_labels` does.
+
+Not yet done: a PAIRED base-vs-chemo test. `region_sweep.py` only pairs
+selectors WITHIN one map set, so the table above is unpaired and the 0.01-0.02
+differences are well inside one standard error on 64 proteins.
+`sweep_items_base_300.tsv` and `sweep_items_chemo_300.tsv` hold per-protein
+rows for the same proteins, so a paired bootstrap is a small offline CPU
+script; it would turn "looks like noise" into an interval.
+
+## Ligand-arm probe (DONE, job 139130: all arms indistinguishable)
+
+`src/slurm/probe_retrieval.sbatch` over frozen anchors from
+`head_pretrained_300.pt`. Read `probe/arms.tsv` for the table. The finding:
+**the five arms are statistically indistinguishable** - the spread between arms
+(~0.007 MRR) is smaller than one arm's own evaluation-to-evaluation variation
+(~0.017), against a signal of roughly 7x chance. `desc` holding its own on
+top1 is the suggestive detail, since `desc` knows only size, polarity and
+shape: the signal may be SIZE MATCHING rather than chemical complementarity,
+which a size-only baseline arm would settle.
+
+This does not rank the ligand encoders, because the protein side is the
+bottleneck. That job predates the spread diagnostic, so rerun it on the current
+code to get the numbers:
+
+```
+PROBE_ONLY=1 sbatch src/slurm/probe_retrieval.sbatch                  # spread
+PROBE_ONLY=1 PROBE_ARGS="--anchor_norm center" sbatch ...             # and again
+PROBE_ONLY=1 PROBE_ARGS="--anchor_norm whiten" sbatch ...
+```
+(`PROBE_ARGS` passthrough is not in the sbatch yet - add it or edit the file.)
+
+Together with the chemo ablation this is two independent results pointing the
+same way: **neither side's representation is the lever.** Better protein input
+features change nothing, and better ligand encoders change nothing. What has
+never been tried is training the protein encoder with the contrastive
+objective, which is what `train.py` is for.
+
+## Training loop (`src/train.py`, `src/train_data.py`) - WRITTEN, NEVER RUN
+
+The loss:
+
+    s(P, L) = max over P's PREDICTED pocket anchors of cos(a, L) / tau
+    loss    = symmetric InfoNCE over the B x B batch matrix
+            + lam_pocket * per-point pocket BCE
+            + lam_site   * within-protein anchor cross-entropy (default 0)
+
+The pocket term is not decoration: anchors come from the predicted pocket map
+and region selection has no gradient, so if the head drifts the regions drift
+and the contrastive loss loses the places it was scoring. When no predicted
+region clears the positive rule, the step falls back to a **selector-shaped
+ball at the labelled pocket's centroid** (`train_data.fallback_region`), which
+closes open decision 3. A ball rather than the labelled point set itself: the
+point set has a size and shape the selector never produces, so training on it
+would be learning an anchor that cannot exist at inference. The RATE of that
+fallback is printed every evaluation and is the honest measure of how much the
+loop leans on labels it will not have.
+
+`lam_site` is the new, optional term: a cross-entropy over one protein's own
+pocket anchors with its labelled region as the (multi-)positive. InfoNCE only
+ever sees the max over anchors, so it is satisfied by a protein whose best
+anchor is in the wrong place; this says WHERE. It targets the known weakness,
+top1 0.64 against hit 0.86. Default 0 so the baseline stays clean.
+
+Data pipeline (`src/train_data.py`):
+- One ROW is an interaction; one SURFACE belongs to a receptor `input_id` and
+  several rows share it, so the two are cached separately.
+- `SurfaceStore`: disk cache (one ~1.1 MB npz per receptor, written to a temp
+  name and renamed) plus a bounded host-RAM LRU. Sampling is seeded from the
+  receptor's own identity, and the global RNG is restored afterwards - without
+  that, a cache MISS mid-training would reseed the process and every later draw
+  of the run would depend on which surfaces happened to be resident.
+- Training and validation get SEPARATE RAM stores over one disk cache, or every
+  evaluation would evict the whole training window and the next step would
+  evict it back.
+- Pocket labels are recomputed from the ligand's COORDINATES against the
+  surface in hand, never from a saved index.
+- **Other sites come from the item table itself**: every row sharing an
+  `input_id` is a sibling, and its ligand's neighbourhood is an ignore mask.
+  `probe_retrieval` needed `--other_ligands` pointing at a `labels.py`
+  directory for this; the table already knows, so nothing external is needed.
+- Sampling, splitting, masking and metrics are `probe_retrieval`'s functions,
+  imported rather than re-derived, so the probe and the full loop agree by
+  construction on what a batch, a split, a mask and a metric are.
+
+Two shared modules grew to support it, both default-off so every earlier result
+reproduces:
+- `anchors.pool_regions(mode=)`: `mean` (the original), `mean_std`, or
+  `shells` - n weighted means in equal-COUNT radial shells around the region's
+  own centroid. A single mean over ~290 points discards all arrangement inside
+  the region, which pocket DETECTION does not need and ligand DISCRIMINATION
+  does. Equal-count, not fixed-radius, so no shell is ever empty whatever the
+  selector's region sizes; distance to the region's own centroid, so it stays
+  rigid-motion invariant. `EncoderConfig.pool_mode`, `n_shells`.
+- `EncoderConfig.anchor_norm="batch"`: a BatchNorm1d on the pooled vector
+  before the projection, which subtracts the per-feature mean the whole dataset
+  shares. Learned running statistics rather than statistics fitted once,
+  because the encoder trains and anything fitted up front goes stale. This is
+  the direct attack on the 0.993 collapse.
+  `SurfaceEncoder.project_anchors()` is now public and `forward(project=False)`
+  exists, so the training loop can put the fallback anchor through the same
+  normalisation as the rest, in ONE call.
+
+Stages: `prepare` (CPU venv) -> `cache` (GPU, array-shardable, optional) ->
+`train` -> `eval`, plus `selftest`.
+
+How to run it:
+```
+# CPU venv
+python src/train.py prepare --index datasets/dataset_v1/index.parquet \
+    --out runs/v1 --split train --exclude encoder_test/items.tsv
+python src/ligand_features.py --index datasets/dataset_v1/index.parquet --out runs/v1
+# login node, container, no GPU: ~1-2 min
+apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox \
+    python src/train.py selftest
+# GPU
+sbatch src/slurm/cache_surfaces.sbatch          # optional, 16 tasks, ~25 min
+sbatch src/slurm/train.sbatch                   # smoke + the real run
+```
+`train.sbatch` **resumes itself**: `--max_hours 11` stops cleanly inside the
+12 h walltime and checkpoints, and resubmitting the same script picks up
+`last.pt`. A long run is a chain of these. The surface cache is shared, so the
+second job never resamples. A resumed run is reproducible from its own
+checkpoint but is NOT step-for-step identical to an uninterrupted one: the
+numpy sampler's state is not in the checkpoint, so it is reseeded from
+(seed, step). Said here rather than silently approximated.
+
+Read, per evaluation line: `mrr`/`top1` against `chance`, `site` (the ranking
+weakness), `AUROC`/`AP` (comparable to encoder_test's 0.937 / 0.47), `fb` (the
+fallback rate - high and flat means the loop is leaning on labels), and
+`cosdiff`, the median cosine between different proteins' top anchors. **0.993
+is the number to beat**, and nothing else in the log matters as much.
+
+## Pending jobs (ready to submit)
+
+1. **The training loop itself** (`src/slurm/train.sbatch`), the one that
+   matters. Self-tested, never on a GPU. See "Training loop" above for the
+   three commands. Submit the self-test first, on the login node; it costs a
+   minute or two and is the only thing standing between a typo and a wasted
+   queue wait.
+2. **Surface cache prefill** (`src/slurm/cache_surfaces.sbatch`), optional,
+   16 array tasks, ~25 min. Only moves work earlier - training fills the cache
+   lazily - but the first epoch is otherwise dominated by surface sampling.
+3. **Probe rerun** for the anchor-spread diagnostic and
+   `--anchor_norm center / whiten`; see "Ligand-arm probe" above. CPU-only via
+   `PROBE_ONLY=1`.
+4. **Paired base-vs-chemo bootstrap** from the per-item sweep TSVs; see the
+   chemo section. A small offline CPU script, not yet written.
+5. **Follow-up selector sweep** (`SWEEP_ONLY=1 sbatch
+   src/slurm/region_test.sbatch`): superseded by the apo test and the chemo
+   ablation, both of which scored every selector. Note it only runs
+   `region_sweep.py`, which is CPU-only, so it does not need the
+   `--gres=gpu:1` / `--nv` the sbatch requests.
+
+DONE and recorded above: the apo/holo/AlphaFold test, the chemo ablation, the
+ligand-arm probe. `encoder_test/head_pretrained_300.pt` exists;
+`src/slurm/head_ckpt.sbatch` rebuilds just that checkpoint in 30 min if it is
+ever lost, without the 4 h apo evaluation. To re-run the apo test:
+`python src/apo_pairs.py --links $PLINDER_DIR/links --index
+datasets/dataset_v1/index.parquet --exclude encoder_test/items.tsv --out
+apo_test/` (CPU), then `LIMIT=10 sbatch src/slurm/apo_test.sbatch` as a check,
+then the full run.
 
 ## Open design decisions (needed for training)
 
-Decisions 2-5 now have a WORKING IMPLEMENTATION in `probe_retrieval.py`,
-exercised only against frozen anchors so far. The training loop should reuse
-those functions rather than re-deriving them.
+Decisions 1-5 are SETTLED and implemented. `src/train.py` imports
+`probe_retrieval`'s versions of 2, 4 and 5 rather than re-deriving them, so the
+probe and the full loop cannot drift apart. What remains open is below them.
 
 1. **Which selector**: SETTLED as **`ball_R8`** - greedy fixed-radius balls,
    R 8 A, 2 mean-shift steps, seeded from each protein's top 5% after
@@ -313,18 +495,26 @@ those functions rather than re-deriving them.
    (hit 0.84 vs top1 0.64). Negative patches are never scored at inference.
    `--oracle` reports the score restricted to pocket-matching anchors, which
    bounds what better anchor RANKING could buy.
-3. **Training labels for regions**: implemented in
-   `probe_retrieval.region_labels`. positive = cover >= 0.5 and prec >= 0.3
-   (the `hit` rule); ignore = any other region with cover or prec >= 0.1,
-   near-duplicates included; negative = the rest. Nothing is forced in.
-   Still open: what to do when NO region is positive (the design proposes a
-   fallback ball at the labelled pocket's centroid, shaped like the selector's
-   own regions, with the rate logged); the probe simply reports the rate.
-4. **Other real sites**: handled by `--other_ligands`, a `labels.py` output
-   directory, read for its `lig_xyz` COORDINATES. Note `receptor_union.npz`
-   cannot be used for this: it stores point INDICES against the surface it was
-   written on, and anything that resamples a surface gets unrelated points -
-   the failure labels.py's own docstring warns about.
+3. **Training labels for regions**: SETTLED. positive = cover >= 0.5 and
+   prec >= 0.3 (the `hit` rule); ignore = any other region with cover or
+   prec >= 0.1, near-duplicates included (`ball_R8` makes ~4 of them per
+   protein); negative = the rest; the selector's negative patches are ignore
+   too, since nothing scores them at inference.
+   `probe_retrieval.region_labels` for frozen anchors,
+   `train_data.region_labels` for the loop. The no-positive case is now
+   CLOSED: a selector-shaped ball at the labelled pocket's centroid
+   (`train_data.fallback_region`), with the rate reported every evaluation.
+   A ball rather than the labelled point set, so the anchor the loss learns on
+   is one the selector could actually produce.
+4. **Other real sites**: SETTLED, two ways. `probe_retrieval` takes
+   `--other_ligands`, a `labels.py` output directory, read for its `lig_xyz`
+   COORDINATES. `train.py` needs nothing external: every row sharing an
+   `input_id` in the item table is a sibling ligand on the same receptor, so
+   the table already says where the other sites are.
+   Note `receptor_union.npz` cannot be used for either: it stores point
+   INDICES against the surface it was written on, and anything that resamples
+   a surface gets unrelated points - the failure `labels.py`'s own docstring
+   warns about.
 5. **Batch negatives**: implemented. `mask_pairs` masks a pair sharing a target
    group (`system_pocket_UniProt`, falling back to
    `pli_unique_qcov__95__strong__component`), the same ligand, or ECFP4
@@ -334,36 +524,53 @@ those functions rather than re-deriving them.
 
 ## Next steps (model training, on `claude/model-training`)
 
-1. Run the chemo ablation and the ligand-arm probe (pending jobs 2 and 3) -
-   both unblocked - and record both tables here. Then the contrastive loss over
-   anchor vectors in a real training loop: `probe_retrieval.info_nce` and its
-   false-negative masking are written and self-tested (all five arms learn a
-   planted pairing), but against frozen anchors only.
-   When that loop exists, RE-ASK the apo question at the vector level: the
-   between-protein cosine spread is the readout, and 0.993 is the number to
-   beat. Centre and whiten pooled vectors before the projection, and consider
-   pooling mean + std, or in radial shells around the ball centre, since a
-   single weighted mean over ~293 points discards all spatial arrangement -
-   which is what ligand DISCRIMINATION depends on, as opposed to pocket
-   detection.
-2. Data pipeline for full-scale training: surfaces cached once
-   (`src/extract.py` -> `feats/`), pocket labels (`src/labels.py` +
-   `pocket_qc.parquet`), a dataset/loader with target-balanced sampling.
-3. Training script + sbatch with checkpoints, validation retrieval metrics,
-   and the pocket loss kept as an auxiliary term.
-4. dataset_v2 (per-entry dedup, larger val/test, e.g. PLINDER's own val/test).
-5. Later: train with apo / AlphaFold receptors as augmentation if the apo test
-   shows a large holo-apo gap.
+1. **Run `train.py`.** Self-test on the login node, then
+   `sbatch src/slurm/train.sbatch` (which smokes itself first), then chain
+   resubmissions. Everything below waits on what that first real run says.
+2. **The 0.993 question, at the vector level.** This is the whole point of the
+   loop and `cosdiff` in its log is the readout. The two levers built for it
+   are `--anchor_norm batch` and `--pool_mode shells`; both are OFF by default,
+   so the first run is a clean baseline and the next two are the ablation. If
+   `cosdiff` does not move, nothing downstream of it will.
+   Once it does move, **re-ask the apo question**: `apo_eval.py`'s
+   vector-level numbers are uninterpretable while everything sits at 0.993,
+   and a contrastively trained encoder is the first thing worth re-measuring
+   there.
+3. **Scale.** `--val_max` caps validation at 400 proteins and `--batch` IS the
+   number of in-batch negatives, so batch size is a loss-quality knob, not
+   just a speed one. Expect to measure seconds per step from the first run and
+   size the chain from that.
+4. **dataset_v2**: per-entry dedup, larger val/test (PLINDER's own val/test are
+   891 / 1,120 against our 94 / 305). The loop's `--val_split` already accepts
+   the dataset's own splits, so this is a data job, not a code one.
+5. **Re-test the chemo channels at scale** - the ablation's negative result was
+   measured on 32 training proteins with 28 input channels, which is where
+   extra capacity shows up as memorisation rather than generalisation.
+6. **A size-only baseline arm** for the probe, to settle whether the ~7x chance
+   signal is size matching rather than chemical complementarity.
+7. Later: apo / AlphaFold receptors as training augmentation. The apo test
+   argues for it - AlphaFold inputs cost only 6% of AP against holo, and
+   `D_closed` holds up far better than expected, so closure is augmentation
+   rather than exclusion.
+8. Small known wart: `test_encoder.py` has no selector CLI, so the region
+   columns `encoder_test` / `chemo_test` print inline are the dead `watershed`
+   default. Harmless (overfit's loss is pocket BCE alone, so the maps are
+   selector-independent and `region_sweep.py` scores every selector offline on
+   them), but misleading to read. `train.py` and `probe_retrieval.py` both
+   take the flags.
 
-## Self-tests (no GPU, no data, seconds each)
+## Self-tests (no GPU, no data, no KeOps)
 
-All three PASS as of this commit. They run in the container on the LOGIN node -
-plain torch, no KeOps, no CUDA:
+They run in the container on the LOGIN node - plain torch, no KeOps, no CUDA.
+The first three PASS as of the last session. **`train.py selftest` is new and
+has never been run anywhere**, so run it first:
 
 ```
-apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python src/chemotype.py
-apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python src/ligand_encoder.py
-apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python src/probe_retrieval.py selftest
+EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
+$EX src/train.py selftest            # ~1-2 min, NEW
+$EX src/chemotype.py
+$EX src/ligand_encoder.py
+$EX src/probe_retrieval.py selftest  # 10-15 min
 ```
 
 - `chemotype.py`: typing tables (20 cases + full sidechain coverage), element
@@ -381,13 +588,39 @@ apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python sr
   synthetic rows where the 262 k linear map reaches 1.000. Arms are judged on
   `best_mrr` for that reason; all arms overfit this fixture and both figures
   are printed. Nothing here predicts real-molecule behaviour.
+- `train.py selftest`: 120 synthetic proteins (a sphere of 1200 points with a
+  ligand outside one patch) and a stub for the only three pieces that need
+  KeOps - the surface sampler, AtomNet and the convolution. Everything else is
+  the real code, in seven groups:
+  the item table; `SurfaceStore`'s disk round-trip, LRU bound, and the two
+  properties a cache lives or dies on (a surface depends only on the
+  receptor's identity, and sampling one leaves the global RNG untouched);
+  pocket labels and the sibling-ligand other-site mask; all three pooling
+  modes including shell pooling's rigid-motion and permutation invariance;
+  the region label rules; the training loop on a planted signal, where MRR
+  must beat max(0.30, 2 x chance) and the fallback rate must FALL as the head
+  learns; and gradients plus a checkpoint round-trip scoring identically,
+  which is what makes `--resume` meaningful.
+  The planted signal is deliberately two things: a constant pocket marker so
+  the head can find the pocket at all, and the ligand's latent so retrieval
+  has something to recover. The identity alone would not do - it changes sign
+  across proteins, so no linear head would ever find a pocket and the fallback
+  would fire forever, which is a fixture failure that looks like a code
+  failure.
+  Nothing here involves dMaSIF, so it says nothing about surface sampling or
+  the convolution.
 - `--cleanenv` strips `OMP_NUM_THREADS`, so pass it explicitly or the probe
   selftest runs single-threaded and takes 10x longer.
 
-**Unverified by anything so far: the GPU paths.** `chemotype.surface_features`
-on real atoms inside the conv, and `load_pretrained(inflate=True)` against a
-real checkpoint. `chemo_test.sbatch` runs the typing selftest and a 4-item
-smoke before its training arms, which is what would catch a shape error there.
+**Verified on a GPU since**: `chemotype.surface_features` on real atoms
+inside the conv and `load_pretrained(inflate=True)` against a real checkpoint,
+both by the chemo ablation (job 139099).
+
+**Unverified by anything so far**: the training loop against the real encoder.
+`pool_mode="shells"` and `anchor_norm="batch"` have never gone through
+`dMaSIFConv_seg`, and the whole of `train.py` has never run on a GPU - which is
+why `train.sbatch` smokes 64 interactions for 30 steps inside the same job
+before the real run.
 
 ## Code map (`src/`)
 
@@ -407,8 +640,10 @@ smoke before its training arms, which is what would catch a shape error there.
 | `ligand_features.py` | SMILES -> ECFP4 + descriptors + 2D graph, packed (CPU venv, rdkit) |
 | `ligand_encoder.py` | ligand arms (`LigandConfig`, `LigandEncoder`, `LigandData`); `python src/ligand_encoder.py` self-tests |
 | `probe_retrieval.py` | frozen-anchor retrieval probe: `prepare` / `dump` / `probe` / `selftest` |
-| `anchors.py` | region selectors, negatives, pooling |
+| `anchors.py` | region selectors, negatives, pooling (`mean` / `mean_std` / `shells`) |
+| `train_data.py` | items, surface store (disk + RAM LRU), pocket + other-site labels, the fallback region |
+| `train.py` | the contrastive loop: `prepare` / `cache` / `train` / `eval` / `selftest` |
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
-| `slurm/` | `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, build / fetch / smoke jobs; `dmasif.def` container |
+| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, build / fetch / smoke jobs; `dmasif.def` container |
