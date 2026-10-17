@@ -12,6 +12,8 @@ meta_*/
 /probe/
 /probe_selftest/
 /runs/
+/surfaces/
+/train_selftest/
 inspect*.txt
 *.log
 *.out
