@@ -39,6 +39,29 @@ def parse_chains(spec):
     return set(spec)
 
 
+def seed_for(tag, bits=31):
+    """Deterministic RNG seed for one protein, derived from its surface tag.
+
+    dMaSIF samples its surface stochastically. Seeding once per RUN makes a
+    protein's point cloud depend on how much randomness was consumed before it
+    - which proteins shared its batch, and where it sat in the concatenated
+    atom array. Two consequences, both bad for a cache: the same --seed gives
+    different points when batching changes (a resume, an --overwrite, a
+    different input order), and saved label indices then address unrelated
+    points. labels.py stores lig_xyz and n_points precisely to survive that.
+
+    Seeding per protein from its own identity removes the dependence entirely:
+    one protein, one surface, whatever else is in the batch.
+
+    sha256 rather than hash(): Python's hash() is salted per process, so it
+    would not reproduce across runs.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(str(tag).encode()).digest()
+    return int.from_bytes(digest[:8], "big") % (1 << bits)
+
+
 def surface_tag(stem, chains):
     """(file stem, chain set) -> the name of its .npz, without the extension.
 

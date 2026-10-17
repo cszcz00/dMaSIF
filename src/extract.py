@@ -205,13 +205,54 @@ def nearest_atoms(points, atoms, chunk=8192):
 
 
 @torch.no_grad()
-def embed_batch(net, proteins, device):
+def sample_surfaces(net, proteins, tags, device):
+    """Sample each protein's surface ALONE, seeded from its own tag.
+
+    dMaSIF draws sup_sampling random offsets per atom from one tensor spanning
+    the whole batch, so a protein's point cloud otherwise depends on which
+    proteins shared its batch and where it sat in the concatenated atom array.
+    That makes a cache non-reproducible: a resume, an --overwrite or a different
+    input order silently moves every point, and saved label indices then address
+    unrelated locations (see labels.py, which stores lig_xyz to survive it).
+
+    Sampling one protein at a time under ids.seed_for(tag) removes the
+    dependence: one protein, one surface. The CONV still runs batched; only the
+    parameterless sampler is per protein, so the cost is small.
+    """
+    from ids import seed_for
+
+    xyz, normals, batch = [], [], []
+    for i, (tag, p) in enumerate(zip(tags, proteins)):
+        torch.manual_seed(seed_for(tag))
+        a_xyz = torch.from_numpy(p["atom_xyz"]).to(device)
+        one = {
+            "atoms": a_xyz,
+            "atom_xyz": a_xyz,
+            "atomtypes": torch.nn.functional.one_hot(
+                torch.from_numpy(p["atom_type"]), num_classes=6).float().to(device),
+            "batch_atoms": torch.zeros(len(p["atom_type"]), dtype=torch.long, device=device),
+            "mesh_labels": None,
+            "triangles": None,
+        }
+        net.preprocess_surface(one)
+        xyz.append(one["xyz"])
+        normals.append(one["normals"])
+        batch.append(torch.full((len(one["xyz"]),), i, dtype=torch.long, device=device))
+    return torch.cat(xyz), torch.cat(normals), torch.cat(batch)
+
+
+@torch.no_grad()
+def embed_batch(net, proteins, device, tags=None):
     """
     Run dMaSIF on a list of parsed proteins in a single batch.
     Return list of results dictionaries, one per protein in batch. 
     results per protein identify 3D coordinates sampled surface points,
     computed features/embeddings for each of these points, and protein 
     atom nearest to each sampled surface point. 
+
+    With `tags`, surfaces are sampled per protein and reproducibly; see
+    sample_surfaces. Without them the old single-RNG-stream behaviour is kept,
+    so earlier caches can still be reproduced bit for bit.
     """
     atom_xyz = torch.cat([torch.from_numpy(p["atom_xyz"]) for p in proteins]).to(device)
     atom_type = torch.cat([torch.from_numpy(p["atom_type"]) for p in proteins])
@@ -228,7 +269,10 @@ def embed_batch(net, proteins, device):
         "mesh_labels": None,
         "triangles": None,
     }
-    net.preprocess_surface(P)  # sample surface points on batch proteins. Adds P["xyz"], P["normals"], P["batch"]
+    if tags is None:
+        net.preprocess_surface(P)  # sample surface points on batch proteins. Adds P["xyz"], P["normals"], P["batch"]
+    else:
+        P["xyz"], P["normals"], P["batch"] = sample_surfaces(net, proteins, tags, device)
     net(P)  # dMaSIF forward pass on batch surface samples. Adds P["input_features"], P["embedding_1"], P["embedding_2"]
 
     results = []
@@ -281,6 +325,11 @@ def main():
     ap.add_argument("--max_atoms", type=int, default=150_000, help="atom budget per GPU batch")
     ap.add_argument("--max_proteins", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--run_seed", action="store_true",
+                    help="seed once per RUN, the old behaviour: a protein's surface "
+                         "then depends on its batch, so the cache is not reproducible "
+                         "across resumes or input reorderings. Only for reproducing "
+                         "an existing cache bit for bit.")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
@@ -317,16 +366,20 @@ def main():
     print(f"{len(todo)} proteins to embed")
 
     meta = {"ckpt": a.ckpt, "config": SEARCH_CONFIG, "seed": a.seed,
-            "sampler_defaults": sampler_defaults()}
+            "sampler_defaults": sampler_defaults(),
+            "seeding": "run" if a.run_seed else "per-protein ids.seed_for(tag)"}
     t0, n_done = time.time(), 0
     for batch in batches_by_atoms(todo, a.max_atoms, a.max_proteins):
         tags, prots = zip(*batch)
+        seed_tags = None if a.run_seed else list(tags)
         try:
-            results = embed_batch(net, list(prots), a.device)
+            results = embed_batch(net, list(prots), a.device, tags=seed_tags)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             print(f"[oom] batch of {len(batch)}; retrying one at a time")
-            results = [embed_batch(net, [p], a.device)[0] for p in prots]
+            results = [embed_batch(net, [p], a.device,
+                                   tags=None if seed_tags is None else [t])[0]
+                       for t, p in zip(tags, prots)]
         for tag, prot, r in zip(tags, prots, results):
             has_h = bool((prot["atom_type"] == ELE2NUM["H"]).any())
             np.savez_compressed(

@@ -90,6 +90,18 @@ def smooth(values, offsets, nbrs):
 
 # `cache`, where accepted, is a dict reused across calls on the SAME xyz and
 # prob (region_sweep.py runs many selectors per protein); None recomputes.
+#
+# Only ("nbr", radius) is independent of `prob`: the radius neighbour lists,
+# which are the one O(N^2) step here. ("smooth", r) and ("proposals", ...) are
+# functions OF prob, so they may be reused across selector settings on a fixed
+# map - what region_sweep.py does - but must NOT survive a training step, where
+# prob changes as the head learns; a stale smoothed map would drive every
+# selection thereafter, silently.
+#
+# An ALLOWLIST on purpose. select_regions() keeps these keys and drops
+# everything else, so any quantity cached here in future is discarded by
+# default and has to be added deliberately. A blocklist would persist it.
+PROB_INDEPENDENT = ("nbr",)
 def _neighbors(xyz, radius, cache=None):
     key = ("nbr", float(radius))
     if cache is None or key not in cache:
@@ -424,7 +436,8 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
                    neg_size=None, neg_exclusion=4.0, neg_allowed=None,
                    forced=None, dup_overlap=0.5, generator=None,
                    method="watershed", persistence=0.0, ball_radius=10.0, ball_shift=1,
-                   ball_rank="seed", nms_score="sum", nms_iou=0.3, nms_alpha=0.0):
+                   ball_rank="seed", nms_score="sum", nms_iou=0.3, nms_alpha=0.0,
+                   cache=None):
     """Pocket and negative regions on one protein surface.
 
     xyz (N, 3), prob (N,) pocket probabilities in [0, 1].
@@ -437,11 +450,31 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
     size, or 4 * min_points when there are none.
     neg_exclusion: A; negative points must be this far from every pocket region.
 
+    cache: a dict OWNED BY THE CALLER and kept alongside this protein's surface,
+    so the radius neighbour lists - a chunked all-pairs cdist, the one O(N^2)
+    step here - are built once instead of on every forward pass. Entries that
+    depend on `prob` are dropped before returning; see PROB_INDEPENDENT. The cache
+    is valid for ONE protein's point cloud, so it is checked against the points
+    it was built on.
+
     Returns (regions, is_pos): a list of up to k_pos + k_neg index tensors
     (pocket regions first), and a bool tensor marking which are pocket regions.
     """
     xyz = xyz.detach().float().cpu()
     prob = prob.detach().float().cpu()
+
+    if cache is not None:
+        # A cache reused across proteins would return one protein's neighbour
+        # lists for another's points, silently. Point count plus the first and
+        # last coordinates catches that, and uses exact values rather than a
+        # float sum, which over ~37k float32 values lands where the precision
+        # is coarser than any sane rounding.
+        stamp = (len(xyz), tuple(xyz[0].tolist()), tuple(xyz[-1].tolist()))
+        seen = cache.setdefault("_stamp", stamp)
+        if seen != stamp:
+            raise ValueError(
+                f"region cache was built for points {seen} but is being used "
+                f"for {stamp}; a cache belongs to exactly one protein surface")
 
     pos = [torch.as_tensor(f).long().cpu() for f in (forced or [])][:k_pos]
     taken = torch.zeros(len(xyz), dtype=torch.bool)
@@ -449,7 +482,7 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
         taken[f] = True
     for r in pocket_regions(xyz, prob, method, threshold, top_fraction, link_radius,
                             smooth_radius, min_points, persistence, ball_radius, ball_shift,
-                            ball_rank, nms_score, nms_iou, nms_alpha):
+                            ball_rank, nms_score, nms_iou, nms_alpha, cache=cache):
         if len(pos) == k_pos:
             break
         if taken[r].float().mean() > dup_overlap:
@@ -467,6 +500,12 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
     neg = negative_regions(xyz, prob, k_neg, neg_size, exclude, neg_quantile,
                            None if neg_allowed is None else neg_allowed.detach().cpu(),
                            generator)
+
+    if cache is not None:
+        for key in [k for k in cache
+                    if not (k == "_stamp"
+                            or (isinstance(k, tuple) and k[0] in PROB_INDEPENDENT))]:
+            del cache[key]
 
     is_pos = torch.tensor([True] * len(pos) + [False] * len(neg), dtype=torch.bool)
     return pos + neg, is_pos

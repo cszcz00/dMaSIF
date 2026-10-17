@@ -169,6 +169,8 @@ class SurfaceEncoder(nn.Module):
     def forward(self, P, forced=None, generator=None):
         """P: dict with atom_xyz (M,3), atomtypes (M,6) one-hot, batch_atoms (M,),
         and optionally a cached surface: xyz (N,3), normals (N,3), batch (N,).
+        P["region_cache"]: optional list of per-protein dicts that persist the
+        selector's neighbour lists across steps (see anchors.select_regions).
         forced: optional list, per protein, of lists of point-index tensors
         (LOCAL to that protein) taken as pocket regions first, e.g. the
         labelled pocket during training.
@@ -214,6 +216,11 @@ class SurfaceEncoder(nn.Module):
         size = torch.zeros(n_prot, K, dtype=torch.long, device=xyz.device)
         is_pos = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
         valid = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
+        # One dict per protein, owned by the caller and kept with its cached
+        # surface, so ball_R8's radius neighbour lists (a chunked all-pairs
+        # cdist, the only O(N^2) step in selection) are built once rather than
+        # on every forward pass.
+        caches = P.get("region_cache")
         all_regions = []
         for b in range(n_prot):
             sel = (batch == b).nonzero().squeeze(1)
@@ -231,7 +238,8 @@ class SurfaceEncoder(nn.Module):
                 method=c.region_method, persistence=c.region_persistence,
                 ball_radius=c.region_ball_radius, ball_shift=c.region_ball_shift,
                 ball_rank=c.region_ball_rank, nms_score=c.region_nms_score,
-                nms_iou=c.region_nms_iou, nms_alpha=c.region_nms_alpha)
+                nms_iou=c.region_nms_iou, nms_alpha=c.region_nms_alpha,
+                cache=None if caches is None else caches[b])
             n = len(regions)
             if n:
                 vec[b, :n] = pool_regions(emb[sel], prob[sel], regions)

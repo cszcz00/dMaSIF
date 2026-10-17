@@ -141,20 +141,33 @@ def to_batch(items, device, with_surface=True):
             P["xyz"].append(it["xyz"])
             P["normals"].append(it["normals"])
             P["batch"].append(torch.full((len(it["xyz"]),), i))
-    return {k: torch.cat(v).to(device) for k, v in P.items()}
+    out = {k: torch.cat(v).to(device) for k, v in P.items()}
+    # Not a tensor, so it cannot go through the concatenation above.
+    if all("region_cache" in it for it in items):
+        out["region_cache"] = [it["region_cache"] for it in items]
+    return out
 
 
 def attach_surfaces(enc, items, device, cutoff):
-    """Sample each surface once; label pocket points; record frame distance."""
+    """Sample each surface once; label pocket points; record frame distance.
+
+    Seeded per item from its own id, so a surface depends only on that protein
+    and not on how many items were loaded before it. Also gives each item the
+    dict that persists the selector's neighbour lists across steps.
+    """
     import torch
 
+    from ids import seed_for
+
     for it in items:
+        torch.manual_seed(seed_for(it["id"]))
         P = to_batch([it], device, with_surface=False)
         xyz, normals, _ = enc.sample_surface(P["atom_xyz"], P["atomtypes"], P["batch_atoms"])
         it["xyz"], it["normals"] = xyz.cpu(), normals.cpu()
         d = torch.cdist(it["xyz"], torch.from_numpy(it["lig"])).min(1).values
         it["pocket"] = d < cutoff
         it["min_dist"] = float(d.min())
+        it["region_cache"] = {}
 
 
 def auroc(score, label):
