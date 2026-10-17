@@ -9,6 +9,9 @@ meta_*/
 /datasets/
 /encoder_test/
 /apo_test/
+/probe/
+/probe_selftest/
+/runs/
 inspect*.txt
 *.log
 *.out
