@@ -293,9 +293,20 @@ those functions rather than re-deriving them.
    numbers assume the right ball is somewhere in the top 8.
    `watershed_old` is dead - its top region moves 5.0 A from RESAMPLING alone,
    before any conformational change.
-   It stays a config field, not code. `EncoderConfig`'s default is still
-   `watershed` so earlier results reproduce; every sbatch passes
-   `--region_method ball --ball_radius 8 --ball_shift 2`.
+   It stays a config field, not code, and `EncoderConfig`'s default is still
+   `watershed` so earlier results reproduce. But NOTE: only
+   `probe_retrieval.sbatch` passes `--region_method ball --ball_radius 8
+   --ball_shift 2`. `test_encoder.py` has NO selector CLI, so anything run
+   through it - `encoder_test`, `chemo_test` - silently uses the dead watershed
+   default, and the region columns those jobs print inline (`hit`, `top1`,
+   `#reg`, `size`, `cover`, `prec`) are watershed numbers.
+   That does not invalidate those runs: `overfit`'s loss is pocket BCE alone,
+   the anchors are computed and never used, so no gradient flows through region
+   selection and both the trained head and the dumped maps are
+   selector-independent. `region_sweep.py` then scores all six selectors
+   offline on those maps. Read the sweep TSV, not the inline region columns.
+   Worth fixing by giving `test_encoder.py` the selector flags, so the inline
+   table stops being misleading.
 2. **How a ligand is scored against a protein's anchors**: settled as **max
    over the selector's pocket anchors** (multiple-instance,
    `ProbeModel.scores`), because anchor recall is far above top-1 for balls
