@@ -136,9 +136,10 @@ def random_rotation(rng):
 
 def place_linked(path, holo, holo_res, lig, a, is_pred):
     """Linked chain -> atoms in the holo frame, trimmed, plus placement stats."""
+    import chemotype
     from extract import load_protein_atoms
 
-    p = load_protein_atoms(path, None, keep_hydrogens=False)
+    p = chemotype.annotate(load_protein_atoms(path, None, keep_hydrogens=False))
     res = residue_table(p)
     holo_seq = "".join(r["aa"] for r in holo_res)
     best = None
@@ -178,7 +179,10 @@ def place_linked(path, holo, holo_res, lig, a, is_pred):
     xyz = (p["atom_xyz"][mask].astype(np.float64) @ R.T + t).astype(np.float32)
     stats = {"ident": ident, "n_res": len(rc), "n_kept": len(keep), "n_low_plddt": n_low,
              "fit": kind, "n_fit": len(fit), "fit_rmsd": rmsd}
-    return {"atom_xyz": xyz, "atom_type": p["atom_type"][mask]}, stats
+    # atom_groups must be subset by the SAME mask, or the typing silently
+    # misaligns with the coordinates it describes.
+    return {"atom_xyz": xyz, "atom_type": p["atom_type"][mask],
+            "atom_groups": p["atom_groups"][mask]}, stats
 
 
 # ----------------------------------------------------------------------------
@@ -258,6 +262,7 @@ def main():
 
     import torch
 
+    import chemotype
     from extract import load_protein_atoms
     from ids import parse_chains
     from test_encoder import load_checkpoint, read_sdf_heavy
@@ -290,18 +295,20 @@ def main():
     for n, pr in enumerate(pairs):
         sid = pr["system_id"]
         try:
-            holo = load_protein_atoms(pr["input_path"], parse_chains(pr["input_chains"]),
-                                      keep_hydrogens=False)
+            holo = chemotype.annotate(load_protein_atoms(
+                pr["input_path"], parse_chains(pr["input_chains"]), keep_hydrogens=False))
             lig = np.concatenate([read_sdf_heavy(p) for p in pr["sdf_paths"].split(",")])
             holo_res = residue_table(holo)
         except Exception as e:  # noqa: BLE001 - report and move on
             fails.append((sid, "holo", repr(e)))
             continue
         R0 = random_rotation(rng)
-        versions = {"holo": ({"atom_xyz": holo["atom_xyz"], "atom_type": holo["atom_type"]},
+        versions = {"holo": ({"atom_xyz": holo["atom_xyz"], "atom_type": holo["atom_type"],
+                              "atom_groups": holo["atom_groups"]},
                              lig, np.eye(3), {}),
                     "holo_rs": ({"atom_xyz": (holo["atom_xyz"] @ R0.T).astype(np.float32),
-                                 "atom_type": holo["atom_type"]},
+                                 "atom_type": holo["atom_type"],
+                                 "atom_groups": holo["atom_groups"]},
                                 (lig @ R0.T).astype(np.float32), R0.T, {})}
         for kind in ("apo", "pred"):
             link_id = pr[f"{kind}_id"]
@@ -318,7 +325,8 @@ def main():
         res = {}
         for v, (atoms, lg, back, st) in versions.items():
             it = {"id": f"{sid}:{v}", "atom_xyz": atoms["atom_xyz"],
-                  "atom_type": atoms["atom_type"], "lig": lg}
+                  "atom_type": atoms["atom_type"],
+                  "atom_groups": atoms["atom_groups"], "lig": lg}
             try:
                 res[v] = evaluate_version(enc, it, back, a, a.device) + (st,)
             except Exception as e:  # noqa: BLE001

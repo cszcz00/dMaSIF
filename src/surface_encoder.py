@@ -1,7 +1,8 @@
 """Protein-side encoder: receptor atoms -> K anchor vectors in representation space.
 
     atoms ──(1) dMaSIF surface sampler──> surface points + normals     no grad
-          ──(2) curvatures (10)  +  AtomNet_MP chemistry (6)──> 16 input feats
+          ──(2) curvatures (10) + AtomNet_MP chemistry (6)
+                + optional pharmacophore channels (chemotype.py, 12)──> input feats
           ──(3) dMaSIFConv_seg, weights re-learned──> point embeddings (E)
           ──(4) pocket head──> one logit per point, trained as "pocket-ness"
           ──(5) region anchors: k_pos pocket regions grown from the pocket
@@ -33,6 +34,7 @@ import torch.nn.functional as F
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import chemotype  # noqa: E402
 import dmasif_compat  # noqa: E402
 from anchors import pool_regions, select_regions  # noqa: E402
 
@@ -51,6 +53,10 @@ class EncoderConfig:
     # (2) input features
     curvature_scales: tuple = (1.0, 2.0, 3.0, 5.0, 10.0)
     atom_dims: int = 6
+    # Pharmacophore channels (chemotype.py): composition, buriedness, proximity.
+    # Off by default so every existing checkpoint and result is reproducible.
+    chemo: bool = False
+    chemo_sigmas: tuple = (3.0, 6.0, 9.0)
     dropout: float = 0.0
     # (3) convolution; these match the published search checkpoint
     emb_dims: int = 16
@@ -84,8 +90,14 @@ class EncoderConfig:
     repo: str = field(default=str(DEFAULT_REPO))
 
     @property
+    def chemo_dims(self):
+        # Derived from this config's own scales, so changing chemo_sigmas cannot
+        # leave in_channels disagreeing with what surface_features() returns.
+        return chemotype.dims(tuple(self.chemo_sigmas)) if self.chemo else 0
+
+    @property
     def in_channels(self):
-        return 2 * len(self.curvature_scales) + self.atom_dims
+        return 2 * len(self.curvature_scales) + self.atom_dims + self.chemo_dims
 
 
 def _mlp(i, h, o):
@@ -125,14 +137,33 @@ class SurfaceEncoder(nn.Module):
             sup_sampling=c.sup_sampling, variance=c.variance)
 
     # ------------------------------------------------------------------ (2)
-    def input_features(self, xyz, normals, batch, atom_xyz, atomtypes, batch_atoms):
+    def input_features(self, xyz, normals, batch, atom_xyz, atomtypes, batch_atoms,
+                       atom_groups=None, chemo=None):
+        """-> (N, in_channels): curvatures, AtomNet chemistry, chemo channels.
+
+        `chemo` lets a caller pass precomputed pharmacophore channels, since
+        they are deterministic given (atoms, points) and cache with the
+        surface; `atom_groups` (M, 6) is what they are computed FROM.
+        """
         from geometry_processing import curvatures
 
         with torch.no_grad():  # geometry has no parameters
             curv = curvatures(xyz, normals=normals, batch=batch,
                               scales=list(self.cfg.curvature_scales))
         chem = self.atomnet(xyz, atom_xyz, atomtypes, batch, batch_atoms)
-        return torch.cat([curv, chem], dim=1).contiguous()
+        parts = [curv, chem]
+        if self.cfg.chemo_dims:
+            if chemo is None:
+                if atom_groups is None:
+                    raise ValueError(
+                        "cfg.chemo is set but the batch carries neither atom_groups "
+                        "nor a precomputed `chemo` block. Call chemotype.annotate() "
+                        "on each protein when it is loaded.")
+                chemo = chemotype.surface_features(
+                    xyz, batch, atom_xyz, atom_groups, batch_atoms,
+                    sigmas=tuple(self.cfg.chemo_sigmas))
+            parts.append(chemo.to(curv.dtype))
+        return torch.cat(parts, dim=1).contiguous()
 
     # ------------------------------------------------------------- (2)-(6)
     def forward(self, P, forced=None, generator=None):
@@ -167,7 +198,8 @@ class SurfaceEncoder(nn.Module):
         xyz, normals, batch = P["xyz"], P["normals"], P["batch"]
 
         feats = self.dropout(self.input_features(
-            xyz, normals, batch, P["atom_xyz"], P["atomtypes"], P["batch_atoms"]))
+            xyz, normals, batch, P["atom_xyz"], P["atomtypes"], P["batch_atoms"],
+            atom_groups=P.get("atom_groups"), chemo=P.get("chemo")))
         self.conv.load_mesh(xyz, normals=normals,
                             weights=self.orientation_scores(feats), batch=batch)
         emb = self.conv(feats)
@@ -222,13 +254,57 @@ class SurfaceEncoder(nn.Module):
         }
 
     # ------------------------------------------------------------------
-    def load_pretrained(self, ckpt=None, parts=("atomnet", "orientation_scores", "conv")):
+    # The only tensors whose shape depends on in_channels. Everything else in
+    # the conv stack is (emb_dims -> emb_dims) and loads unchanged.
+    INPUT_TENSORS = ("conv.layers.0.net_in.0.weight",
+                     "conv.linear_transform.0.weight",
+                     "orientation_scores.0.weight")
+
+    def _inflate_inputs(self, take):
+        """Widen the checkpoint's three input-side weights to in_channels.
+
+        Pretrained columns are copied and the new ones zeroed, so at step 0 the
+        network computes EXACTLY the pretrained function while gradients still
+        reach the new columns from the first step. Exact because nothing
+        learned normalises the input before these layers (the conv's GroupNorm
+        sits on the hidden dims, which do not change).
+
+        A new channel must be finite: it is multiplied by zero, and 0 * inf is
+        NaN, not 0.
+        """
+        target = self.state_dict()
+        out, grown = dict(take), []
+        for key in self.INPUT_TENSORS:
+            if key not in out:
+                continue
+            old, want = out[key], tuple(target[key].shape)
+            if tuple(old.shape) == want:
+                continue
+            if old.shape[0] != want[0] or old.shape[1] > want[1]:
+                raise RuntimeError(
+                    f"{key}: cannot inflate {tuple(old.shape)} -> {want}; only the "
+                    "input width may grow")
+            new = old.new_zeros(want)
+            new[:, :old.shape[1]] = old
+            out[key] = new
+            grown.append(f"{key} {old.shape[1]}->{want[1]}")
+        if grown:
+            print("inflated input weights (pretrained function preserved at init): "
+                  + "; ".join(grown))
+        return out
+
+    def load_pretrained(self, ckpt=None, parts=("atomnet", "orientation_scores", "conv"),
+                        inflate=True):
         """Start the named parts from the published search checkpoint (its first
         branch). Needs emb_dims, n_layers, radius and curvature_scales at their
-        defaults. Returns the list of loaded tensor names."""
+        defaults. With `inflate`, extra input channels are zero-padded instead
+        of refusing to load; it is a no-op when in_channels is unchanged.
+        Returns the list of loaded tensor names."""
         ckpt = ckpt or Path(self.cfg.repo) / "models" / "dMaSIF_search_3layer_12A_16dim"
         state = torch.load(ckpt, map_location="cpu", weights_only=False)["model_state_dict"]
         take = {k: v for k, v in state.items() if k.split(".")[0] in parts}
+        if inflate:
+            take = self._inflate_inputs(take)
         missing, unexpected = self.load_state_dict(take, strict=False)
         wanted = [k for k in missing if k.split(".")[0] in parts]
         if wanted or unexpected:

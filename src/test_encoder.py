@@ -95,6 +95,7 @@ def read_sdf_heavy(path):
 
 
 def load_items(path, n, keep_h):
+    import chemotype
     from extract import load_protein_atoms
     from ids import parse_chains
 
@@ -103,12 +104,12 @@ def load_items(path, n, keep_h):
     items = []
     for ln in lines[1:1 + n]:
         r = dict(zip(header, ln.split("\t")))
-        prot = load_protein_atoms(r["input_path"], parse_chains(r["input_chains"]),
-                                  keep_hydrogens=keep_h)
+        prot = chemotype.annotate(load_protein_atoms(
+            r["input_path"], parse_chains(r["input_chains"]), keep_hydrogens=keep_h))
         lig = np.concatenate([read_sdf_heavy(p) for p in r["sdf_paths"].split(",")])
         items.append({"id": r["system_id"], "split": r["split"],
                       "atom_xyz": prot["atom_xyz"], "atom_type": prot["atom_type"],
-                      "lig": lig})
+                      "atom_groups": prot["atom_groups"], "lig": lig})
     return items
 
 
@@ -118,11 +119,24 @@ def to_batch(items, device, with_surface=True):
     P = {"atom_xyz": [], "atomtypes": [], "batch_atoms": []}
     if with_surface:
         P.update(xyz=[], normals=[], batch=[])
+    # Only when EVERY item carries it: a batch half-typed would silently give
+    # some proteins zeroed pharmacophore channels.
+    groups = all("atom_groups" in it for it in items)
+    if groups:
+        P["atom_groups"] = []
     for i, it in enumerate(items):
         P["atom_xyz"].append(torch.from_numpy(it["atom_xyz"]))
         P["atomtypes"].append(torch.nn.functional.one_hot(
             torch.from_numpy(it["atom_type"]), 6).float())
         P["batch_atoms"].append(torch.full((len(it["atom_type"]),), i))
+        if groups:
+            g = it["atom_groups"]
+            if len(g) != len(it["atom_type"]):
+                raise ValueError(
+                    f"{it.get('id', '?')}: {len(g)} atom_groups rows for "
+                    f"{len(it['atom_type'])} atoms; the typing was not subset "
+                    "alongside the coordinates")
+            P["atom_groups"].append(torch.from_numpy(g))
         if with_surface:
             P["xyz"].append(it["xyz"])
             P["normals"].append(it["normals"])
@@ -261,7 +275,11 @@ def make_encoder(a, device):
     torch.manual_seed(a.seed)
     enc = SurfaceEncoder(EncoderConfig(
         k_pos=a.k_pos, k_neg=a.k_neg, region_threshold=a.threshold,
+        chemo=getattr(a, "chemo", False),
         region_top_fraction=None if a.top_fraction <= 0 else a.top_fraction)).to(device)
+    print(f"input channels: {enc.cfg.in_channels} "
+          f"({2 * len(enc.cfg.curvature_scales)} curvature + {enc.cfg.atom_dims} atomnet"
+          + (f" + {enc.cfg.chemo_dims} chemo" if enc.cfg.chemo_dims else "") + ")")
     if a.pretrained:
         print(f"loaded {len(enc.load_pretrained())} pretrained tensors")
     return enc
@@ -400,6 +418,9 @@ def main():
                        help="default strips H so every structure is treated alike")
         p.add_argument("--pretrained", action="store_true",
                        help="start features + conv from the published checkpoint")
+        p.add_argument("--chemo", action="store_true",
+                       help="add the 12 pharmacophore channels (chemotype.py) to the "
+                            "conv input; pretrained input weights are inflated")
         p.add_argument("--k_pos", type=int, default=8)
         p.add_argument("--k_neg", type=int, default=8)
         p.add_argument("--top_fraction", type=float, default=0.05,

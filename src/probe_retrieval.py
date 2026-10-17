@@ -177,6 +177,7 @@ def prepare(a):
 # ---------------------------------------------------------------------------
 def load_probe_items(path, n=None):
     """items.tsv -> item dicts with atoms and ligand coordinates loaded."""
+    import chemotype
     from extract import load_protein_atoms
     from ids import parse_chains
     from test_encoder import read_sdf_heavy
@@ -190,8 +191,8 @@ def load_probe_items(path, n=None):
             continue
         r = dict(zip(header, ln.split("\t")))
         try:
-            prot = load_protein_atoms(r["input_path"], parse_chains(r["input_chains"]),
-                                      keep_hydrogens=False)
+            prot = chemotype.annotate(load_protein_atoms(
+                r["input_path"], parse_chains(r["input_chains"]), keep_hydrogens=False))
             lig = np.concatenate([read_sdf_heavy(p) for p in r["sdf_paths"].split(",")])
         except Exception as e:
             failed.append((r["system_id"], f"{type(e).__name__}: {e}"))
@@ -200,7 +201,7 @@ def load_probe_items(path, n=None):
                       "split": r["split"], "group": r["group"],
                       "fp_row": int(r["fp_row"]), "smiles": r.get("smiles", ""),
                       "atom_xyz": prot["atom_xyz"], "atom_type": prot["atom_type"],
-                      "lig": lig})
+                      "atom_groups": prot["atom_groups"], "lig": lig})
     if failed:
         print(f"[skip] {len(failed)} items failed to load; first few:")
         for sid, msg in failed[:5]:
