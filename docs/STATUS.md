@@ -428,11 +428,13 @@ is the number to beat**, and nothing else in the log matters as much.
 
 ## Pending jobs (ready to submit)
 
+0. **`bash src/train_check.sh`** on the login node, before anything is
+   submitted: seven stages, no queue, and stage 5 runs the real encoder on
+   CPU. See "End-to-end pipeline check" below. This is the thing standing
+   between a typo and a wasted queue wait.
 1. **The training loop itself** (`src/slurm/train.sbatch`), the one that
    matters. Self-tested, never on a GPU. See "Training loop" above for the
-   three commands. Submit the self-test first, on the login node; it costs a
-   minute or two and is the only thing standing between a typo and a wasted
-   queue wait.
+   three commands.
 2. **Surface cache prefill** (`src/slurm/cache_surfaces.sbatch`), optional,
    16 array tasks, ~25 min. Only moves work earlier - training fills the cache
    lazily - but the first epoch is otherwise dominated by surface sampling.
@@ -559,11 +561,48 @@ probe and the full loop cannot drift apart. What remains open is below them.
    them), but misleading to read. `train.py` and `probe_retrieval.py` both
    take the flags.
 
+## End-to-end pipeline check (`src/train_check.sh`) - LOGIN NODE, no queue
+
+One command, seven stages, nothing touching `runs/` or `surfaces/`:
+
+```
+bash src/train_check.sh                                    # ~15-30 min
+LIG=$WORK/probe/ligand_feats.npz bash src/train_check.sh   # skips stage 4
+```
+
+1 imports and config arithmetic; 2 `train.py selftest`; 3 `prepare` on the real
+index; 4 ligand features; 5 **the real encoder on CPU** - Biopython parse,
+dMaSIF surface sampling, AtomNet, `dMaSIFConv_seg`, region selection, pooling,
+InfoNCE + pocket BCE, a checkpoint; 6 resume from `last.pt`, checking both that
+the step advanced and that no surface was resampled; 7 `eval` from that
+checkpoint.
+
+Stage 5 deliberately runs `--pool_mode shells --anchor_norm batch --lam_site
+0.5` and `--head_ckpt`, because those four paths have never met the real
+convolution and this is the cheapest place to find out that they do
+(`load_head`'s shape filter comes along for free: the saved head has a `mean`
+projection that cannot fit a shells run). It uses `--sup_sampling 6` instead of
+20, so the surfaces are ~3x sparser and the pass takes minutes rather than an
+hour of login-node CPU - a SHAPE check, not a training run, and the metrics it
+prints are noise. KeOps also compiles its CPU kernels the first time, a few
+minutes of g++ on top.
+
+It proves the pipeline executes on real data. It says nothing about GPU
+execution (KeOps compiles different kernels for CUDA; `train.sbatch`'s sm_120
+check and its 64-item smoke are what cover that), nothing about model quality,
+and nothing about step timing - CPU KeOps is orders of magnitude off.
+`rm -rf $WORK/train_check` undoes all of it.
+
+The shell plumbing - stage sequencing, the pass/fail/skip summary, the exit
+code, the cascade message - was verified against stubbed binaries. The stages
+themselves have not been run; there was no torch where this was written.
+
 ## Self-tests (no GPU, no data, no KeOps)
 
 They run in the container on the LOGIN node - plain torch, no KeOps, no CUDA.
 The first three PASS as of the last session. **`train.py selftest` is new and
-has never been run anywhere**, so run it first:
+has never been run anywhere**, so run it first - or just run
+`src/train_check.sh`, whose stage 2 is exactly this:
 
 ```
 EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
@@ -643,6 +682,7 @@ before the real run.
 | `anchors.py` | region selectors, negatives, pooling (`mean` / `mean_std` / `shells`) |
 | `train_data.py` | items, surface store (disk + RAM LRU), pocket + other-site labels, the fallback region |
 | `train.py` | the contrastive loop: `prepare` / `cache` / `train` / `eval` / `selftest` |
+| `train_check.sh` | login-node end-to-end check of the whole pipeline, 7 stages, no GPU |
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
