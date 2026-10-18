@@ -108,7 +108,8 @@ def build_model(a, device):
         region_persistence=a.persistence, region_nms_iou=a.nms_iou,
         region_nms_alpha=a.nms_alpha, region_nms_score=a.nms_score,
         pool_mode=a.pool_mode, n_shells=a.n_shells, anchor_norm=a.anchor_norm,
-        out_dim=a.out_dim, dropout=a.enc_dropout)
+        out_dim=a.out_dim, dropout=a.enc_dropout,
+        resolution=a.resolution, sup_sampling=a.sup_sampling)
     lig_cfg = LigandConfig(arm=a.arm, out_dim=a.out_dim, hidden=a.hidden,
                            dropout=a.lig_dropout, gnn_hidden=a.gnn_hidden,
                            gnn_layers=a.gnn_layers)
@@ -139,6 +140,12 @@ def build_model(a, device):
     print(f"encoder: {enc_cfg.in_channels} input channels -> {enc_cfg.emb_dims} dims "
           f"-> {enc_cfg.pooled_dims} pooled ({enc_cfg.pool_mode}) -> {a.out_dim}; "
           f"anchor_norm {enc_cfg.anchor_norm}")
+    print(f"surface sampler: resolution {enc_cfg.resolution}, sup_sampling "
+          f"{enc_cfg.sup_sampling}"
+          + ("" if enc_cfg.sup_sampling == 20 and enc_cfg.resolution == 1.0 else
+             "   <- NOT the dMaSIF default (1.0 / 20). The surfaces this writes "
+             "to the cache are coarser than a real run's, so keep them in a "
+             "cache directory of their own."))
     n_enc = sum(p.numel() for p in model.encoder.parameters())
     print(f"parameters: encoder {n_enc:,}, ligand ({a.arm}) "
           f"{model.ligand.n_params():,}")
@@ -1280,6 +1287,13 @@ def add_model_args(p):
     p.add_argument("--anchor_norm", default="none",
                    help="none | batch; 'batch' subtracts the shared direction "
                         "that puts different proteins at cosine 0.993")
+    p.add_argument("--resolution", type=float, default=1.0,
+                   help="dMaSIF surface sampler; leave at the default for any "
+                        "run whose surfaces are meant to be reused")
+    p.add_argument("--sup_sampling", type=int, default=20,
+                   help="candidate points per atom in the sampler. Lowering it "
+                        "makes a coarser surface FAR faster, which is only for "
+                        "shape checks - never for a real run")
     p.add_argument("--pretrained", action="store_true",
                    help="start the dMaSIF parts from the published checkpoint")
     p.add_argument("--head_ckpt", default="",
