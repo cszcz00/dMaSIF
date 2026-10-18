@@ -34,7 +34,7 @@
 #                before any contrastive training. This is the number to move.
 #
 # Overrides: RUN, STEPS, BATCH, ARM, LR, LAM_POCKET, LAM_SITE, POOL_MODE,
-#   ANCHOR_NORM, MAX_HOURS, LIMIT, SURFACES, CHEMO=1, SKIP_SMOKE=1,
+#   ANCHOR_NORM, MAX_HOURS, LIMIT, SURFACES, CHEMO=1, SKIP_SMOKE=1, SMOKE_MIN,
 #   TRAIN_ARGS (anything else passed through verbatim).
 set -e
 module load apptainer
@@ -88,15 +88,38 @@ COMMON="--items $RUN/items.tsv --lig_feats $RUN/ligand_feats.npz \
 # throwaway run directory. The loop has never run on a GPU, so a shape error
 # would otherwise cost a whole queue wait to find - and a surface sampled here
 # lands in the shared cache, so the time is not even wasted.
+#
+# The smoke then RESUMES itself for 10 more steps and checks last.pt advanced.
+# train_check.sh's resume stage never finished on the login node, and the
+# chain of resubmissions below depends on resume entirely, so it is proven here
+# in minutes rather than discovered 11 hours in. Both passes run under
+# `timeout`, so a hang fails the job instead of eating the walltime.
+# SMOKE_MIN (60) bounds the first pass, which also compiles KeOps's CUDA
+# kernels and samples 64 surfaces; the resume pass gets a third of that.
 if [ "${SKIP_SMOKE:-0}" != "1" ]; then
-    echo "=== smoke: 64 interactions, 30 steps ==="
-    $RUNPY train $COMMON --out $RUN/smoke --limit 64 --steps 30 \
-        --eval_every 15 --save_every 30 --val_frac 0.3 --val_max 24 \
-        --batch 4 --no_auto_resume
-    echo "smoke ok"
+    SMOKE_MIN=${SMOKE_MIN:-60}
+    SMOKE="$RUNPY train $COMMON --out $RUN/smoke --limit 64 \
+        --eval_every 15 --save_every 30 --val_frac 0.3 --val_max 24 --batch 4"
+    echo "=== smoke: 64 interactions, 30 steps (limit ${SMOKE_MIN} min) ==="
+    timeout ${SMOKE_MIN}m $SMOKE --steps 30 --no_auto_resume \
+        || { echo "smoke FAILED or timed out (exit $?)"; exit 1; }
+    echo "=== smoke resume: 30 -> 40 steps from $RUN/smoke/last.pt ==="
+    timeout $((SMOKE_MIN / 3))m $SMOKE --steps 40 \
+        || { echo "smoke resume FAILED or timed out (exit $?)"; exit 1; }
+    AT=$($EXEC python -c "
+import torch
+print('CKPT_STEP=%d' % torch.load('$RUN/smoke/last.pt', map_location='cpu',
+                                  weights_only=False)['step'])
+" | sed -n 's/^CKPT_STEP=//p' | tail -1)
+    [ "$AT" = "40" ] || { echo "resume did not advance: last.pt at step '$AT', expected 40"; exit 1; }
+    echo "smoke ok: trained, checkpointed, resumed and advanced to step $AT"
 fi
 
-echo "=== train: $STEPS steps, batch $BATCH, max ${MAX_HOURS}h ==="
+# --max_hours is measured from train.py's own start, so take off what the
+# container check and smoke already used, or a slow smoke would push the clean
+# stop past the walltime and the job would die without its last checkpoint.
+MAX_HOURS=$(awk -v m=$MAX_HOURS -v s=$SECONDS 'BEGIN { printf "%.2f", m - s / 3600 }')
+echo "=== train: $STEPS steps, batch $BATCH, max ${MAX_HOURS}h (after ${SECONDS}s of checks) ==="
 $RUNPY train $COMMON --out $RUN \
     --steps $STEPS --batch $BATCH --lr $LR \
     --lam_pocket $LAM_POCKET --lam_site $LAM_SITE \

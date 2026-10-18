@@ -68,6 +68,15 @@ Stage 6 resumed at step 2 with its own split, val surfaces from the disk
 cache (so the cache write fix works), and was running steps 2 -> 4 on CPU when
 pasted: slow, not stalled. Stages 6 (advance) and 7 still unreported.
 
+Stage 6 then made no visible progress (the user called it stalled) and was
+abandoned; stages 6-7 never reported. The code has no loop that a resume could
+spin in (an unusable batch `continue`s but the step still advances), so the
+likeliest cause is login-node CPU throttling, but that is unproven. Instead
+`train.sbatch`'s smoke now RESUMES itself 30 -> 40 steps and checks last.pt
+reached 40, both passes under `timeout` (SMOKE_MIN, 60 / 20 min), and the main
+run's --max_hours is reduced by the time the checks used. `eval` (stage 7) is
+still untested; train.sbatch does not call it.
+
 So the base rate for "this stage has never run" is high. If the log shows a
 failure, fix it; if it is clean, the next step is `sbatch
 src/slurm/train.sbatch`, and nothing in "Next steps" below should start before
