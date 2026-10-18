@@ -1,9 +1,10 @@
 # Project status (handoff)
 
 Read this first in a new session. Last updated 2026-10-18 on
-`claude/model-training` at commit `0824b70`, after the chemo ablation and the
-ligand-arm probe came back, the contrastive training loop was written, and its
-login-node check was written and run once.
+`claude/model-training`, after the FIRST REAL TRAINING RUN (`runs/v1`, 15,642
+steps, 10.96 h) came back. Its results are the "First training run" section
+below; read that before anything else in START HERE, which is the history of
+getting the loop onto a GPU.
 
 ## START HERE
 
@@ -84,16 +85,68 @@ device`). CPU-only checks cannot see this class of bug. Fixed. `collect` (the
 full GPU forward, KeOps CUDA kernels, region selection, fallback) had already
 run on all 20 val proteins before the crash; the training step had not.
 
-So the base rate for "this stage has never run" is high. If the log shows a
-failure, fix it; if it is clean, the next step is `sbatch
-src/slurm/train.sbatch`, and nothing in "Next steps" below should start before
-one of those two things has happened.
+That fix (`ac72d67`) was the last one needed: the next `train.sbatch` ran
+clean end to end - see "First training run" below.
 
-Written in this session and **never run on a GPU**: `src/train.py`,
-`src/train_data.py`, `src/slurm/train.sbatch`,
-`src/slurm/cache_surfaces.sbatch`, `src/train_check.sh`, and the
-`pool_mode` / `anchor_norm` / `project_anchors` additions to
-`src/surface_encoder.py` and `src/anchors.py`.
+Still **never run on a GPU**: `train.py eval`, `src/slurm/cache_surfaces.sbatch`
+as a job (the surfaces were all on disk by the main run - "0 sampled"), and the
+non-default `pool_mode shells` / `mean_std` and `anchor_norm batch` paths.
+
+## First training run (`runs/v1`, train.sbatch on `ac72d67`, alphagpu52)
+
+Defaults: arm gnn, pool mean, anchor_norm none, batch 8, lr 3e-4 constant (no
+schedule), lam_pocket 1, lam_site 0, ball R8 shift 2, head
+`head_pretrained_300.pt` (118/118 tensors). 18,639 train / 400 val rows
+(2,315 / 112 target groups). Smoke (64 items, 30 steps) and its resume
+30 -> 40 both passed, so **resume is now proven on a GPU**. The main run hit
+`--max_hours 10.96` at **step 15,642 of 20,000**; resubmitting finishes it
+(~3 h). ~2.5 s/step including evaluation; the step-0 eval took 98 s.
+
+| step | nce | pock | mrr | chance | top1 | top10 | site | AUROC | AP | fb | cosdiff |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | - | - | 0.018 | 0.017 | 0.002 | 0.025 | 0.45 | 0.960 | 0.572 | 0.062 | 0.986 |
+| 2,000 | 1.84 | 0.57 | 0.044 | 0.017 | 0.013 | 0.083 | 0.65 | 0.962 | 0.578 | 0.058 | 0.951 |
+| 5,000 | 1.56 | 0.56 | 0.060 | 0.017 | 0.020 | 0.102 | 0.69 | 0.963 | 0.582 | 0.065 | 0.884 |
+| 10,000 | 1.22 | 0.55 | 0.082 | 0.017 | 0.040 | 0.147 | 0.69 | 0.964 | 0.587 | 0.068 | 0.788 |
+| 11,500 (best) | 1.13 | 0.55 | 0.098 | 0.017 | 0.055 | 0.180 | 0.68 | 0.964 | 0.592 | 0.062 | 0.785 |
+| 15,000 | 1.04 | 0.54 | 0.095 | 0.017 | 0.050 | 0.168 | 0.69 | 0.964 | 0.580 | 0.062 | 0.677 |
+| 15,500 | 0.96 | 0.54 | 0.092 | 0.017 | 0.043 | 0.185 | 0.69 | 0.964 | 0.592 | 0.062 | 0.711 |
+
+Full curve: `runs/v1/history.json`.
+
+What it says:
+- **cosdiff moved: 0.986 -> ~0.70, still falling.** The collapse the whole
+  loop exists to break is breaking with NEITHER lever (`anchor_norm`,
+  `shells`) switched on. Different proteins' top anchors are no longer one
+  vector.
+- **Retrieval is real but small: MRR 0.018 -> ~0.09 (5-6x chance), top10
+  0.025 -> ~0.18.** Rising steeply to ~9k steps, then roughly flat at
+  0.08-0.10 while train nce keeps falling (1.27 -> 0.96; ln 8 = 2.08 is in-batch
+  chance). Uniform-over-targets sampling over 2,315 groups at 8 per step is
+  ~54 visits per group by now, so the widening gap is most likely
+  memorisation of training targets. Not proven: val is noisy (below).
+- **`site` 0.45 -> ~0.69 without `lam_site`.** The ligand's best anchor
+  increasingly IS the pocket one; InfoNCE alone is fixing part of the ranking
+  weakness.
+- **The pocket head survived**: AUROC 0.960 -> 0.964, AP 0.57 -> 0.59, pocket
+  BCE falling. Contrastive gradients did not wreck it. (0.960 is on this val
+  set, not encoder_test's 64 receptors, so not directly 0.937's comparator.)
+- **fb ~0.06, creeping to ~0.07.** The loop is not leaning on labels.
+- **Val is noisy and lopsided.** Step-to-step MRR moves +-0.015 and top1 0.05
+  is 20 rows, so `best.pt` at 11,500 is partly a noise peak. Worse,
+  `--val_max` draws 400 rows UNIFORMLY over rows: the ~2,070-row group-disjoint
+  val pool spans ~283 groups, the 400 drawn cover only 112, so a few big
+  targets dominate the metric while training samples uniformly over targets.
+  A group-balanced val draw would match the training objective and cut the
+  noise.
+- **Not yet known: how much of the MRR is the protein encoder training.** Step
+  0 here is NOT the frozen-anchor probe (its ligand encoder is untrained), and
+  the probe's "~7x chance" was on a different val set, where chance differs, so
+  the two ratios cannot be compared. The control is this exact loop with the
+  surface encoder frozen, on this split.
+- RAM cache: 512 train surfaces resident against 19,293, so 88% of training
+  loads hit disk. ~21 GB would hold them all under the 96 GB job; whether disk
+  is the bottleneck in 2.5 s/step is unmeasured.
 
 ## Goal
 
@@ -422,7 +475,7 @@ features change nothing, and better ligand encoders change nothing. What has
 never been tried is training the protein encoder with the contrastive
 objective, which is what `train.py` is for.
 
-## Training loop (`src/train.py`, `src/train_data.py`) - WRITTEN, NEVER RUN
+## Training loop (`src/train.py`, `src/train_data.py`) - RUN, see "First training run"
 
 The loss:
 
@@ -617,9 +670,12 @@ probe and the full loop cannot drift apart. What remains open is below them.
 
 ## Next steps (model training, on `claude/model-training`)
 
-1. **Run `train.py`.** Self-test on the login node, then
-   `sbatch src/slurm/train.sbatch` (which smokes itself first), then chain
-   resubmissions. Everything below waits on what that first real run says.
+1. **Finish `runs/v1`**: `SKIP_SMOKE=1 sbatch src/slurm/train.sbatch`
+   resumes 15,642 -> 20,000 (~3 h). Then the ablation runs below, each in its
+   own `RUN=` directory: the frozen-encoder control (needs a flag, not yet
+   written), `ANCHOR_NORM=batch`, `POOL_MODE=shells`. The first run already
+   moved cosdiff without either lever, so they are now measured against
+   0.986 -> ~0.70 / MRR ~0.09, not against 0.993.
 2. **The 0.993 question, at the vector level.** This is the whole point of the
    loop and `cosdiff` in its log is the readout. The two levers built for it
    are `--anchor_norm batch` and `--pool_mode shells`; both are OFF by default,
