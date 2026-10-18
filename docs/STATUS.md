@@ -405,7 +405,7 @@ How to run it:
 python src/train.py prepare --index datasets/dataset_v1/index.parquet \
     --out runs/v1 --split train --exclude encoder_test/items.tsv
 python src/ligand_features.py --index datasets/dataset_v1/index.parquet --out runs/v1
-# login node, container, no GPU: ~1-2 min
+# login node, container, no GPU: ~2-5 min
 apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox \
     python src/train.py selftest
 # GPU
@@ -606,7 +606,7 @@ has never been run anywhere**, so run it first - or just run
 
 ```
 EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
-$EX src/train.py selftest            # ~1-2 min, NEW
+$EX src/train.py selftest            # ~2-5 min, NEW
 $EX src/chemotype.py
 $EX src/ligand_encoder.py
 $EX src/probe_retrieval.py selftest  # 10-15 min
@@ -627,9 +627,16 @@ $EX src/probe_retrieval.py selftest  # 10-15 min
   synthetic rows where the 262 k linear map reaches 1.000. Arms are judged on
   `best_mrr` for that reason; all arms overfit this fixture and both figures
   are printed. Nothing here predicts real-molecule behaviour.
-- `train.py selftest`: 120 synthetic proteins (a sphere of 1200 points with a
-  ligand outside one patch) and a stub for the only three pieces that need
-  KeOps - the surface sampler, AtomNet and the convolution. Everything else is
+- `train.py selftest`: 120 synthetic proteins (a 2400-point sphere with a
+  ligand cloud outside one patch) and a stub for the only three pieces that
+  need KeOps - the surface sampler, AtomNet and the convolution.
+  The fixture's geometry is tuned to the real thing rather than to convenience:
+  pocket 2.7% of the surface (real receptors: 2.8%) and ball_R8 precision 0.65
+  (the region sweep: 0.63), so every protein can form a genuine positive. A
+  tighter ligand cloud leaves the worst proteins under `pos_prec`, which makes
+  them train on the fallback forever and silently empties every `site`
+  assertion; a looser one clears the label rule trivially and would hide a
+  broken one. Two assertions guard that band. Everything else is
   the real code, in seven groups:
   the item table; `SurfaceStore`'s disk round-trip, LRU bound, and the two
   properties a cache lives or dies on (a surface depends only on the

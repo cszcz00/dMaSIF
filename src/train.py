@@ -815,10 +815,12 @@ def selftest(a):
     W_fp = rng.normal(size=(LATENT, 2048))
     bits = ((1 / (1 + np.exp(-(z @ W_fp)))) > rng.random((N_LIG, 2048))).astype(np.uint8)
 
+    # 2400 points on a 20 A sphere, which is ~1.6 A spacing - coarser than
+    # dMaSIF's ~1 A but fine enough that a ball_R8 region holds ~99 points and
+    # the counts below are not dominated by discretisation.
     def make_protein(seed):
         g = np.random.default_rng(seed)
-        n = 1200
-        v = g.normal(size=(n, 3))
+        v = g.normal(size=(2400, 3))
         xyz = (v / np.linalg.norm(v, axis=1, keepdims=True)) * 20.0
         return xyz.astype(np.float32)
 
@@ -828,15 +830,23 @@ def selftest(a):
         iid = f"p{i:03d}"
         xyz = make_protein(i)
         # The "ligand": a cloud of atoms just outside one patch of the sphere.
-        # Sized on purpose. The pocket is every surface point within 4 A of it,
-        # and a ball_R8 region on a 20 A sphere holds ~48 of the 1200 points,
-        # so too tight a cloud gives a pocket of ~12 points, precision 0.25,
-        # and NOTHING clears pos_prec 0.3 - the fixture would then test only
-        # the fallback path and the `site` assertions would be vacuous.
+        # Sized to reproduce the real geometry, because the fixture is useless
+        # on either side of it. The pocket is every surface point within 4 A of
+        # the cloud, and a ball_R8 region holds ~99 of the 2400 points, so:
+        #   16 atoms at scale 2.0 -> pocket 64 points (2.7% of the surface,
+        #     against 2.8% on real receptors) and ball precision 0.65 (against
+        #     0.63 for ball_R8 in the region sweep). Every protein can form a
+        #     genuine positive.
+        #   a tighter cloud (12 atoms at scale 1.2) -> pocket 22 points and
+        #     precision 0.44, with the worst proteins at 0.24. Those never
+        #     clear pos_prec 0.3, so they train on the fallback forever and
+        #     every `site` assertion goes vacuous.
+        #   a looser one (24 at scale 3.0) -> precision 0.84, which clears
+        #     everything trivially and would hide a broken label rule.
         g = np.random.default_rng(1000 + i)
         dirn = g.normal(size=3)
         dirn /= np.linalg.norm(dirn)
-        lig_xyz = (dirn * 21.0)[None] + g.normal(scale=1.2, size=(12, 3))
+        lig_xyz = (dirn * 21.0)[None] + g.normal(scale=2.0, size=(16, 3))
         sdf = tmp / f"{iid}.sdf"
         sdf.write_text(_fake_sdf(lig_xyz))
         surfaces[iid] = xyz
@@ -921,8 +931,12 @@ def selftest(a):
     print("\n[3] labels, other sites, fallback region")
     labels = LabelCache(table, cutoff=4.0, ram=32)
     lb = labels.get(0, e1)
-    check("pocket labelled and small", 0 < int(lb["pocket"].sum()) < len(e1["xyz"]) // 4,
-          f"{int(lb['pocket'].sum())} of {len(e1['xyz'])} points")
+    n_pk = int(lb["pocket"].sum())
+    frac = n_pk / len(e1["xyz"])
+    check("pocket is labelled and is a realistic fraction of the surface",
+          20 <= n_pk and 0.01 <= frac <= 0.06,
+          f"{n_pk} of {len(e1['xyz'])} points = {frac:.1%} "
+          "(real receptors: 2.8%)")
     check("no other site for a single-ligand receptor", int(lb["other"].sum()) == 0)
 
     # two ligands on one receptor: the sibling's site must be ignorable
@@ -1104,12 +1118,16 @@ def selftest(a):
     args = argparse.Namespace(
         pos_cover=0.5, pos_prec=0.3, ignore_overlap=0.1, fallback=True,
         tanimoto=0.8, eval_batch=16, cutoff=4.0)
+    # A fixture guard, not a code test: if a ball at the right place cannot
+    # clear pos_prec, no region is ever positive, the loop trains on the
+    # fallback forever, and the site / fallback-rate assertions below pass
+    # while measuring nothing. Real receptors sit at 0.63 here.
     best_prec = int(lb["pocket"].sum()) / len(fb)
-    check("a predicted ball CAN clear pos_prec on this fixture",
-          best_prec >= args.pos_prec,
+    check("a correctly placed ball clears pos_prec with room to spare",
+          best_prec >= args.pos_prec + 0.1,
           f"pocket {int(lb['pocket'].sum())} points, a ball holds {len(fb)}, so "
-          f"precision at best {best_prec:.2f} against pos_prec {args.pos_prec}; "
-          "below it, nothing is ever positive and only the fallback is tested")
+          f"precision at best {best_prec:.2f} against pos_prec {args.pos_prec} "
+          f"(real receptors: 0.63)")
     tr, va = split_by_group(table.group, 0.3, 0)
     check("group-disjoint split", not (set(table.group[tr]) & set(table.group[va])),
           f"{len(tr)} train / {len(va)} val, "

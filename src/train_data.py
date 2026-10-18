@@ -273,8 +273,14 @@ class SurfaceStore:
         # Write-then-rename, so a job killed mid-write (a walltime limit is the
         # normal end of a training job) cannot leave a truncated .npz that the
         # next job loads as a surface.
+        #
+        # Through an open file handle, NOT by passing the path: np.savez appends
+        # ".npz" to any filename that does not already end in it, so savez(path)
+        # on "x.npz.tmp" writes "x.npz.tmp.npz" and the rename below then finds
+        # nothing. A file object is left alone.
         tmp = path.with_suffix(".npz.tmp")
-        np.savez(tmp, **{k: arrays[k] for k in SURFACE_KEYS})
+        with open(tmp, "wb") as fh:
+            np.savez(fh, **{k: arrays[k] for k in SURFACE_KEYS})
         tmp.replace(path)
 
     def ensure(self, enc, row):
