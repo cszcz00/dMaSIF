@@ -201,7 +201,13 @@ def featurise_one(smiles, fp_gen, desc_fns):
     mol = Chem.MolFromSmiles(smiles) if isinstance(smiles, str) else None
     if mol is None or mol.GetNumAtoms() == 0:
         return None
-    mol = Chem.RemoveHs(mol)  # heavy-atom graph, as on the protein side
+    # Heavy-atom graph, as on the protein side. RemoveAllHs, not RemoveHs:
+    # RemoveHs keeps isotopic H ([2H], deuterated ligands), H2 and hydrides,
+    # which then became graph nodes and ECFP atoms (173 of dataset_v1's 8,378
+    # ligands, flagged by report()'s heavy != graph atom count check).
+    mol = Chem.RemoveAllHs(mol)
+    if mol.GetNumAtoms() == 0:  # nothing but hydrogen, e.g. [H][H]
+        return None
 
     ring_info = mol.GetRingInfo()
     donors, acceptors = hbond_atoms(mol)
@@ -317,7 +323,7 @@ def report(feats):
     if zero:
         print(f"[warn] {zero} parseable molecules with an all-zero fingerprint")
     d = feats["desc"][ok]
-    const = [feats["desc_names"][i] for i in range(d.shape[1]) if d[:, i].std() == 0]
+    const = [str(feats["desc_names"][i]) for i in range(d.shape[1]) if d[:, i].std() == 0]
     if const:
         print(f"[warn] descriptors with zero variance here: {list(const)}")
     print(f"\ndescriptor ranges (raw; standardise on YOUR train split):")

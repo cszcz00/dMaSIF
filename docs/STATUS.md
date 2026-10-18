@@ -38,6 +38,23 @@ Two bugs were already found by running it:
    nothing. Retuned to real geometry (pocket 2.7% of the surface against the
    real 2.8%, ball precision 0.65 against the sweep's 0.63) in the same commit.
 
+**First log seen (2026-10-18, on `0824b70`): stages 1-4 PASS; stage 5 was
+still compiling KeOps CPU kernels when the log was pasted, so 5-7 are
+unknown.** What stages 1-4 showed, fixed in the commit after this note:
+- Stage 4: 173 of 8,378 ligands had graph atoms != heavy atoms. `RemoveHs`
+  keeps isotopic H (`[2H]`, deuterated ligands), H2 and hydrides, so those H
+  were graph nodes and ECFP atoms. Now `RemoveAllHs`; an all-H molecule is
+  flagged failed. **Any `ligand_feats.npz` built before this (`probe/`,
+  `train_check/`) is stale; `runs/v1/ligand_feats.npz` must be built after.**
+- Cosmetic: a requires_grad scalar warning in the selftest print, numpy-2
+  `np.int64(1)` reprs in `prepare`'s group sizes and `np.str_` in a warning.
+- Not a bug: the selftest's val MRR peaks at step 60 (0.983) and slides to
+  0.854 by 180 while the loss keeps falling - overfitting 80 toy items. The
+  real run keeps `best.pt` by val MRR for exactly this reason.
+- Expected: the head checkpoint loads 117/118 tensors; `project.0.weight` is
+  left at init because the check pools with `shells` (48 dims) and the head
+  was saved with `mean` (16). Under `train.sbatch`'s default `mean` it fits.
+
 So the base rate for "this stage has never run" is high. If the log shows a
 failure, fix it; if it is clean, the next step is `sbatch
 src/slurm/train.sbatch`, and nothing in "Next steps" below should start before

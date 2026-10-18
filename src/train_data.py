@@ -127,7 +127,7 @@ def prepare(a):
     print(f"\n{path}: {len(rows)} interactions "
           f"({n_no_sdf} skipped for a missing ligand SDF)")
     print(f"{n_surf} distinct receptor inputs = surfaces to sample and cache")
-    print(f"{len(sizes)} target groups; largest {sorted(sizes)[-5:]}, "
+    print(f"{len(sizes)} target groups; largest {sorted(sizes.tolist())[-5:]}, "
           f"median {int(np.median(sizes))}")
     print(f"{len({r['fp_row'] for r in rows})} distinct ligands")
     print("\nnext: src/ligand_features.py for ligand_feats.npz, then train.py "
