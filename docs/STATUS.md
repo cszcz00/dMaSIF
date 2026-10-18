@@ -55,6 +55,19 @@ unknown.** What stages 1-4 showed, fixed in the commit after this note:
   left at init because the check pools with `shells` (48 dims) and the head
   was saved with `mean` (16). Under `train.sbatch`'s default `mean` it fits.
 
+**Second log (same commit): stage 5 PASSED** - the real encoder ran end to
+end on CPU: step 0 eval at 698 s (KeOps CPU compile + 4 val surfaces), step 2
+at 2,912 s (backward kernels compile + 4 train surfaces + 2 steps), loss 1.422
+/ nce 0.717 / pock 0.367 finite, pocket AUROC 0.974 / AP 0.50, fb 0.00,
+cosdiff 0.946 -> 0.961 (2 steps on 4 val proteins: no signal, a shape check).
+best.pt / last.pt written. The log read `22912.301` because the `sec` column
+ran into `step` once past 1,000 s - fixed (integer seconds); it would have hit
+every line of a real run after 17 minutes. `nan` loss on an eval row with no
+training steps since the start or a resume is expected, not a failure.
+Stage 6 resumed at step 2 with its own split, val surfaces from the disk
+cache (so the cache write fix works), and was running steps 2 -> 4 on CPU when
+pasted: slow, not stalled. Stages 6 (advance) and 7 still unreported.
+
 So the base rate for "this stage has never run" is high. If the log shows a
 failure, fix it; if it is clean, the next step is `sbatch
 src/slurm/train.sbatch`, and nothing in "Next steps" below should start before

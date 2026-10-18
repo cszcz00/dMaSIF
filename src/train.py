@@ -621,9 +621,11 @@ def train(a):
                     met["mrr"], met["chance"], met["top1"], met["top10"],
                     met["site"], met["auroc"], met["ap"], met["fallback_rate"],
                     met.get("cos_diff", float("nan")))
-            print(f"{step:8d}" + "".join(
+            # Seconds as an integer: at 8.3f, 1000 s and up is 8+ characters
+            # and runs into the step column ("22912.301" was step 2, 2912 s).
+            print(f"{step:8d} {met['sec']:7.0f}" + "".join(
                 f"{v:8.3f}" if isinstance(v, float) else f"{v:8d}"
-                for v in vals[1:]), flush=True)
+                for v in vals[2:]), flush=True)
             print(f"         train {store.report()}", flush=True)
             print(f"         val   {val_store.report()}", flush=True)
             (out / "history.json").write_text(json.dumps(history, indent=1) + "\n")
