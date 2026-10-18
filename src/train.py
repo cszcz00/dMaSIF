@@ -407,7 +407,9 @@ def evaluate(model, store, labels, table, rows, ligands, a, device):
         return met
     kn = keep.cpu().numpy()
     rows, anchors, usable = rows[kn], anchors[keep], usable[keep]
-    label = got["label"][keep]
+    # collect() hands everything back on the CPU; `keep` was built from the
+    # device copy, and a CUDA mask cannot index a CPU tensor.
+    label = got["label"][keep.cpu()]
 
     model.eval()
     with torch.no_grad():

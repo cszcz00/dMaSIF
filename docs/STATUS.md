@@ -77,6 +77,13 @@ reached 40, both passes under `timeout` (SMOKE_MIN, 60 / 20 min), and the main
 run's --max_hours is reduced by the time the checks used. `eval` (stage 7) is
 still untested; train.sbatch does not call it.
 
+**First GPU job (alphagpu52, sm_120 OK): smoke died at the step-0
+evaluation** - `evaluate` indexed the CPU label tensor from `collect` with the
+device-side `keep` mask (`indices should be either on cpu or on the same
+device`). CPU-only checks cannot see this class of bug. Fixed. `collect` (the
+full GPU forward, KeOps CUDA kernels, region selection, fallback) had already
+run on all 20 val proteins before the crash; the training step had not.
+
 So the base rate for "this stage has never run" is high. If the log shows a
 failure, fix it; if it is clean, the next step is `sbatch
 src/slurm/train.sbatch`, and nothing in "Next steps" below should start before
