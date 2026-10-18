@@ -1,8 +1,53 @@
 # Project status (handoff)
 
-Read this first in a new session. Last updated 2026-10-17 on
-`claude/model-training`, after the chemo ablation and the ligand-arm probe came
-back and the contrastive training loop was written.
+Read this first in a new session. Last updated 2026-10-18 on
+`claude/model-training` at commit `0824b70`, after the chemo ablation and the
+ligand-arm probe came back, the contrastive training loop was written, and its
+login-node check was written and run once.
+
+## START HERE
+
+**Branch `claude/model-training`. Commit and push there; do not open a PR
+unless asked.**
+
+Standing constraints, from the user, which have held all through this work:
+
+- **The user runs every job on the HPC themselves, via sbatch or the login
+  node. Claude writes code, commits and pushes; Claude does not run jobs.**
+  Changes reach the HPC by `git pull` on this branch.
+- **Claude's own container has no torch and must not install it.** Anything
+  needing torch is for the user to run. Numpy, pandas and rdkit paths can be
+  checked locally, and geometry arithmetic can and should be verified in numpy
+  before asserting anything about it.
+- Every experiment gets a script with a docstring saying what it measures and
+  how to read it, an sbatch file, and its results recorded in this file.
+
+**The one open question, answered by output Claude has not seen.** The user ran
+`bash src/train_check.sh` on the login node. **The result is unknown** - ask
+them to paste the log before doing anything else, and do not assume it passed.
+Two bugs were already found by running it:
+
+1. `SurfaceStore.write` called `np.savez` with a path not ending in `.npz`;
+   numpy appends the extension, so the write-then-rename always failed. Fixed
+   in `0824b70`. This would have broken `cache_surfaces.sbatch` and every
+   `--surface_cache` run too, not just the self-test.
+2. The self-test fixture was too marginal: protein 0's ball precision was
+   0.298 against `pos_prec` 0.3, so a guard assertion would have failed, and
+   6% of proteins could never form a positive at all - they would have trained
+   on the fallback forever while every `site` assertion passed and measured
+   nothing. Retuned to real geometry (pocket 2.7% of the surface against the
+   real 2.8%, ball precision 0.65 against the sweep's 0.63) in the same commit.
+
+So the base rate for "this stage has never run" is high. If the log shows a
+failure, fix it; if it is clean, the next step is `sbatch
+src/slurm/train.sbatch`, and nothing in "Next steps" below should start before
+one of those two things has happened.
+
+Written in this session and **never run on a GPU**: `src/train.py`,
+`src/train_data.py`, `src/slurm/train.sbatch`,
+`src/slurm/cache_surfaces.sbatch`, `src/train_check.sh`, and the
+`pool_mode` / `anchor_norm` / `project_anchors` additions to
+`src/surface_encoder.py` and `src/anchors.py`.
 
 ## Goal
 
@@ -12,10 +57,10 @@ anchors per protein compared against ligand vectors.
 
 Built and tested: the protein encoder up to the anchors, the region selectors,
 the apo/holo/AlphaFold evaluation, the ligand encoder and the frozen-anchor
-probe that ranks its arms. Built and self-tested but **never run on a GPU: the
-contrastive training loop** (`src/train.py`, `src/train_data.py`) and its data
-pipeline. That is the next job to submit, and the first thing to do in a new
-session is read "Training loop" below and then run the three self-tests.
+probe that ranks its arms. Built but **never run on a GPU: the contrastive
+training loop** (`src/train.py`, `src/train_data.py`) and its data pipeline.
+Its login-node check (`src/train_check.sh`) has been run once, with the outcome
+still unseen - see START HERE above.
 
 ## How we work
 
