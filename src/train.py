@@ -496,22 +496,20 @@ def load_model_from_ckpt(path, device, overrides=None):
 
 
 # ---------------------------------------------------------------------------
-# train
+# rows: the table both stages see, and the validation subsample
 # ---------------------------------------------------------------------------
-def train(a):
-    import torch
+def load_rows(a):
+    """-> (table, ligands), rows whose ligand failed featurisation dropped.
 
+    One function for train and eval: row indices in a checkpoint are positions
+    in THIS filtered table, so eval has to drop exactly the rows train dropped
+    or every saved index points one row off after the first failure.
+    """
     from ligand_encoder import LigandData
-    from probe_retrieval import draw_batch, group_index, info_nce, split_by_group
-    from surface_encoder import pocket_loss
-    from train_data import ItemTable, LabelCache, SurfaceStore, read_items
+    from train_data import ItemTable, read_items
 
-    device = a.device
-    out = Path(a.out)
-    out.mkdir(parents=True, exist_ok=True)
     table = ItemTable(read_items(a.items, a.limit))
     print(f"{a.items}: {table.summary()}")
-
     ligands = LigandData(a.lig_feats)
     if table.fp_row.max() >= len(ligands):
         raise SystemExit(
@@ -521,10 +519,76 @@ def train(a):
     if bad.any():
         print(f"dropping {int(bad.sum())} rows whose ligand could not be featurised")
         table = ItemTable([r for r, b in zip(table.rows, bad) if not b])
+    return table, ligands
+
+
+def subsample_val(rows, groups, n, seed, balance=False):
+    """`n` of these validation rows.
+
+    Without `balance`, uniform over ROWS - the original draw, kept bit-for-bit
+    so runs/v1 reproduces. Its flaw: the val pool is a few big targets and many
+    small ones, so a row-uniform 400 from runs/v1's ~2,070-row, ~283-group pool
+    covered only 112 groups and the metric was dominated by a handful of
+    targets, while training samples uniformly over TARGETS.
+
+    With `balance`, round-robin over groups in random order: every group gets
+    one row before any group gets a second. That matches the training sampler
+    (alpha 1) and spreads the metric over as many targets as the cap allows.
+    """
+    rows = np.asarray(rows)
+    rng = np.random.default_rng(seed)
+    if not balance:
+        return np.sort(rng.choice(rows, n, replace=False))
+    g = np.asarray(groups)[rows]
+    buckets = [rng.permutation(rows[g == u]) for u in rng.permutation(np.unique(g))]
+    out, depth = [], 0
+    while len(out) < n:
+        out += [b[depth] for b in buckets if depth < len(b)][:n - len(out)]
+        depth += 1
+    return np.sort(np.asarray(out))
+
+
+def freeze_encoder(model):
+    """Freeze the surface encoder up to the pooled vector; train the rest.
+
+    The control for "does training the protein side buy anything": the conv,
+    the input features and the pocket head stay exactly as the head checkpoint
+    left them (so the regions are fixed too), and only the projection, the
+    optional pool_norm, the ligand encoder and the temperature learn. That is
+    the frozen-anchor probe's setting (ProbeModel: a projection over frozen
+    anchors plus a ligand encoder), run inside this loop on this split, so its
+    MRR is directly comparable to an unfrozen run's.
+    """
+    n = 0
+    for name, p in model.encoder.named_parameters():
+        if not name.startswith(("project.", "pool_norm.")):
+            p.requires_grad_(False)
+            n += p.numel()
+    live = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"--freeze_encoder: {n:,} encoder parameters frozen (conv, inputs, "
+          f"pocket head); {live:,} still train (projection, ligand, temperature)")
+
+
+# ---------------------------------------------------------------------------
+# train
+# ---------------------------------------------------------------------------
+def train(a):
+    import torch
+
+    from probe_retrieval import draw_batch, group_index, info_nce, split_by_group
+    from surface_encoder import pocket_loss
+    from train_data import LabelCache, SurfaceStore
+
+    device = a.device
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    table, ligands = load_rows(a)
 
     model, enc_cfg, lig_cfg = build_model(a, device)
-    opt = torch.optim.AdamW(model.parameters(), lr=a.lr,
-                            weight_decay=a.weight_decay)
+    if a.freeze_encoder:
+        freeze_encoder(model)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                            lr=a.lr, weight_decay=a.weight_decay)
     # Two stores over ONE disk cache. Validation touches every val protein and
     # would otherwise evict the whole training window on every evaluation, and
     # the training window back out on the next step - the surfaces are the
@@ -551,9 +615,11 @@ def train(a):
         train_rows, val_rows = split_by_group(table.group, a.val_frac, a.split_seed)
         print("validation carved out group-disjointly from the prepared rows")
     if a.val_max and len(val_rows) > a.val_max:
-        rng0 = np.random.default_rng(a.split_seed)
-        val_rows = np.sort(rng0.choice(val_rows, a.val_max, replace=False))
-        print(f"validation subsampled to {a.val_max} rows (--val_max)")
+        val_rows = subsample_val(val_rows, table.group, a.val_max, a.split_seed,
+                                 a.val_balance)
+        print(f"validation subsampled to {a.val_max} rows (--val_max"
+              + (", group-balanced: --val_balance)" if a.val_balance else
+                 ", uniform over rows)"))
     print(f"{len(train_rows)} train / {len(val_rows)} val rows "
           f"({len(set(table.group[train_rows]))} / "
           f"{len(set(table.group[val_rows]))} target groups)")
@@ -570,6 +636,13 @@ def train(a):
                           and (out / "last.pt").exists() else "")
     if resume:
         ck = torch.load(resume, map_location="cpu", weights_only=False)
+        if ck["args"].get("freeze_encoder", False) != a.freeze_encoder:
+            raise SystemExit(
+                f"{resume} was trained with freeze_encoder="
+                f"{ck['args'].get('freeze_encoder', False)}; resuming it with "
+                f"{a.freeze_encoder} would change which parameters train (and "
+                "the optimiser state would not load). Use the same flag or a "
+                "different --out")
         model.load_state_dict(ck["state_dict"])
         opt.load_state_dict(ck["optimizer"])
         step0 = ck["step"]
@@ -699,18 +772,39 @@ def train(a):
 
 def evaluate_only(a):
     """Validation metrics from a checkpoint; nothing is trained."""
-    from ligand_encoder import LigandData
-    from train_data import ItemTable, LabelCache, SurfaceStore, read_items
+    from probe_retrieval import split_by_group
+    from train_data import LabelCache, SurfaceStore
 
     model, ckpt, saved = load_model_from_ckpt(a.ckpt, a.device, overrides=a)
-    table = ItemTable(read_items(a.items, a.limit))
-    ligands = LigandData(a.lig_feats)
+    table, ligands = load_rows(a)
     store = SurfaceStore(a.surface_cache, ram=a.surface_ram, device=a.device,
                          keep_hydrogens=saved.keep_hydrogens)
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
-    rows = (np.asarray(ckpt["val_rows"]) if a.use_ckpt_split
-            else np.arange(len(table)))
+    if a.use_ckpt_split and a.recarve:
+        raise SystemExit("--use_ckpt_split and --recarve are alternatives")
+    if a.recarve:
+        # The checkpoint stores only its SUBSAMPLED val rows; the full pool is
+        # recomputed from the split it was carved with, which split_by_group
+        # makes deterministic in (groups, val_frac, split_seed).
+        if getattr(saved, "val_split", ""):
+            raise SystemExit(f"{a.ckpt} validated on --val_split "
+                             f"{saved.val_split}; --recarve rebuilds a carved split")
+        _, rows = split_by_group(table.group, saved.val_frac, saved.split_seed)
+        leak = np.intersect1d(rows, np.asarray(ckpt["train_rows"]))
+        if len(leak):
+            raise SystemExit(f"--recarve: {len(leak)} recarved val rows were "
+                             "TRAIN rows of this checkpoint; different table?")
+        print(f"--recarve: {len(rows)} val rows (val_frac {saved.val_frac}, "
+              f"split_seed {saved.split_seed}), disjoint from the checkpoint's train")
+    else:
+        rows = (np.asarray(ckpt["val_rows"]) if a.use_ckpt_split
+                else np.arange(len(table)))
     rows = rows[rows < len(table)]
+    if a.val_max and len(rows) > a.val_max:
+        rows = subsample_val(rows, table.group, a.val_max, saved.split_seed,
+                             a.val_balance)
+        print(f"subsampled to {a.val_max} rows"
+              + (" (group-balanced)" if a.val_balance else ""))
     # The scaler must be the one training used, so it is refitted on the
     # checkpoint's OWN train rows. Row indices only mean anything against the
     # same items.tsv; a different table makes this - and --use_ckpt_split -
@@ -1405,6 +1499,12 @@ def main():
                         "of carving a group-disjoint one out of these rows")
     p.add_argument("--val_max", type=int, default=400,
                    help="cap the validation set; every protein costs a forward")
+    p.add_argument("--val_balance", action="store_true",
+                   help="draw the --val_max rows round-robin over target groups "
+                        "instead of uniformly over rows (see subsample_val)")
+    p.add_argument("--freeze_encoder", action="store_true",
+                   help="control: freeze the surface encoder below the "
+                        "projection, so only projection + ligand train")
     p.add_argument("--split_seed", type=int, default=0)
     p.add_argument("--eval_every", type=int, default=500)
     p.add_argument("--save_every", type=int, default=500)
@@ -1420,6 +1520,13 @@ def main():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--use_ckpt_split", action="store_true",
                    help="evaluate the checkpoint's own validation rows")
+    p.add_argument("--recarve", action="store_true",
+                   help="evaluate the checkpoint's FULL group-disjoint val "
+                        "pool, recomputed from its val_frac / split_seed")
+    p.add_argument("--val_max", type=int, default=0,
+                   help="then subsample to this many rows (0 = all)")
+    p.add_argument("--val_balance", action="store_true",
+                   help="subsample round-robin over target groups")
 
     p = sub.add_parser("selftest", help="planted signal; no data, no GPU, no KeOps")
     p.add_argument("--tmp", default="train_selftest")

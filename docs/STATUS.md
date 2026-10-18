@@ -670,12 +670,37 @@ probe and the full loop cannot drift apart. What remains open is below them.
 
 ## Next steps (model training, on `claude/model-training`)
 
-1. **Finish `runs/v1`**: `SKIP_SMOKE=1 sbatch src/slurm/train.sbatch`
-   resumes 15,642 -> 20,000 (~3 h). Then the ablation runs below, each in its
-   own `RUN=` directory: the frozen-encoder control (needs a flag, not yet
-   written), `ANCHOR_NORM=batch`, `POOL_MODE=shells`. The first run already
-   moved cosdiff without either lever, so they are now measured against
-   0.986 -> ~0.70 / MRR ~0.09, not against 0.993.
+1. **Second round of runs (code in place, not yet run).** Four GPU jobs plus
+   one short eval, commands in `src/slurm/train.sbatch`'s header:
+   - finish v1: `SKIP_SMOKE=1 sbatch src/slurm/train.sbatch` (15,642 -> 20,000)
+   - `runs/frozen`, `FREEZE=1`: `--freeze_encoder` freezes the surface encoder
+     below the projection (conv, inputs, pocket head, so the regions are fixed
+     too); projection, ligand and temperature train. The probe's setting inside
+     this loop, on this split: **the control that says whether training the
+     protein side buys the MRR.**
+   - `runs/shells`, `POOL_MODE=shells`: 48-dim pooled vector that keeps
+     arrangement inside a region. Head loads 117/118 (projection width).
+   - `runs/b32`, `BATCH=32 STEPS=5000`, eval/save every 125: 4x the
+     negatives; ~3,900 steps is v1's 125k proteins seen. Memory at batch 32
+     is unmeasured; an OOM would fail at the first step.
+   - all three new runs use `VAL_BALANCE=1` (`--val_balance`: the 400 val rows
+     drawn round-robin over target groups, so all ~283 val groups appear
+     instead of 112) and `DATA=$WORK/runs/v1` for items/features. Same table +
+     same split_seed = the same 400 rows in every run.
+   - `sbatch src/slurm/eval.sbatch` re-scores v1's `best.pt` / `last.pt` on
+     those same 400 rows (`train.py eval --recarve --val_max 400
+     --val_balance`): v1's row in the comparison table. **`train.py eval` has
+     never run before**, and the eval path now shares `load_rows()` with
+     train so its row indices match a checkpoint's even when ligands were
+     dropped.
+   Read: frozen vs v1 at matched steps on MRR / top10 (cosdiff will not move
+   much under frozen, by construction - only the projection changes);
+   shells and b32 vs v1 on all of them. Val noise is ~+-0.015 MRR per
+   evaluation, so compare the mean of the last few evaluations, not maxima.
+   Deferred: a wider conv (`emb_dims` > 16). The head checkpoint and the
+   published dMaSIF weights are 16-wide, so widening discards the pretrained
+   head and the regions with it; it needs a function-preserving widening
+   first.
 2. **The 0.993 question, at the vector level.** This is the whole point of the
    loop and `cosdiff` in its log is the readout. The two levers built for it
    are `--anchor_norm batch` and `--pool_mode shells`; both are OFF by default,

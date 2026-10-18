@@ -35,7 +35,22 @@
 #
 # Overrides: RUN, STEPS, BATCH, ARM, LR, LAM_POCKET, LAM_SITE, POOL_MODE,
 #   ANCHOR_NORM, MAX_HOURS, LIMIT, SURFACES, CHEMO=1, SKIP_SMOKE=1, SMOKE_MIN,
+#   FREEZE=1 (--freeze_encoder: the frozen-protein control),
+#   VAL_BALANCE=1 (--val_balance: group-balanced validation draw),
+#   SURFACE_RAM (training surfaces held in host RAM, ~1.1 MB each; 512),
 #   TRAIN_ARGS (anything else passed through verbatim).
+# A resumed run keeps its checkpoint's split, so VAL_BALANCE only matters for
+# a NEW run directory; FREEZE must match the checkpoint or train.py refuses.
+#
+# The second round of runs (after runs/v1), one GPU job each. DATA points the
+# new run directories at v1's items.tsv / ligand_feats.npz (DATA defaults to
+# RUN), and VAL_BALANCE=1 gives all three the same balanced validation set:
+#   SKIP_SMOKE=1 sbatch src/slurm/train.sbatch                       # finish v1
+#   D=$WORK/runs/v1
+#   DATA=$D RUN=$WORK/runs/frozen FREEZE=1 VAL_BALANCE=1 sbatch src/slurm/train.sbatch
+#   DATA=$D RUN=$WORK/runs/shells POOL_MODE=shells VAL_BALANCE=1 sbatch src/slurm/train.sbatch
+#   DATA=$D RUN=$WORK/runs/b32 BATCH=32 STEPS=5000 VAL_BALANCE=1 \
+#       TRAIN_ARGS="--eval_every 125 --save_every 125" sbatch src/slurm/train.sbatch
 set -e
 module load apptainer
 cd $WORK
@@ -49,6 +64,8 @@ LAM_POCKET=${LAM_POCKET:-1.0}
 LAM_SITE=${LAM_SITE:-0.0}
 POOL_MODE=${POOL_MODE:-mean}
 ANCHOR_NORM=${ANCHOR_NORM:-none}
+SURFACE_RAM=${SURFACE_RAM:-512}
+DATA=${DATA:-$RUN}            # where items.tsv / ligand_feats.npz live
 MAX_HOURS=${MAX_HOURS:-11.0}
 HEAD=${HEAD:-$WORK/encoder_test/head_pretrained_300.pt}
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"
@@ -64,7 +81,7 @@ print('GPU', cap, '| torch built for', torch.cuda.get_arch_list())
 sys.exit(0 if cap in torch.cuda.get_arch_list() else 'container cannot run on ' + cap)
 "
 
-for f in $RUN/items.tsv $RUN/ligand_feats.npz; do
+for f in $DATA/items.tsv $DATA/ligand_feats.npz; do
     [ -f "$f" ] || { echo "missing $f; run the two CPU steps in the header first"; exit 1; }
 done
 HEAD_ARG=""
@@ -75,14 +92,15 @@ else
     echo "       the fallback ball will carry the first few thousand steps."
     echo "       sbatch src/slurm/head_ckpt.sbatch writes it in 30 min."
 fi
-N_ITEMS=$(($(wc -l < $RUN/items.tsv) - 1))
-echo "run $RUN; $N_ITEMS interactions; arm $ARM; pool $POOL_MODE; anchor_norm $ANCHOR_NORM"
+N_ITEMS=$(($(wc -l < $DATA/items.tsv) - 1))
+echo "run $RUN (data $DATA); $N_ITEMS interactions; arm $ARM; pool $POOL_MODE; anchor_norm $ANCHOR_NORM"
 [ -f "$RUN/last.pt" ] && echo "found $RUN/last.pt: this job will RESUME it"
 
-COMMON="--items $RUN/items.tsv --lig_feats $RUN/ligand_feats.npz \
+COMMON="--items $DATA/items.tsv --lig_feats $DATA/ligand_feats.npz \
     --surface_cache $SURFACES --arm $ARM --pool_mode $POOL_MODE \
     --anchor_norm $ANCHOR_NORM --region_method ball --ball_radius 8 --ball_shift 2 \
-    $HEAD_ARG ${CHEMO:+--chemo} ${LIMIT:+--limit $LIMIT}"
+    $HEAD_ARG ${CHEMO:+--chemo} ${LIMIT:+--limit $LIMIT} \
+    ${FREEZE:+--freeze_encoder} ${VAL_BALANCE:+--val_balance}"
 
 # A 30-step pass on 64 interactions first, in the SAME job, written to a
 # throwaway run directory. The loop has never run on a GPU, so a shape error
@@ -123,7 +141,7 @@ echo "=== train: $STEPS steps, batch $BATCH, max ${MAX_HOURS}h (after ${SECONDS}
 $RUNPY train $COMMON --out $RUN \
     --steps $STEPS --batch $BATCH --lr $LR \
     --lam_pocket $LAM_POCKET --lam_site $LAM_SITE \
-    --max_hours $MAX_HOURS ${TRAIN_ARGS:-}
+    --max_hours $MAX_HOURS --surface_ram $SURFACE_RAM ${TRAIN_ARGS:-}
 
 echo
 echo "checkpoints: $RUN/best.pt (best val MRR) and $RUN/last.pt (resume point)"
