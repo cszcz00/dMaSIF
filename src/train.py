@@ -78,6 +78,7 @@ Depends on: numpy, torch; train_data, probe_retrieval, surface_encoder,
 
 import argparse
 import json
+import resource
 import sys
 import time
 from pathlib import Path
@@ -108,6 +109,9 @@ def build_model(a, device):
         region_persistence=a.persistence, region_nms_iou=a.nms_iou,
         region_nms_alpha=a.nms_alpha, region_nms_score=a.nms_score,
         pool_mode=a.pool_mode, n_shells=a.n_shells, anchor_norm=a.anchor_norm,
+        # getattr: checkpoints saved before the descriptor branch existed have
+        # no such args, and load_model_from_ckpt rebuilds from saved args
+        desc_dims=getattr(a, "desc_dims", 0), desc_layers=getattr(a, "desc_layers", 3),
         out_dim=a.out_dim, dropout=a.enc_dropout,
         resolution=a.resolution, sup_sampling=a.sup_sampling)
     lig_cfg = LigandConfig(arm=a.arm, out_dim=a.out_dim, hidden=a.hidden,
@@ -138,7 +142,9 @@ def build_model(a, device):
 
     model = RetrievalModel().to(device)
     print(f"encoder: {enc_cfg.in_channels} input channels -> {enc_cfg.emb_dims} dims "
-          f"-> {enc_cfg.pooled_dims} pooled ({enc_cfg.pool_mode}) -> {a.out_dim}; "
+          + (f"+ {enc_cfg.desc_dims} descriptor ({enc_cfg.desc_layers} layers) "
+             if enc_cfg.desc_dims else "")
+          + f"-> {enc_cfg.pooled_dims} pooled ({enc_cfg.pool_mode}) -> {a.out_dim}; "
           f"anchor_norm {enc_cfg.anchor_norm}")
     print(f"surface sampler: resolution {enc_cfg.resolution}, sup_sampling "
           f"{enc_cfg.sup_sampling}"
@@ -249,8 +255,12 @@ def anchor_block(model, P, labs, a, generator=None):
             pk = lb["pocket"].to(out["xyz"].device)
             reg = fallback_region(out["xyz"][sel], pk, cfg.region_ball_radius)
             if len(reg) >= cfg.min_region_points:
+                # pool_emb, not point_emb: the fallback anchor must be pooled
+                # from the same features as every selector anchor, descriptor
+                # branch included. .get for the selftest's stub encoder.
                 extra_vec.append(pool_regions(
-                    out["point_emb"][sel], prob[sel], [reg.to(sel.device)],
+                    out.get("pool_emb", out["point_emb"])[sel], prob[sel],
+                    [reg.to(sel.device)],
                     mode=cfg.pool_mode, xyz=out["xyz"][sel],
                     n_shells=cfg.n_shells)[0])
                 extra_at.append(b)
@@ -291,6 +301,145 @@ def pair_mask(table, rows, ligands, device, tanimoto):
     fr = torch.as_tensor(fp_rows, device=device)
     fps = torch.as_tensor(ligands.fp[fp_rows].astype(np.float32), device=device)
     return mask_pairs(g, g, fr, fr, fps, fps, tanimoto)
+
+
+def cross_mask(table, rows_q, rows_c, ligands, device, tanimoto):
+    """False-negative mask between two DIFFERENT row sets -> (Q, C) bool.
+
+    The same rules as pair_mask (same target group, same ligand, Tanimoto >=
+    `tanimoto`), but with no diagonal to protect. Not mask_pairs: that clears
+    the diagonal whenever Q == C, which between two unrelated row sets would
+    un-mask a real same-group pair whenever the sizes happen to match.
+    """
+    import torch
+
+    from probe_retrieval import tanimoto as tanimoto_matrix
+
+    gq = torch.as_tensor(table.group_id[rows_q], device=device)
+    gc = torch.as_tensor(table.group_id[rows_c], device=device)
+    fq = torch.as_tensor(table.fp_row[rows_q], device=device)
+    fc = torch.as_tensor(table.fp_row[rows_c], device=device)
+    m = (gq[:, None] == gc[None, :]) | (fq[:, None] == fc[None, :])
+    if tanimoto is not None and tanimoto < 1.0:
+        fpq = torch.as_tensor(ligands.fp[table.fp_row[rows_q]].astype(np.float32),
+                              device=device)
+        fpc = torch.as_tensor(ligands.fp[table.fp_row[rows_c]].astype(np.float32),
+                              device=device)
+        m |= tanimoto_matrix(fpq, fpc) >= tanimoto
+    return m
+
+
+def nce_extended(s, mask, s_bank=None, m_bank=None, s_lig=None, m_lig=None):
+    """Symmetric InfoNCE with extra candidates on either side.
+
+    s (B, B)          batch proteins x batch ligands, true pairs on the diagonal
+    s_bank (Q, B)     memory-bank proteins x batch ligands: more PROTEIN
+                      candidates for each ligand query (ligand -> protein, the
+                      direction validation measures)
+    s_lig (B, N)      batch proteins x extra ligands: more LIGAND candidates
+                      for each protein query
+    Masked entries leave the denominator, exactly as in info_nce. With neither
+    extra this IS info_nce: the same two cross-entropies over the same
+    entries.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    t = torch.arange(len(s), device=s.device)
+    p2l, mp = s, mask
+    if s_lig is not None:
+        p2l, mp = torch.cat([s, s_lig], 1), torch.cat([mask, m_lig], 1)
+    l2p, ml = s.T, mask.T
+    if s_bank is not None:
+        l2p, ml = torch.cat([s.T, s_bank.T], 1), torch.cat([mask.T, m_bank.T], 1)
+    return 0.5 * (F.cross_entropy(p2l.masked_fill(mp, float("-inf")), t)
+                  + F.cross_entropy(l2p.masked_fill(ml, float("-inf")), t))
+
+
+class ProteinBank:
+    """The last `size` training proteins' pooled anchors, as extra negatives.
+
+    Proteins are the expensive side - a surface, a conv and region selection
+    each - and the batch IS the negative set, so batch 32 gave every ligand 31
+    wrong proteins to beat. This keeps the POOLED vectors (before the
+    normalisation and projection) of recent batches, detached, and re-projects
+    them with the CURRENT projection at every step. So a bank entry is stale
+    only in the conv, which moves slowly; the projection, which the
+    contrastive loss moves fastest, is always current. MoCo's queue, minus the
+    momentum encoder: the staleness here is a few dozen steps of a 30k-parameter
+    conv.
+
+    No gradient flows into the bank. It is not checkpointed: a resumed run
+    starts it empty and refills it in size / batch steps.
+    """
+
+    def __init__(self, size, k, dim, device):
+        import torch
+
+        self.size = size
+        self.pooled = torch.zeros(size, k, dim, device=device)
+        self.valid = torch.zeros(size, k, dtype=torch.bool, device=device)
+        self.usable = torch.zeros(size, k, dtype=torch.bool, device=device)
+        self.rows = np.full(size, -1, dtype=np.int64)
+        self.ptr = self.n = 0
+
+    def push(self, pooled, valid, usable, rows):
+        import torch
+
+        m, k = len(rows), pooled.shape[1]
+        idx = torch.as_tensor((self.ptr + np.arange(m)) % self.size,
+                              device=self.pooled.device)
+        # Zero the whole slot first: this batch may have one slot fewer than
+        # the bank (no fallback anchor this step), and the old tail must not
+        # survive as a phantom anchor.
+        self.pooled[idx] = 0
+        self.valid[idx] = False
+        self.usable[idx] = False
+        self.pooled[idx, :k] = pooled.detach()
+        self.valid[idx, :k] = valid
+        self.usable[idx, :k] = usable
+        self.rows[idx.cpu().numpy()] = rows
+        self.ptr = (self.ptr + m) % self.size
+        self.n = min(self.n + m, self.size)
+
+    def anchors(self, model):
+        """-> (anchors (n, k, D), usable (n, k), rows (n,)), or None if empty.
+
+        The normalisation runs in eval mode here: a BatchNorm in training mode
+        would update its running statistics from stale vectors, and the batch
+        statistics of the bank are not the batch's.
+        """
+        import torch
+
+        if not self.n:
+            return None
+        enc = model.encoder
+        was = enc.pool_norm.training
+        enc.pool_norm.eval()
+        try:
+            with torch.no_grad():
+                anchors = enc.project_anchors(self.pooled[:self.n],
+                                              self.valid[:self.n])
+        finally:
+            enc.pool_norm.train(was)
+        return anchors, self.usable[:self.n], self.rows[:self.n]
+
+
+def lr_at(a, step):
+    """Learning rate at `step`: linear warmup, then constant or cosine.
+
+    A function of the step alone, so a resumed run lands on exactly the rate an
+    uninterrupted one would have had - nothing to checkpoint. The cosine runs
+    over --steps, the run's TOTAL target, not over one job of a chain.
+    """
+    import math
+
+    if a.warmup and step < a.warmup:
+        return a.lr * (step + 1) / a.warmup
+    if a.lr_schedule == "const":
+        return a.lr
+    prog = min(1.0, (step - a.warmup) / max(1, a.steps - a.warmup))
+    return a.lr * (a.min_lr_frac + (1 - a.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * prog)))
 
 
 def site_loss(scores_per_anchor, label):
@@ -498,6 +647,14 @@ def load_model_from_ckpt(path, device, overrides=None):
 # ---------------------------------------------------------------------------
 # rows: the table both stages see, and the validation subsample
 # ---------------------------------------------------------------------------
+def use_neighbor_device(a, device):
+    """--gpu_neighbors: build region selection's neighbour lists on the GPU."""
+    import anchors
+
+    if getattr(a, "gpu_neighbors", False) and str(device).startswith("cuda"):
+        anchors.NEIGHBOR_DEVICE = device
+
+
 def load_rows(a):
     """-> (table, ligands), rows whose ligand failed featurisation dropped.
 
@@ -579,9 +736,12 @@ def train(a):
     from surface_encoder import pocket_loss
     from train_data import LabelCache, SurfaceStore
 
+    import anchors as anchors_mod
+
     device = a.device
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    use_neighbor_device(a, device)
     table, ligands = load_rows(a)
 
     model, enc_cfg, lig_cfg = build_model(a, device)
@@ -628,6 +788,9 @@ def train(a):
 
     members, counts = group_index(table.group[train_rows])
     rng = np.random.default_rng(a.seed)
+    # Extra ligand negatives come from a stream of their own, so switching
+    # them on does not change which BATCHES a run sees.
+    rng_x = np.random.default_rng([a.seed, 1])
     gen = torch.Generator().manual_seed(a.seed)   # negative-region seeding
     history, step0 = [], 0
     pos_neg = [0.0, 0.0]
@@ -659,6 +822,7 @@ def train(a):
         # what matters, but a resumed run is not step-for-step identical to an
         # uninterrupted one. Said plainly rather than silently approximated.
         rng = np.random.default_rng([a.seed, step0])
+        rng_x = np.random.default_rng([a.seed, step0, 1])
         # The checkpoint's split replaced the one computed above, so the
         # descriptor scaler has to be refitted on ITS train rows or the ligand
         # branch would see inputs standardised against a different split.
@@ -670,14 +834,39 @@ def train(a):
     best = max((h.get("mrr", float("nan")) for h in history), default=float("nan"))
     if not np.isfinite(best):
         best = -1.0
+    bank = None
+    if a.bank:
+        if a.bank < a.batch:
+            raise SystemExit(f"--bank {a.bank} is smaller than --batch {a.batch}")
+        bank = ProteinBank(a.bank, enc_cfg.k_pos + enc_cfg.k_neg + 1,
+                           enc_cfg.pooled_dims, device)
     t_start = time.time()
     losses, nces, pocks = [], [], []
+    # Per-phase wall clock since the last evaluation line, summed over steps.
+    # Synchronised at each boundary, so GPU work lands in the phase that
+    # launched it rather than in whichever one next waits on the device.
+    cuda = str(device).startswith("cuda") and torch.cuda.is_available()
+
+    def clock():
+        if cuda:
+            torch.cuda.synchronize()
+        return time.perf_counter()
+    T = dict.fromkeys(("load", "fwd", "select", "nbrs", "lig", "bwd", "steps"), 0.0)
     mean = lambda v: float(np.mean(v[-a.eval_every:])) if v else float("nan")
     print(f"\nsteps {step0} -> {a.steps}, batch {a.batch}, alpha {a.alpha}, "
           f"lam_pocket {a.lam_pocket}, lam_site {a.lam_site}, tau {a.tau}")
     print(f"region selector: {enc_cfg.region_method} "
           f"R={enc_cfg.region_ball_radius} shift={enc_cfg.region_ball_shift}, "
           f"k_pos {enc_cfg.k_pos} + k_neg {enc_cfg.k_neg}")
+    print(f"negatives per step: {a.batch - 1} in-batch proteins"
+          + (f" + a bank of {a.bank}" if a.bank else "")
+          + f"; {a.batch - 1} in-batch ligands"
+          + (f" + {a.extra_ligands} extra" if a.extra_ligands else "")
+          + ("  (nce is over these, so it is not comparable across settings)"
+             if a.bank or a.extra_ligands else ""))
+    print(f"lr {a.lr} {a.lr_schedule}" + (f", warmup {a.warmup}" if a.warmup else "")
+          + (f", floor {a.min_lr_frac} x" if a.lr_schedule == "cosine" else "")
+          + f"; neighbour lists on {anchors_mod.NEIGHBOR_DEVICE or 'the CPU'}")
     print("fb = fraction of val proteins whose positive anchor had to be the "
           "fallback ball\n")
     hdr = ("step", "sec", "loss", "nce", "pock", "mrr", "chance", "top1",
@@ -703,6 +892,17 @@ def train(a):
                 for v in vals[2:]), flush=True)
             print(f"         train {store.report()}", flush=True)
             print(f"         val   {val_store.report()}", flush=True)
+            if T["steps"]:
+                n = T["steps"]
+                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+                gpu = (f", GPU peak {torch.cuda.max_memory_allocated() / 1e9:.1f} GB"
+                       if cuda else "")
+                print(f"         s/step: load {T['load'] / n:.2f}  fwd {T['fwd'] / n:.2f} "
+                      f"(select+pool {T['select'] / n:.2f}, of it nbr lists "
+                      f"{T['nbrs'] / n:.2f})  lig+loss {T['lig'] / n:.2f}  "
+                      f"bwd {T['bwd'] / n:.2f}  | lr {lr_at(a, step):.2e} | "
+                      f"RSS peak {rss:.1f} GB{gpu}", flush=True)
+                T = dict.fromkeys(T, 0.0)
             (out / "history.json").write_text(json.dumps(history, indent=1) + "\n")
             if np.isfinite(met["mrr"]) and met["mrr"] > best:
                 best = met["mrr"]
@@ -719,18 +919,48 @@ def train(a):
                       a, enc_cfg, lig_cfg, history, pos_neg)
             break
 
+        for g in opt.param_groups:
+            g["lr"] = lr_at(a, step)
+        t0 = clock()
         rows = train_rows[draw_batch(rng, members, counts, a.batch, a.alpha)]
         P, labs = build_batch(model, store, labels, table, rows, device)
+        t1 = clock()
+        nbr0 = anchors_mod.NEIGHBOR_SECONDS[0]
         blk = anchor_block(model, P, labs, a, generator=gen)
+        t2 = clock()
+        T["load"] += t1 - t0
+        T["fwd"] += t2 - t1
+        T["select"] += model.encoder.last_select_sec
+        T["nbrs"] += anchors_mod.NEIGHBOR_SECONDS[0] - nbr0
         keep = blk["usable"].any(1)
         if int(keep.sum()) < 2:
             continue                       # nothing to contrast this step
         kn = keep.cpu().numpy()
         rows_k = rows[kn]
+        anchors_k, usable_k = blk["anchors"][keep], blk["usable"][keep]
 
-        lig = encode_ligands(model, ligands, table.fp_row[rows_k], device)
-        scores = model.scores(blk["anchors"][keep], blk["usable"][keep], lig)
-        nce = info_nce(scores, pair_mask(table, rows_k, ligands, device, a.tanimoto))
+        extra = (train_rows[draw_batch(rng_x, members, counts, a.extra_ligands, a.alpha)]
+                 if a.extra_ligands else rows_k[:0])
+        # One ligand forward for batch and extras together, so both go through
+        # the same normalisation statistics.
+        lig_all = encode_ligands(model, ligands,
+                                 table.fp_row[np.concatenate([rows_k, extra])], device)
+        lig, lig_x = lig_all[:len(rows_k)], lig_all[len(rows_k):]
+        scores = model.scores(anchors_k, usable_k, lig)
+        mask = pair_mask(table, rows_k, ligands, device, a.tanimoto)
+        banked = bank.anchors(model) if bank is not None else None
+        if banked is None and not len(extra):
+            nce = info_nce(scores, mask)
+        else:
+            s_bank = m_bank = s_lig = m_lig = None
+            if banked is not None:
+                s_bank = model.scores(banked[0], banked[1], lig)
+                m_bank = cross_mask(table, banked[2], rows_k, ligands, device,
+                                    a.tanimoto)
+            if len(extra):
+                s_lig = model.scores(anchors_k, usable_k, lig_x)
+                m_lig = cross_mask(table, rows_k, extra, ligands, device, a.tanimoto)
+            nce = nce_extended(scores, mask, s_bank, m_bank, s_lig, m_lig)
 
         label = torch.cat([lb["pocket"] for lb in labs]).to(device).float()
         pos_neg[0] += float(label.sum())
@@ -743,10 +973,18 @@ def train(a):
             per_anchor = (torch.einsum("bkd,bd->bk", blk["anchors"][keep], lig)
                           * model.scale())
             loss = loss + a.lam_site * site_loss(per_anchor, blk["label"][keep])
+        t3 = clock()
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), a.clip)
         opt.step()
+        if bank is not None:
+            # After the loss, so a batch is never its own bank negative.
+            bank.push(blk["pooled"][keep], blk["valid"][keep], usable_k, rows_k)
+        t4 = clock()
+        T["lig"] += t3 - t2
+        T["bwd"] += t4 - t3
+        T["steps"] += 1
         losses.append(float(loss.detach()))
         nces.append(float(nce.detach()))
         pocks.append(float(pock.detach()))
@@ -775,6 +1013,7 @@ def evaluate_only(a):
     from probe_retrieval import split_by_group
     from train_data import LabelCache, SurfaceStore
 
+    use_neighbor_device(a, a.device)
     model, ckpt, saved = load_model_from_ckpt(a.ckpt, a.device, overrides=a)
     table, ligands = load_rows(a)
     store = SurfaceStore(a.surface_cache, ram=a.surface_ram, device=a.device,
@@ -1329,6 +1568,64 @@ def selftest(a):
           f"max delta {delta:.2e}; this is what makes --resume meaningful, and "
           "it covers the BatchNorm running statistics as much as the weights")
 
+    # ---- v2 pieces: extended InfoNCE, the bank, the masks, the schedule ----
+    print("\n[8] memory bank, extra ligands, cross mask, lr schedule")
+    g = torch.Generator().manual_seed(1)
+    S = torch.randn(6, 6, generator=g)
+    M = torch.zeros(6, 6, dtype=torch.bool)
+    M[0, 3] = M[3, 0] = True
+    d0 = float((nce_extended(S, M) - info_nce(S, M)).abs())
+    check("nce_extended with no extras IS info_nce", d0 < 1e-6, f"delta {d0:.2e}")
+    # An extra candidate that is masked must change nothing; an unmasked one
+    # that outscores the answer must raise the loss.
+    xb, xl = torch.full((1, 6), 50.0), torch.full((6, 1), 50.0)
+    on, off = torch.ones(1, 6, dtype=torch.bool), torch.zeros(1, 6, dtype=torch.bool)
+    d1 = float((nce_extended(S, M, xb, on, xl, on.T) - info_nce(S, M)).abs())
+    check("fully masked extras leave the loss unchanged", d1 < 1e-6, f"delta {d1:.2e}")
+    check("an unmasked strong extra raises the loss",
+          float(nce_extended(S, M, xb, off, xl, off.T)) > float(info_nce(S, M)) + 1.0)
+
+    rq, rc = va[:4], np.concatenate([va[:4], tr[:4]])
+    cm = cross_mask(table, rq, rc, ligands, "cpu", args.tanimoto)
+    same = (table.group_id[rq][:, None] == table.group_id[rc][None, :])
+    check("cross_mask masks every same-group pair, the 'diagonal' included",
+          bool(cm[torch.as_tensor(same)].all()) and bool(cm[:, :4].diagonal().all()),
+          "a row is its own false negative when it reappears as a bank entry")
+    eq = cross_mask(table, va[:4], va[4:8], ligands, "cpu", args.tanimoto)
+    want = torch.as_tensor(table.group_id[va[:4]][:, None] == table.group_id[va[4:8]][None, :])
+    check("cross_mask between equal-sized disjoint sets clears no diagonal",
+          bool(eq[want].all()))
+
+    c8 = model.encoder.cfg
+    bk = ProteinBank(5, c8.k_pos + c8.k_neg + 1, c8.pooled_dims, "cpu")
+    check("an empty bank contributes nothing", bk.anchors(model) is None)
+    P8, labs8 = batch_for(tr[:3])
+    with torch.no_grad():
+        blk8 = anchor_block(model, P8, labs8, args)
+    k8 = blk8["usable"].any(1)
+    for _ in range(5):           # 5 x 1-3 rows into 5 slots: it must fill and wrap
+        bk.push(blk8["pooled"][k8], blk8["valid"][k8], blk8["usable"][k8],
+                tr[:3][k8.numpy()])
+    got8 = bk.anchors(model)
+    ref = model.encoder.project_anchors(blk8["pooled"][k8], blk8["valid"][k8]).detach()
+    j = int(np.nonzero(bk.rows == tr[:3][k8.numpy()][0])[0][0])
+    kk = blk8["pooled"].shape[1]
+    check("the bank wraps at its size and re-projects with the current weights",
+          bk.n == 5 and got8[0].shape[0] == 5 and not got8[0].requires_grad
+          and float((got8[0][j, :kk] - ref[0]).abs().max()) < 1e-5)
+
+    a8 = argparse.Namespace(lr=1.0, warmup=10, lr_schedule="cosine", steps=110,
+                            min_lr_frac=0.1)
+    lrs = [lr_at(a8, t) for t in (0, 9, 10, 60, 110, 500)]
+    check("warmup rises, cosine falls to the floor and stays there",
+          abs(lrs[0] - 0.1) < 1e-9 and abs(lrs[1] - 1.0) < 1e-9
+          and abs(lrs[2] - 1.0) < 1e-9 and abs(lrs[3] - 0.55) < 1e-9
+          and abs(lrs[4] - 0.1) < 1e-9 and abs(lrs[5] - 0.1) < 1e-9,
+          f"{[round(x, 3) for x in lrs]}")
+    a8c = argparse.Namespace(lr=0.3, warmup=0, lr_schedule="const")
+    check("const with no warmup is the old constant rate",
+          lr_at(a8c, 0) == lr_at(a8c, 10 ** 6) == 0.3)
+
     print("\nSELFTEST " + ("PASSED" if not fails else f"FAILED: {fails}"))
     print("Nothing here involves dMaSIF, KeOps or a GPU, so it says nothing about\n"
           "surface sampling or the convolution; chemo_test.sbatch's smoke pass is\n"
@@ -1395,6 +1692,10 @@ def add_model_args(p):
     p.add_argument("--gnn_layers", type=int, default=4)
     p.add_argument("--lig_dropout", type=float, default=0.0)
     p.add_argument("--enc_dropout", type=float, default=0.0)
+    p.add_argument("--desc_dims", type=int, default=0,
+                   help="width of a second, fresh conv used only for region "
+                        "descriptors (0 = off); see EncoderConfig.desc_dims")
+    p.add_argument("--desc_layers", type=int, default=3)
     p.add_argument("--chemo", action="store_true",
                    help="add chemotype.py's 12 pharmacophore channels")
     p.add_argument("--pool_mode", default="mean",
@@ -1435,6 +1736,9 @@ def add_data_args(p, require_ligands=True):
     p.add_argument("--cutoff", type=float, default=4.0,
                    help="A from a ligand heavy atom; the pocket label")
     p.add_argument("--keep_hydrogens", action="store_true")
+    p.add_argument("--gpu_neighbors", action="store_true",
+                   help="region selection's neighbour lists on the GPU instead "
+                        "of an O(N^2) CPU cdist per surface load")
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--eval_batch", type=int, default=8)
     p.add_argument("--pos_cover", type=float, default=0.5)
@@ -1482,6 +1786,16 @@ def main():
                    help="proteins per step; this IS the number of in-batch "
                         "negatives, so bigger is a better loss, not just faster")
     p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr_schedule", default="const", choices=("const", "cosine"),
+                   help="cosine decays to --min_lr_frac x lr over --steps")
+    p.add_argument("--warmup", type=int, default=0, help="linear warmup steps")
+    p.add_argument("--min_lr_frac", type=float, default=0.05)
+    p.add_argument("--bank", type=int, default=0,
+                   help="memory bank of this many recent proteins' anchors as "
+                        "extra ligand->protein negatives (0 = off)")
+    p.add_argument("--extra_ligands", type=int, default=0,
+                   help="this many extra training ligands per step as extra "
+                        "protein->ligand negatives (0 = off)")
     p.add_argument("--weight_decay", type=float, default=1e-2)
     p.add_argument("--clip", type=float, default=5.0)
     p.add_argument("--tau", type=float, default=0.07)

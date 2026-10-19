@@ -63,25 +63,48 @@ Depends on: torch.
 Imported by: surface_encoder.py, region_sweep.py.
 """
 
+import time
+
 import torch
 
 
 # ----------------------------------------------------------------------------
 # surface neighbourhoods
 # ----------------------------------------------------------------------------
+# Where radius_neighbors runs its all-pairs distances. None = on the points' own
+# device, which inside select_regions is the CPU - the original behaviour, and
+# what region_sweep.py and every earlier result used. train.py --gpu_neighbors
+# points it at the GPU: select_regions moves the surface to the CPU, so on a
+# training run this cdist was an O(N^2) CPU job on ~30k points every time a
+# surface left the RAM cache, which was 88% of loads in runs/v1. The lists come
+# back on the CPU either way, so nothing downstream changes. The GPU path takes
+# exact distances (no matmul shortcut), so a list can differ from the CPU one
+# only by float rounding at the radius boundary; the CPU path is untouched.
+NEIGHBOR_DEVICE = None
+# Wall-clock seconds spent in radius_neighbors since the caller last reset it;
+# train.py reads and zeroes it to report where a step's time goes.
+NEIGHBOR_SECONDS = [0.0]
+
+
 def radius_neighbors(xyz, radius, chunk=1024):
     """CSR neighbour lists within `radius` (self included) -> (offsets, nbrs)."""
+    t0 = time.perf_counter()
+    home, kw = xyz.device, {}
+    if NEIGHBOR_DEVICE is not None:
+        xyz, chunk = xyz.to(NEIGHBOR_DEVICE), 4096
+        kw = {"compute_mode": "donot_use_mm_for_euclid_dist"}
     r2 = radius * radius
     rows, cols = [], []
     for s in range(0, len(xyz), chunk):
-        d2 = torch.cdist(xyz[s:s + chunk], xyz) ** 2
+        d2 = torch.cdist(xyz[s:s + chunk], xyz, **kw) ** 2
         r, c = (d2 < r2).nonzero(as_tuple=True)
         rows.append(r + s)
         cols.append(c)
-    rows, cols = torch.cat(rows), torch.cat(cols)
+    rows, cols = torch.cat(rows).to(home), torch.cat(cols).to(home)
     counts = torch.bincount(rows, minlength=len(xyz))
-    offsets = torch.zeros(len(xyz) + 1, dtype=torch.long)
+    offsets = torch.zeros(len(xyz) + 1, dtype=torch.long, device=home)
     offsets[1:] = torch.cumsum(counts, 0)
+    NEIGHBOR_SECONDS[0] += time.perf_counter() - t0
     return offsets, cols
 
 

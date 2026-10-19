@@ -517,6 +517,43 @@ What it says:
   val was dominated by a few big, easy targets. Every earlier val number in
   this file was flattered by that.
 
+## v2 (`src/slurm/train_v2.sbatch`) - WRITTEN, NOT YET RUN
+
+Four levers, all flags defaulting OFF so every earlier run reproduces, and all
+switched on by `train_v2.sbatch` (a preset over `train.sbatch`):
+
+1. **Negatives.** `--bank N`: `ProteinBank` keeps the POOLED (pre-projection)
+   anchors of the last N training proteins, detached, and re-projects them
+   with the current projection every step (pool_norm in eval mode), as extra
+   PROTEIN candidates for each ligand. `--extra_ligands N`: N more training
+   ligands per step (own RNG stream, group-balanced) as extra LIGAND
+   candidates for each protein. Both masked by `cross_mask` (group / same
+   ligand / Tanimoto, no diagonal - `mask_pairs` clears one whenever Q == C).
+   `nce_extended` is InfoNCE over the widened rows; with neither extra it is
+   info_nce exactly (selftest [8]). Bank not checkpointed; refills in N/batch
+   steps. v2: bank 2048, extra 1024.
+2. **Throughput.** `--gpu_neighbors` builds region selection's radius
+   neighbour lists on the GPU (`anchors.NEIGHBOR_DEVICE`); `select_regions`
+   moves the surface to the CPU, so that was an O(N^2) CPU cdist on ~30k points
+   every RAM-cache miss (88% of loads in v1). CPU path untouched. Plus a
+   per-phase timing line after every evaluation (load / fwd / select+pool /
+   nbr lists / lig+loss / bwd, lr, RSS peak, GPU peak) - THE number to read
+   first from the v2 log, since every bottleneck claim so far is a guess.
+   v2: SURFACE_RAM 4000, LABEL_RAM 20000.
+3. **Capacity.** `--desc_dims D` (multiple of 8): a second, fresh dMaSIF conv
+   over the same inputs, concatenated to the pretrained 16-dim embedding before
+   pooling (`out["pool_emb"]`; the fallback anchor pools it too). The
+   pretrained conv + pocket head still place the regions. v2: 32.
+4. **Schedule.** `--lr_schedule cosine --warmup W --min_lr_frac`; `lr_at` is a
+   function of the step alone, so resumes need no state. v2: cosine over 6000,
+   warmup 200.
+
+Bar: runs/b32's 0.127 MRR at 76k-92k proteins seen on the balanced val set;
+appreciable = ~0.20. Leave-one-out ablations are in the sbatch header.
+Untested on a GPU: everything above. `train.py selftest` [8] covers the
+loss, masks, bank and schedule on CPU; the smoke inside the job covers the
+descriptor conv (new KeOps kernels: expect a slower first smoke).
+
 ## Training loop (`src/train.py`, `src/train_data.py`) - RUN, see "First training run"
 
 The loss:

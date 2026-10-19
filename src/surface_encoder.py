@@ -24,6 +24,7 @@ Depends on: dmasif_compat, anchors, the dMaSIF clone at ../dMaSIF.
 """
 
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,6 +65,15 @@ class EncoderConfig:
     n_layers: int = 3
     radius: float = 12.0
     orientation_units: int = 16
+    # (3b) descriptor branch. 0 = off, the original encoder. > 0 adds a SECOND
+    # dMaSIF conv of this width, fresh weights, over the same input features,
+    # used ONLY for what a region looks like to a ligand: its output is
+    # concatenated to the pretrained 16-dim embedding before pooling. The
+    # pretrained conv and its pocket head still decide WHERE the regions are.
+    # Why not just widen emb_dims: the head checkpoint and the published dMaSIF
+    # weights are 16-wide, so widening discards both, and the regions with them.
+    desc_dims: int = 0
+    desc_layers: int = 3
     # (4) pocket head
     head_hidden: int = 32
     # (5) region anchors (see anchors.py)
@@ -114,7 +124,8 @@ class EncoderConfig:
     @property
     def pooled_dims(self):
         """Width of a pooled region vector, which pool_mode decides."""
-        return pooled_width(self.emb_dims, self.pool_mode, self.n_shells)
+        return pooled_width(self.emb_dims + self.desc_dims, self.pool_mode,
+                            self.n_shells)
 
 
 def _mlp(i, h, o):
@@ -136,7 +147,19 @@ class SurfaceEncoder(nn.Module):
         self.orientation_scores = _mlp(I, cfg.orientation_units, 1)
         self.conv = dMaSIFConv_seg(args, in_channels=I, out_channels=E,
                                    n_layers=cfg.n_layers, radius=cfg.radius)
+        if cfg.desc_dims and (cfg.desc_dims < 8 or cfg.desc_dims % 8):
+            # dMaSIFConv splits its hidden units into heads of 8 and GroupNorms
+            # them in 4 groups; anything else fails deep inside KeOps instead
+            raise ValueError(f"desc_dims {cfg.desc_dims}: use a multiple of 8")
+        # Only built when asked for, so an encoder without it has exactly the
+        # original state dict and every earlier checkpoint loads strictly.
+        self.desc_conv = (dMaSIFConv_seg(args, in_channels=I, out_channels=cfg.desc_dims,
+                                         n_layers=cfg.desc_layers, radius=cfg.radius)
+                          if cfg.desc_dims else None)
         self.dropout = nn.Dropout(cfg.dropout)
+        # seconds in region selection during the last forward, for train.py's
+        # per-phase timing line
+        self.last_select_sec = 0.0
         self.pocket_head = _mlp(E, cfg.head_hidden, 1)
         Pd = cfg.pooled_dims
         # named pool_norm, not anchor_norm: cfg.anchor_norm is the string that
@@ -237,6 +260,8 @@ class SurfaceEncoder(nn.Module):
             xyz, normals, batch        the surface used
             input_feats   (N, 16)      curvatures + chemistry
             point_emb     (N, E)       conv output
+            pool_emb      (N, E + desc_dims)  what regions are pooled from:
+                                       point_emb, plus the descriptor branch
             pocket_logit  (N,)         per-point pocket score
             anchor_vec    (B, K, D)    the representation-space vectors, or
                                        None when project=False
@@ -263,10 +288,17 @@ class SurfaceEncoder(nn.Module):
         feats = self.dropout(self.input_features(
             xyz, normals, batch, P["atom_xyz"], P["atomtypes"], P["batch_atoms"],
             atom_groups=P.get("atom_groups"), chemo=P.get("chemo")))
-        self.conv.load_mesh(xyz, normals=normals,
-                            weights=self.orientation_scores(feats), batch=batch)
+        weights = self.orientation_scores(feats)
+        self.conv.load_mesh(xyz, normals=normals, weights=weights, batch=batch)
         emb = self.conv(feats)
         logit = self.pocket_head(emb).squeeze(-1)
+        # What gets pooled into a region vector: the pretrained embedding, plus
+        # the descriptor branch when there is one. The pocket head reads emb only.
+        if self.desc_conv is not None:
+            self.desc_conv.load_mesh(xyz, normals=normals, weights=weights, batch=batch)
+            pool_emb = torch.cat([emb, self.desc_conv(feats)], dim=1)
+        else:
+            pool_emb = emb
         prob = torch.sigmoid(logit)
 
         K = c.k_pos + c.k_neg
@@ -283,6 +315,7 @@ class SurfaceEncoder(nn.Module):
         # on every forward pass.
         caches = P.get("region_cache")
         all_regions = []
+        t_sel = time.perf_counter()
         for b in range(n_prot):
             sel = (batch == b).nonzero().squeeze(1)
             neg_ok = None
@@ -303,7 +336,7 @@ class SurfaceEncoder(nn.Module):
                 cache=None if caches is None else caches[b])
             n = len(regions)
             if n:
-                vec[b, :n] = pool_regions(emb[sel], prob[sel], regions,
+                vec[b, :n] = pool_regions(pool_emb[sel], prob[sel], regions,
                                           mode=c.pool_mode, xyz=xyz[sel],
                                           n_shells=c.n_shells)
                 center[b, :n] = pool_regions(xyz[sel], prob[sel].detach(), regions)
@@ -311,11 +344,13 @@ class SurfaceEncoder(nn.Module):
                 is_pos[b, :n] = pos.to(xyz.device)
                 valid[b, :n] = True
             all_regions.append([sel[r.to(sel.device)] for r in regions])
+        self.last_select_sec = time.perf_counter() - t_sel
 
         out = self.project_anchors(vec, valid) if project else None
         return {
             "xyz": xyz, "normals": normals, "batch": batch,
-            "input_feats": feats, "point_emb": emb, "pocket_logit": logit,
+            "input_feats": feats, "point_emb": emb, "pool_emb": pool_emb,
+            "pocket_logit": logit,
             "anchor_vec": out, "anchor_pooled": vec,
             "anchor_valid": valid,
             "anchor_is_pos": is_pos, "anchor_center": center, "anchor_size": size,
