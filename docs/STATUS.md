@@ -550,6 +550,7 @@ switched on by `train_v2.sbatch` (a preset over `train.sbatch`):
 
 Bar: runs/b32's 0.127 MRR at 76k-92k proteins seen on the balanced val set;
 appreciable = ~0.20. Leave-one-out ablations are in the sbatch header.
+`train.py selftest` PASSED on the login node with [8] (2026-10-19).
 Untested on a GPU: everything above. `train.py selftest` [8] covers the
 loss, masks, bank and schedule on CPU; the smoke inside the job covers the
 descriptor conv (new KeOps kernels: expect a slower first smoke).
