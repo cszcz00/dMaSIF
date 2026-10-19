@@ -475,6 +475,48 @@ features change nothing, and better ligand encoders change nothing. What has
 never been tried is training the protein encoder with the contrastive
 objective, which is what `train.py` is for.
 
+## Second round (jobs 139912 frozen / 139913 shells / 139914 b32)
+
+All three on the SAME group-balanced 400 val rows (`--val_balance`, 283
+groups), all from `head_pretrained_300.pt`, all ~10.95 h. Compared at MATCHED
+DATA - 76k-92k proteins seen, i.e. batch-8 steps 9,500-11,500 against b32
+steps 2,375-2,875 - as the mean of the 5 evaluations in that window, because
+one evaluation moves +-0.015-0.02:
+
+| run | proteins/s | mrr | top1 | top10 | site | AUROC / AP | fb | cosdiff |
+|---|---|---|---|---|---|---|---|---|
+| step 0 (any) | - | 0.020 | 0.003 | 0.03 | 0.44-0.52 | 0.919 / 0.464 | 0.182 | 0.97 |
+| frozen, mean, b8 | 2.9 | 0.077 | 0.028 | 0.17 | ~0.54 | 0.919 / 0.464 | 0.182 | 0.976 |
+| shells, b8 | 2.5 | 0.113 | 0.045 | 0.23 | ~0.64 | 0.927 / 0.52 | ~0.175 | ~0.68 |
+| mean, **b32** | 2.3 | **0.127** | **0.067** | 0.23 | ~0.54 | 0.924 / 0.50 | ~0.175 | ~0.85 |
+
+(chance 0.017.) Ends: frozen 14,554 steps, best 0.091; shells 12,547 steps,
+best 0.124; b32 2,875 of 5,000 steps, best 0.142 at 2,500.
+
+What it says:
+- **Training the protein side helps, but it is not most of the signal.**
+  Frozen encoder + trained projection and ligand reaches ~0.08; the trained
+  runs reach 0.11-0.13 on the same data. Roughly 60% of the retrieval is
+  already in the frozen pocket features. `--freeze_encoder` worked as meant:
+  AUROC, fb and cosdiff are constant to 3 decimals for 14.5k steps.
+  cosdiff is measured on the POOLED vectors, before the projection
+  (`evaluate` -> `anchor_spread(pooled)`), which is why it cannot move here.
+- **Batch 32 is the best arm and still climbing fastest** (0.087 at 1,250 ->
+  ~0.13 at 2,875 steps). Per protein it costs about the same wall clock as
+  batch 8, so more negatives are nearly free. It also has the best top1.
+- **cosdiff is not the whole story.** b32 beats shells on MRR with much LESS
+  anchor spread (0.85 vs 0.68). Spread is necessary, not sufficient; stop
+  treating it as THE number and read mrr/top10 at matched data.
+- **shells vs mean pooling is not yet separable**: the only mean/b8 run is v1,
+  whose curve is on the old val set. v1's `best.pt` is at step 11,500 = 92k
+  proteins, exactly this window, so `eval.sbatch`'s number for it is the
+  mean/b8 row (slightly flattered: it was chosen on a val set that overlaps
+  this one).
+- **The balanced val set is much harder for the pocket head**: step-0 AUROC
+  0.919 / fb 0.18 here against 0.960 / 0.06 on v1's row-uniform set. v1's
+  val was dominated by a few big, easy targets. Every earlier val number in
+  this file was flattered by that.
+
 ## Training loop (`src/train.py`, `src/train_data.py`) - RUN, see "First training run"
 
 The loss:
