@@ -215,7 +215,7 @@ REGION_OVERRIDES = {
     "ball_rank": "region_ball_rank", "nms_iou": "region_nms_iou",
     "nms_alpha": "region_nms_alpha", "nms_score": "region_nms_score",
     "persistence": "region_persistence", "k_pos": "k_pos", "k_neg": "k_neg",
-    "min_region_points": "min_region_points",
+    "min_region_points": "min_region_points", "region_source": "region_source",
 }
 
 

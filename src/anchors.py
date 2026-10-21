@@ -464,7 +464,7 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
                    forced=None, dup_overlap=0.5, generator=None,
                    method="watershed", persistence=0.0, ball_radius=10.0, ball_shift=1,
                    ball_rank="seed", nms_score="sum", nms_iou=0.3, nms_alpha=0.0,
-                   cache=None):
+                   cache=None, fill=True):
     """Pocket and negative regions on one protein surface.
 
     xyz (N, 3), prob (N,) pocket probabilities in [0, 1].
@@ -473,6 +473,10 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
     method, persistence, ball_*, nms_*: how candidates become regions, see
     pocket_regions().
     forced: list of index tensors taken as pocket regions first.
+    fill: False takes the forced regions as the ONLY pocket regions, rather
+    than topping them up from `prob` - the external-pocket source, where an
+    outside tool has already decided where the pockets are. `prob` then only
+    seeds the negative patches.
     neg_size: points per negative region; default the median pocket-region
     size, or 4 * min_points when there are none.
     neg_exclusion: A; negative points must be this far from every pocket region.
@@ -507,9 +511,11 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
     taken = torch.zeros(len(xyz), dtype=torch.bool)
     for f in pos:
         taken[f] = True
-    for r in pocket_regions(xyz, prob, method, threshold, top_fraction, link_radius,
+    found = (pocket_regions(xyz, prob, method, threshold, top_fraction, link_radius,
                             smooth_radius, min_points, persistence, ball_radius, ball_shift,
-                            ball_rank, nms_score, nms_iou, nms_alpha, cache=cache):
+                            ball_rank, nms_score, nms_iou, nms_alpha, cache=cache)
+             if fill else [])
+    for r in found:
         if len(pos) == k_pos:
             break
         if taken[r].float().mean() > dup_overlap:

@@ -1,6 +1,8 @@
 # Project status (handoff)
 
-Read this first in a new session. Last updated 2026-10-18 on
+Read this first in a new session. **2026-10-21: the newest work is "External
+pockets (fpocket)" below - regions from fpocket instead of the pocket head,
+written and not yet run; its run order is in that section.** Before that, last updated 2026-10-18 on
 `claude/model-training`, after the FIRST REAL TRAINING RUN (`runs/v1`, 15,642
 steps, 10.96 h) came back. Its results are the "First training run" section
 below; read that before anything else in START HERE, which is the history of
@@ -517,6 +519,89 @@ What it says:
   val was dominated by a few big, easy targets. Every earlier val number in
   this file was flattered by that.
 
+## External pockets (fpocket) - WRITTEN, NOT YET RUN
+
+Why: the results are still poor, and the one component every run shares is
+the pocket head deciding WHERE the regions are (top 5% of its map covers 0.68
+of the labelled pocket; region selection has no gradient, so the loop cannot
+fix a misplaced region). This takes the head out of region placement: a
+geometric pocket finder picks the pockets, the encoder only describes them.
+**Nothing was removed**: `--region_source predicted` (the default) is the old
+loop exactly, and every earlier command reproduces.
+
+Pieces:
+- `src/external_pockets.py`
+  - `run` (container, CPU): fpocket on exactly the atoms the surface is built
+    from (`load_protein_atoms`, same chain filter, no H), written to a temp
+    PDB -> `pockets/fpocket/<input_id>.npz`. It stores **alpha spheres**
+    (centre, radius, pocket id) plus per-pocket score / druggability / volume,
+    NOT surface indices, so one file serves any resampling of the surface.
+  - mapping: a surface point is in pocket k if it lies within `r_s + margin`
+    of one of k's alpha spheres (`--pocket_margin`, default 0; an alpha sphere's
+    boundary runs through the lining atom centres, so the lining surface is
+    inside it). Shapes: `pocket` (the covered points) or `ball` (a
+    `--ball_radius` ball at their centroid, the fallback's construction).
+    Pockets under `min_region_points` or more than 50% inside an earlier one
+    are dropped.
+  - `score` (numpy, CPU venv): the pockets as regions against the labelled
+    pocket on the cached surfaces, region_sweep's metrics, sweeping
+    shape x rank x margin. **The gate for the training run.**
+  - `selftest` (numpy): parsers (incl. run-together negative coordinates), the
+    PDB writer's columns, box-filtered mapping == brute force, ranks, shapes,
+    dedup, PocketSource. PASSES locally.
+- `EncoderConfig.region_source` / `train.py --region_source`:
+  - `external`: the top k_pos external pockets ARE the pocket regions, in
+    fpocket's order (`--pocket_rank score|drug|volume`); the selector is not
+    run (`anchors.select_regions(fill=False)`).
+  - `external_map`: a per-point map (0 outside, 0.5..1 inside, better pocket
+    higher) replaces sigmoid(logit) as the selector's input, thresholded at
+    `--threshold` (a top-fraction quantile of a map that is 0 on ~97% of the
+    surface would be 0).
+  - both pool regions as **plain means** (no gradient to the head through the
+    weights); the head is still computed, still trained by `--lam_pocket`,
+    still reported as AUROC/AP. Negatives are seeded off the external map.
+    `fb` now measures how often fpocket's top k_pos miss the ligand. A
+    receptor with no pocket file / no usable pocket gets no anchors (training
+    falls back, eval drops it); the store line under each evaluation counts
+    them.
+  - the region loop moved out of `forward` into
+    `surface_encoder.select_and_pool` (behaviour unchanged for `predicted`,
+    asserted in the selftest) so it can be tested without KeOps.
+  - `eval` picks the pocket settings up from the checkpoint unless given.
+- `train.py selftest` group [9]: the REAL `select_and_pool` with a
+  PocketSource over the synthetic proteins - regions == the external pockets
+  in rank order, decoy not positive / true pocket positive, plain-mean
+  pooling, no head gradient, rank volume, external_map finds the pocket, a
+  missing map refuses, and `predicted` == `select_regions`. **Not run: there
+  is no torch here. Run it first.**
+
+Checked locally (no torch): fpocket 4.2.3 built from source; its 1ATP sample
+through `write_pdb` -> fpocket -> parser: 28 pockets, the top-ranked one is the
+ATP site. On an approximate surface (~3x dMaSIF's point density) the top
+pocket at margin 0 has iou 0.76 / cover 0.83 / prec 0.90 against the ATP
+label (margin -1: 0.56/0.58/0.96; +2: 0.52/1.00/0.52). One structure: an
+existence proof for the code path, not evidence about the dataset.
+
+Run order:
+```
+bash src/slurm/build_fpocket.sh                     # login node, once; self-checks on 1ATP
+EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
+$EX src/train.py selftest                           # group [9] is new
+python src/external_pockets.py selftest             # CPU venv
+sbatch src/slurm/fpocket.sbatch                     # 16 CPU tasks -> pockets/fpocket/
+python src/external_pockets.py score --items runs/v1/items.tsv \
+    --surface_cache surfaces --pockets pockets/fpocket --n 1000 \
+    --out pockets/fpocket/score.tsv --per_item pockets/fpocket/score_items.tsv
+sbatch src/slurm/train_fpocket.sbatch               # b32-matched; set POCKET_SHAPE / POCKET_MARGIN from score
+```
+Read `score` against ball_R8 (held-out hit 0.84-0.86, dccA 0.77, iou 0.53,
+size ~290): if fpocket's hit / dccA are not at least that, the training run is
+not worth its GPU. Compare `runs/fpocket` with `runs/b32` (0.127 MRR at
+76k-92k proteins seen, same val set, same batch) at matched proteins seen.
+Variants are in `train_fpocket.sbatch`'s header (ball shape, drug rank,
+external_map, `LAM_POCKET=0`). `train.sbatch` gained `REGION_ARGS`, passed to
+the smoke as well as the main run, so the smoke exercises the external path.
+
 ## v2 (`src/slurm/train_v2.sbatch`) - WRITTEN, NOT YET RUN
 
 Four levers, all flags defaulting OFF so every earlier run reproduces, and all
@@ -939,10 +1024,11 @@ before the real run.
 | `ligand_encoder.py` | ligand arms (`LigandConfig`, `LigandEncoder`, `LigandData`); `python src/ligand_encoder.py` self-tests |
 | `probe_retrieval.py` | frozen-anchor retrieval probe: `prepare` / `dump` / `probe` / `selftest` |
 | `anchors.py` | region selectors, negatives, pooling (`mean` / `mean_std` / `shells`) |
+| `external_pockets.py` | fpocket pockets as regions: `run` / `score` / `selftest`, `PocketSource` for `--region_source external` |
 | `train_data.py` | items, surface store (disk + RAM LRU), pocket + other-site labels, the fallback region |
 | `train.py` | the contrastive loop: `prepare` / `cache` / `train` / `eval` / `selftest` |
 | `train_check.sh` | login-node end-to-end check of the whole pipeline, 7 stages, no GPU |
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
-| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, build / fetch / smoke jobs; `dmasif.def` container |
+| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, build / fetch / smoke jobs; `dmasif.def` container |

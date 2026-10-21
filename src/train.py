@@ -45,6 +45,13 @@ still has a positive; the RATE of that is reported every evaluation and is the
 honest measure of how much the loop is leaning on labels it will not have at
 inference.
 
+External pockets. `--region_source external --pockets DIR` takes the pocket
+regions from an outside pocket finder (fpocket, via external_pockets.py)
+instead of the head's map: its top k_pos pockets are the anchors, pooled as
+plain means, and the head only matters through its BCE. `external_map` feeds
+the finder's per-point map to the usual selector instead. The default,
+`predicted`, is the original loop exactly. src/slurm/train_fpocket.sbatch.
+
 Stages:
     prepare    CPU venv. index.parquet -> runs/<name>/items.tsv.
     cache      container, GPU. Prefill the surface cache. Optional - training
@@ -73,7 +80,8 @@ Example:
         --surface_cache surfaces/ --steps 20000 --max_hours 11
 
 Depends on: numpy, torch; train_data, probe_retrieval, surface_encoder,
-            ligand_encoder, anchors, test_encoder, ids.
+            ligand_encoder, anchors, test_encoder, ids; external_pockets
+            (only with an external --region_source).
 """
 
 import argparse
@@ -102,6 +110,9 @@ def build_model(a, device):
     torch.manual_seed(a.seed)
     enc_cfg = EncoderConfig(
         chemo=a.chemo, k_pos=a.k_pos, k_neg=a.k_neg,
+        # getattr / `or`: checkpoints from before external pockets have no
+        # such arg, and eval's region flags default to None
+        region_source=getattr(a, "region_source", None) or "predicted",
         region_method=a.region_method, region_top_fraction=(
             None if a.top_fraction <= 0 else a.top_fraction),
         region_threshold=a.threshold, region_ball_radius=a.ball_radius,
@@ -160,6 +171,31 @@ def build_model(a, device):
     if a.head_ckpt:
         load_head(model.encoder, a.head_ckpt)
     return model, enc_cfg, lig_cfg
+
+
+def pocket_source(a, cfg):
+    """external_pockets.PocketSource for an external region_source, else None.
+
+    Region SHAPE settings come from the encoder config (ball radius, minimum
+    region size), so an external ball is the same object as a ball_R8 region
+    and the fallback anchor. Mapping only the top k_pos pockets is enough for
+    `external` (select_regions takes no more); `external_map` maps them all
+    unless --pocket_max caps it.
+    """
+    if cfg.region_source == "predicted":
+        if getattr(a, "pockets", None):
+            print(f"[warn] --pockets {a.pockets} ignored: --region_source is "
+                  "predicted, so the regions come from the pocket head")
+        return None
+    if not getattr(a, "pockets", None):
+        raise SystemExit(f"--region_source {cfg.region_source} needs --pockets, a "
+                         "directory from `external_pockets.py run`")
+    from external_pockets import PocketSource
+
+    k = a.pocket_max or (cfg.k_pos if cfg.region_source == "external" else None)
+    return PocketSource(a.pockets, k=k, rank=a.pocket_rank, margin=a.pocket_margin,
+                        shape=a.pocket_shape, ball_radius=cfg.region_ball_radius,
+                        min_points=cfg.min_region_points)
 
 
 def load_head(enc, path):
@@ -231,7 +267,12 @@ def anchor_block(model, P, labs, a, generator=None):
     pooled, valid = out["anchor_pooled"], out["anchor_valid"]
     is_pos = out["anchor_is_pos"]
     B, K = valid.shape
-    prob = torch.sigmoid(out["pocket_logit"])
+    # The weights the encoder pooled its own regions with - the pocket
+    # probability, or ones under an external region_source - so the fallback
+    # anchor is pooled the same way. .get for the selftest's stub encoder.
+    prob = out.get("pool_weight")
+    if prob is None:
+        prob = torch.sigmoid(out["pocket_logit"])
 
     label = torch.zeros(B, K, dtype=torch.long, device=valid.device)
     extra_vec, extra_at = [], []
@@ -754,9 +795,11 @@ def train(a):
     # the training window back out on the next step - the surfaces are the
     # expensive thing, so the two sets get their own residency.
     store = SurfaceStore(a.surface_cache, ram=a.surface_ram, device=device,
-                         keep_hydrogens=a.keep_hydrogens)
+                         keep_hydrogens=a.keep_hydrogens,
+                         pockets=pocket_source(a, enc_cfg))
     val_store = SurfaceStore(a.surface_cache, ram=a.val_ram, device=device,
-                             keep_hydrogens=a.keep_hydrogens)
+                             keep_hydrogens=a.keep_hydrogens,
+                             pockets=pocket_source(a, enc_cfg))
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
 
     # split, sampler, state
@@ -855,9 +898,18 @@ def train(a):
     mean = lambda v: float(np.mean(v[-a.eval_every:])) if v else float("nan")
     print(f"\nsteps {step0} -> {a.steps}, batch {a.batch}, alpha {a.alpha}, "
           f"lam_pocket {a.lam_pocket}, lam_site {a.lam_site}, tau {a.tau}")
-    print(f"region selector: {enc_cfg.region_method} "
-          f"R={enc_cfg.region_ball_radius} shift={enc_cfg.region_ball_shift}, "
-          f"k_pos {enc_cfg.k_pos} + k_neg {enc_cfg.k_neg}")
+    if enc_cfg.region_source == "external":
+        print(f"pocket regions: EXTERNAL, not the pocket head - "
+              f"{store.pockets.describe()}; k_pos {enc_cfg.k_pos} + k_neg "
+              f"{enc_cfg.k_neg}. A val protein with no external pocket has no "
+              "anchor and drops out of the retrieval metrics")
+    else:
+        print(f"region selector: {enc_cfg.region_method} "
+              f"R={enc_cfg.region_ball_radius} shift={enc_cfg.region_ball_shift}, "
+              f"k_pos {enc_cfg.k_pos} + k_neg {enc_cfg.k_neg}"
+              + ("" if enc_cfg.region_source == "predicted" else
+                 f", on the EXTERNAL map ({store.pockets.describe()}), "
+                 f"threshold {enc_cfg.region_threshold}"))
     print(f"negatives per step: {a.batch - 1} in-batch proteins"
           + (f" + a bank of {a.bank}" if a.bank else "")
           + f"; {a.batch - 1} in-batch ligands"
@@ -1016,8 +1068,15 @@ def evaluate_only(a):
     use_neighbor_device(a, a.device)
     model, ckpt, saved = load_model_from_ckpt(a.ckpt, a.device, overrides=a)
     table, ligands = load_rows(a)
+    # External-pocket settings: the CLI's where given, else the checkpoint's,
+    # else the defaults - so a checkpoint trained on fpocket regions evaluates
+    # on the same regions without repeating every flag.
+    for k, v in POCKET_DEFAULTS.items():
+        if getattr(a, k, None) is None:
+            setattr(a, k, getattr(saved, k, None) or v)
     store = SurfaceStore(a.surface_cache, ram=a.surface_ram, device=a.device,
-                         keep_hydrogens=saved.keep_hydrogens)
+                         keep_hydrogens=saved.keep_hydrogens,
+                         pockets=pocket_source(a, model.encoder.cfg))
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
     if a.use_ckpt_split and a.recarve:
         raise SystemExit("--use_ckpt_split and --recarve are alternatives")
@@ -1626,6 +1685,127 @@ def selftest(a):
     check("const with no warmup is the old constant rate",
           lr_at(a8c, 0) == lr_at(a8c, 10 ** 6) == 0.3)
 
+    # ---- external pockets: the real select_and_pool, no KeOps -------------
+    print("\n[9] external pockets (region_source external / external_map)")
+    import dataclasses
+
+    from external_pockets import PocketSource, save_pockets
+    from surface_encoder import select_and_pool
+
+    # Two fake fpocket pockets per protein: a decoy on the far side, ranked
+    # FIRST by score, and the true one over the labelled pocket, ranked first
+    # by volume. One r=8 sphere each, its centre 25 A out, so it covers a cap
+    # of ~45 points against the ~64-point labelled pocket.
+    pdir = tmp / "pockets"
+    pdir.mkdir(exist_ok=True)
+    ids9 = list(range(4))
+    for i in ids9:
+        e = store.get(sampler, rows[i])
+        d = e["xyz"][labels.get(i, e)["pocket"]].mean(0).numpy()
+        d = d / np.linalg.norm(d)
+        save_pockets(pdir / f"{rows[i]['input_id']}.npz", {
+            "sphere_xyz": np.stack([-25 * d, 25 * d]).astype(np.float32),
+            "sphere_r": np.full(2, 8.0, np.float32),
+            "sphere_pocket": np.asarray([0, 1], np.int32),
+            "pocket_score": np.asarray([0.9, 0.2], np.float32),
+            "pocket_drug": np.asarray([0.1, 0.2], np.float32),
+            "pocket_volume": np.asarray([100.0, 900.0], np.float32)})
+    st9 = FakeStore(tmp / "surfaces", ram=8, pockets=PocketSource(
+        pdir, k=cfg.k_pos, min_points=cfg.min_region_points))
+    items9 = [st9.get(sampler, rows[i]) for i in ids9]
+    P9 = to_batch(items9, "cpu")
+    labs9 = [labels.get(i, it) for i, it in zip(ids9, items9)]
+    check("SurfaceStore + PocketSource -> to_batch carries ext_map / ext_regions",
+          "ext_map" in P9 and len(P9["ext_regions"]) == 4
+          and all(len(r) == 2 for r in P9["ext_regions"]), st9.report())
+
+    N9 = len(P9["xyz"])
+    emb9 = torch.randn(N9, EMB, requires_grad=True)
+    logit9 = torch.randn(N9, requires_grad=True)
+    c9 = dataclasses.replace(cfg, region_source="external", pool_mode="mean")
+    sp9 = select_and_pool(c9, P9, P9["xyz"], P9["batch"], None,
+                          torch.sigmoid(logit9), emb9,
+                          generator=torch.Generator().manual_seed(0))
+    ok_regions = ok_label = ok_mean = True
+    for b in range(4):
+        sel = (P9["batch"] == b).nonzero().squeeze(1)
+        npos = int(sp9["is_pos"][b].sum())
+        want = [sel[r] for r in P9["ext_regions"][b]]
+        got = sp9["regions"][b][:npos]
+        ok_regions &= npos == 2 and all(torch.equal(g, w) for g, w in zip(got, want))
+        lab, _, _ = region_labels([g - int(sel[0]) for g in got], labs9[b]["pocket"],
+                                  labs9[b]["other"])
+        ok_label &= lab.tolist()[1] == 1 and lab.tolist()[0] != 1
+        ok_mean &= bool(torch.allclose(sp9["vec"][b, 0], emb9[got[0]].mean(0), atol=1e-5))
+    check("external: the pocket regions ARE the external pockets, in rank order",
+          ok_regions)
+    check("external: the decoy is not a positive, the true pocket is", ok_label)
+    check("external: pooled as a plain mean", ok_mean)
+    sp9["vec"].sum().backward()
+    check("external: no gradient reaches the pocket head through the anchors",
+          logit9.grad is None and emb9.grad is not None
+          and bool(sp9["pool_weight"].eq(1).all()))
+
+    st9v = FakeStore(tmp / "surfaces", ram=8, pockets=PocketSource(
+        pdir, k=cfg.k_pos, rank="volume", min_points=cfg.min_region_points))
+    P9v = to_batch([st9v.get(sampler, rows[i]) for i in ids9], "cpu")
+    sp9v = select_and_pool(c9, P9v, P9v["xyz"], P9v["batch"], None,
+                           torch.sigmoid(logit9.detach()), emb9.detach(),
+                           generator=torch.Generator().manual_seed(0))
+    first = [sp9v["regions"][b][0] - int((P9v["batch"] == b).nonzero()[0])
+             for b in range(4)]
+    check("rank volume puts the true pocket first",
+          all(region_labels([f], labs9[b]["pocket"], labs9[b]["other"])[0].item() == 1
+              for b, f in enumerate(first)))
+
+    c9m = dataclasses.replace(cfg, region_source="external_map", region_threshold=0.5)
+    sp9m = select_and_pool(c9m, P9, P9["xyz"], P9["batch"], None,
+                           torch.sigmoid(logit9.detach()), emb9.detach(),
+                           generator=torch.Generator().manual_seed(0))
+    hits, ok_in = 0, True
+    for b in range(4):
+        sel = (P9["batch"] == b).nonzero().squeeze(1)
+        regs = [r - int(sel[0]) for r, pos in zip(sp9m["regions"][b], sp9m["is_pos"][b])
+                if pos]
+        lab, _, _ = region_labels(regs, labs9[b]["pocket"], labs9[b]["other"])
+        hits += int((lab == 1).any())
+        ok_in &= all(float((P9["ext_map"][sel][r] > 0).float().mean()) > 0.3
+                     for r in regs)
+    check("external_map: the selector on the external map finds the pocket",
+          hits == 4 and ok_in, f"{hits}/4 proteins with a positive region")
+
+    P9n = to_batch([store.get(sampler, rows[i]) for i in ids9], "cpu")
+    try:
+        select_and_pool(c9, P9n, P9n["xyz"], P9n["batch"], None,
+                        torch.sigmoid(logit9.detach()), emb9.detach())
+        raised = False
+    except ValueError:
+        raised = True
+    check("an external source without external pockets refuses loudly", raised)
+
+    # The refactor out of forward(): the predicted source must select exactly
+    # what select_regions selects on the head's map.
+    cp = dataclasses.replace(cfg, pool_mode="mean")
+    prob_p = torch.sigmoid(logit9.detach())
+    spp = select_and_pool(cp, P9n, P9n["xyz"], P9n["batch"], None, prob_p,
+                          emb9.detach(), generator=torch.Generator().manual_seed(0))
+    gen_p, same = torch.Generator().manual_seed(0), True
+    for b in range(4):
+        sel = (P9n["batch"] == b).nonzero().squeeze(1)
+        ref, _ = select_regions(
+            P9n["xyz"][sel], prob_p[sel], cp.k_pos, cp.k_neg,
+            threshold=cp.region_threshold, top_fraction=cp.region_top_fraction,
+            link_radius=cp.link_radius, smooth_radius=cp.smooth_radius,
+            min_points=cp.min_region_points, neg_quantile=cp.neg_quantile,
+            neg_exclusion=cp.neg_exclusion, generator=gen_p,
+            method=cp.region_method, ball_radius=cp.region_ball_radius,
+            ball_shift=cp.region_ball_shift, ball_rank=cp.region_ball_rank,
+            cache=P9n["region_cache"][b])
+        same &= len(ref) == len(spp["regions"][b]) and all(
+            torch.equal(sel[r], g) for r, g in zip(ref, spp["regions"][b]))
+    check("predicted source: select_and_pool == select_regions on the head's map",
+          same and torch.equal(spp["pool_weight"], prob_p))
+
     print("\nSELFTEST " + ("PASSED" if not fails else f"FAILED: {fails}"))
     print("Nothing here involves dMaSIF, KeOps or a GPU, so it says nothing about\n"
           "surface sampling or the convolution; chemo_test.sbatch's smoke pass is\n"
@@ -1662,6 +1842,10 @@ class _FakeLigands:
 
 
 # ---------------------------------------------------------------------------
+POCKET_DEFAULTS = {"pockets": "", "pocket_rank": "score", "pocket_shape": "pocket",
+                   "pocket_margin": 0.0, "pocket_max": 0}
+
+
 def add_region_args(p, defaults=True):
     """Selector flags. With defaults=False every one is None, which is what
     `eval` needs: probe_retrieval.apply_overrides changes only the fields it is
@@ -1682,6 +1866,31 @@ def add_region_args(p, defaults=True):
     p.add_argument("--nms_score", default=d("sum"))
     p.add_argument("--k_pos", type=int, default=d(8))
     p.add_argument("--k_neg", type=int, default=d(8))
+    # Where the pocket regions come from (EncoderConfig.region_source) and the
+    # external pockets themselves (external_pockets.py).
+    p.add_argument("--region_source", default=d("predicted"),
+                   choices=("predicted", "external", "external_map"),
+                   help="predicted: the pocket head's map through the selector "
+                        "(the original). external: --pockets ARE the pocket "
+                        "regions. external_map: their per-point map replaces "
+                        "the head's in the selector, thresholded at --threshold")
+    P = POCKET_DEFAULTS
+    p.add_argument("--pockets", default=d(P["pockets"]),
+                   help="directory of <input_id>.npz from external_pockets.py run")
+    p.add_argument("--pocket_rank", default=d(P["pocket_rank"]),
+                   choices=("score", "drug", "volume"),
+                   help="order of the external pockets: fpocket's score (its own "
+                        "ranking), druggability, or volume")
+    p.add_argument("--pocket_shape", default=d(P["pocket_shape"]),
+                   choices=("pocket", "ball"),
+                   help="pocket: the surface points its alpha spheres cover; "
+                        "ball: a --ball_radius ball at their centroid")
+    p.add_argument("--pocket_margin", type=float, default=d(P["pocket_margin"]),
+                   help="A added to each alpha sphere's radius when mapping it "
+                        "onto the surface; external_pockets.py score sweeps it")
+    p.add_argument("--pocket_max", type=int, default=d(P["pocket_max"]),
+                   help="map at most this many pockets per protein (0 = k_pos "
+                        "for external, all for external_map)")
 
 
 def add_model_args(p):

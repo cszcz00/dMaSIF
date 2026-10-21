@@ -145,6 +145,14 @@ def to_batch(items, device, with_surface=True):
     # Not a tensor, so it cannot go through the concatenation above.
     if all("region_cache" in it for it in items):
         out["region_cache"] = [it["region_cache"] for it in items]
+    # External pockets (train_data.SurfaceStore with a PocketSource): a
+    # per-point map, concatenated like the surface, and per protein a ranked
+    # list of LOCAL index tensors. Only when every item has them, like
+    # atom_groups, so the encoder refuses a half-annotated batch loudly.
+    if with_surface and items and all("ext_map" in it for it in items):
+        out["ext_map"] = torch.cat([torch.as_tensor(it["ext_map"])
+                                    for it in items]).to(device)
+        out["ext_regions"] = [it["ext_regions"] for it in items]
     return out
 
 

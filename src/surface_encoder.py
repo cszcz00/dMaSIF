@@ -77,6 +77,16 @@ class EncoderConfig:
     # (4) pocket head
     head_hidden: int = 32
     # (5) region anchors (see anchors.py)
+    # WHERE the pocket regions come from. "predicted" is the original: the
+    # pocket head's map through the selector below. "external": an outside
+    # pocket finder's pockets (fpocket, external_pockets.py) ARE the pocket
+    # regions, best first, and the selector is not run. "external_map": that
+    # finder's per-point map replaces sigmoid(pocket_logit) as the selector's
+    # input, thresholded at region_threshold. Both external sources pool each
+    # region as a plain mean, so the head no longer touches the anchors; it is
+    # still computed, trained by the pocket BCE and reported. They need the
+    # batch to carry P["ext_map"] / P["ext_regions"] (SurfaceStore(pockets=)).
+    region_source: str = "predicted"     # predicted | external | external_map
     k_pos: int = 8
     k_neg: int = 8
     region_top_fraction: float | None = 0.05  # grow regions from each protein's top 5% ...
@@ -277,6 +287,11 @@ class SurfaceEncoder(nn.Module):
             anchor_center (B, K, 3)    probability-weighted region centroid
             anchor_size   (B, K)       points per region
             anchor_regions             per protein, list of GLOBAL index tensors
+            pool_weight   (N,)         the per-point weights regions were
+                                       pooled with: the pocket probability, or
+                                       ones under an external region_source.
+                                       Anything pooled later (the training
+                                       loop's fallback anchor) must use these.
         """
         c = self.cfg
         if "xyz" not in P:
@@ -301,51 +316,10 @@ class SurfaceEncoder(nn.Module):
             pool_emb = emb
         prob = torch.sigmoid(logit)
 
-        K = c.k_pos + c.k_neg
-        n_prot = int(batch.max()) + 1
-        flat_col = 2 * (len(c.curvature_scales) - 1)  # mean curvature, largest scale
-        vec = emb.new_zeros(n_prot, K, c.pooled_dims)
-        center = xyz.new_zeros(n_prot, K, 3)
-        size = torch.zeros(n_prot, K, dtype=torch.long, device=xyz.device)
-        is_pos = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
-        valid = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
-        # One dict per protein, owned by the caller and kept with its cached
-        # surface, so ball_R8's radius neighbour lists (a chunked all-pairs
-        # cdist, the only O(N^2) step in selection) are built once rather than
-        # on every forward pass.
-        caches = P.get("region_cache")
-        all_regions = []
-        t_sel = time.perf_counter()
-        for b in range(n_prot):
-            sel = (batch == b).nonzero().squeeze(1)
-            neg_ok = None
-            if c.neg_flat_quantile is not None:
-                h = feats[sel, flat_col].detach().abs()
-                neg_ok = h <= torch.quantile(h, c.neg_flat_quantile)
-            regions, pos = select_regions(
-                xyz[sel], prob[sel], c.k_pos, c.k_neg, threshold=c.region_threshold,
-                top_fraction=c.region_top_fraction,
-                link_radius=c.link_radius, smooth_radius=c.smooth_radius,
-                min_points=c.min_region_points, neg_quantile=c.neg_quantile,
-                neg_exclusion=c.neg_exclusion, neg_allowed=neg_ok,
-                forced=None if forced is None else forced[b], generator=generator,
-                method=c.region_method, persistence=c.region_persistence,
-                ball_radius=c.region_ball_radius, ball_shift=c.region_ball_shift,
-                ball_rank=c.region_ball_rank, nms_score=c.region_nms_score,
-                nms_iou=c.region_nms_iou, nms_alpha=c.region_nms_alpha,
-                cache=None if caches is None else caches[b])
-            n = len(regions)
-            if n:
-                vec[b, :n] = pool_regions(pool_emb[sel], prob[sel], regions,
-                                          mode=c.pool_mode, xyz=xyz[sel],
-                                          n_shells=c.n_shells)
-                center[b, :n] = pool_regions(xyz[sel], prob[sel].detach(), regions)
-                size[b, :n] = torch.tensor([len(r) for r in regions], device=xyz.device)
-                is_pos[b, :n] = pos.to(xyz.device)
-                valid[b, :n] = True
-            all_regions.append([sel[r.to(sel.device)] for r in regions])
-        self.last_select_sec = time.perf_counter() - t_sel
-
+        sp = select_and_pool(c, P, xyz, batch, feats, prob, pool_emb,
+                             forced=forced, generator=generator)
+        self.last_select_sec = sp["select_sec"]
+        vec, valid = sp["vec"], sp["valid"]
         out = self.project_anchors(vec, valid) if project else None
         return {
             "xyz": xyz, "normals": normals, "batch": batch,
@@ -353,8 +327,9 @@ class SurfaceEncoder(nn.Module):
             "pocket_logit": logit,
             "anchor_vec": out, "anchor_pooled": vec,
             "anchor_valid": valid,
-            "anchor_is_pos": is_pos, "anchor_center": center, "anchor_size": size,
-            "anchor_regions": all_regions,
+            "anchor_is_pos": sp["is_pos"], "anchor_center": sp["center"],
+            "anchor_size": sp["size"], "anchor_regions": sp["regions"],
+            "pool_weight": sp["pool_weight"],
         }
 
     # ------------------------------------------------------------------
@@ -414,6 +389,95 @@ class SurfaceEncoder(nn.Module):
         if wanted or unexpected:
             raise RuntimeError(f"checkpoint mismatch: missing {wanted}, unexpected {unexpected}")
         return sorted(take)
+
+
+REGION_SOURCES = ("predicted", "external", "external_map")
+
+
+def select_and_pool(c, P, xyz, batch, feats, prob, pool_emb, forced=None,
+                    generator=None):
+    """Region selection and pooling for every protein of a batch.
+
+    The tail of SurfaceEncoder.forward, as a function of its tensors so the
+    region logic - including the external-pocket sources - can be exercised
+    without KeOps (train.py selftest). `c` is the EncoderConfig; `prob` the
+    head's per-point probability. Returns vec / center / size / is_pos / valid
+    (B, K, ...), the per-protein GLOBAL region index lists, the per-point
+    pool_weight, and select_sec.
+    """
+    if c.region_source not in REGION_SOURCES:
+        raise ValueError(f"unknown region_source {c.region_source!r}; expected "
+                         f"one of {REGION_SOURCES}")
+    external = c.region_source != "predicted"
+    if external:
+        if "ext_map" not in P:
+            raise ValueError(
+                f"region_source is {c.region_source!r} but the batch carries no "
+                "external pockets (P['ext_map']); give the SurfaceStore a "
+                "PocketSource (train.py --pockets)")
+        # The external map seeds negatives (and, for external_map, drives the
+        # selector); pooling is a plain mean over the region. Ones rather than
+        # the map, so a ball region's points outside the pocket proper still
+        # count, and no gradient reaches the head through the weights.
+        sel_prob = P["ext_map"].to(device=prob.device, dtype=prob.dtype)
+        pool_w = torch.ones_like(prob)
+    else:
+        sel_prob, pool_w = prob, prob
+    # external_map is 0 over ~97% of the surface, so a top-fraction quantile
+    # would be 0 and make every point a candidate; threshold it instead.
+    top_fraction = None if c.region_source == "external_map" else c.region_top_fraction
+
+    K = c.k_pos + c.k_neg
+    n_prot = int(batch.max()) + 1
+    flat_col = 2 * (len(c.curvature_scales) - 1)  # mean curvature, largest scale
+    vec = pool_emb.new_zeros(n_prot, K, c.pooled_dims)
+    center = xyz.new_zeros(n_prot, K, 3)
+    size = torch.zeros(n_prot, K, dtype=torch.long, device=xyz.device)
+    is_pos = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
+    valid = torch.zeros(n_prot, K, dtype=torch.bool, device=xyz.device)
+    # One dict per protein, owned by the caller and kept with its cached
+    # surface, so ball_R8's radius neighbour lists (a chunked all-pairs
+    # cdist, the only O(N^2) step in selection) are built once rather than
+    # on every forward pass.
+    caches = P.get("region_cache")
+    all_regions = []
+    t_sel = time.perf_counter()
+    for b in range(n_prot):
+        sel = (batch == b).nonzero().squeeze(1)
+        neg_ok = None
+        if c.neg_flat_quantile is not None:
+            h = feats[sel, flat_col].detach().abs()
+            neg_ok = h <= torch.quantile(h, c.neg_flat_quantile)
+        forced_b = None if forced is None else forced[b]
+        if c.region_source == "external":
+            forced_b = list(forced_b or []) + [torch.as_tensor(r).long()
+                                               for r in P["ext_regions"][b]]
+        regions, pos = select_regions(
+            xyz[sel], sel_prob[sel], c.k_pos, c.k_neg, threshold=c.region_threshold,
+            top_fraction=top_fraction,
+            link_radius=c.link_radius, smooth_radius=c.smooth_radius,
+            min_points=c.min_region_points, neg_quantile=c.neg_quantile,
+            neg_exclusion=c.neg_exclusion, neg_allowed=neg_ok,
+            forced=forced_b, generator=generator,
+            fill=c.region_source != "external",
+            method=c.region_method, persistence=c.region_persistence,
+            ball_radius=c.region_ball_radius, ball_shift=c.region_ball_shift,
+            ball_rank=c.region_ball_rank, nms_score=c.region_nms_score,
+            nms_iou=c.region_nms_iou, nms_alpha=c.region_nms_alpha,
+            cache=None if caches is None else caches[b])
+        n = len(regions)
+        if n:
+            vec[b, :n] = pool_regions(pool_emb[sel], pool_w[sel], regions,
+                                      mode=c.pool_mode, xyz=xyz[sel],
+                                      n_shells=c.n_shells)
+            center[b, :n] = pool_regions(xyz[sel], pool_w[sel].detach(), regions)
+            size[b, :n] = torch.tensor([len(r) for r in regions], device=xyz.device)
+            is_pos[b, :n] = pos.to(xyz.device)
+            valid[b, :n] = True
+        all_regions.append([sel[r.to(sel.device)] for r in regions])
+    return {"vec": vec, "center": center, "size": size, "is_pos": is_pos,
+            "valid": valid, "regions": all_regions, "pool_weight": pool_w,
+            "select_sec": time.perf_counter() - t_sel}
 
 
 def pocket_loss(logit, labels, pos_weight=None):

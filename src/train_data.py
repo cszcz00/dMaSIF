@@ -204,8 +204,11 @@ class SurfaceStore:
     """
 
     def __init__(self, cache_dir=None, ram=256, device="cpu",
-                 keep_hydrogens=False):
+                 keep_hydrogens=False, pockets=None):
         self.dir = Path(cache_dir) if cache_dir else None
+        # external_pockets.PocketSource or None. Mapped onto each surface when
+        # its RAM entry is built, so the regions live and die with the surface.
+        self.pockets = pockets
         if self.dir:
             self.dir.mkdir(parents=True, exist_ok=True)
         self.ram = max(int(ram), 1)
@@ -324,6 +327,10 @@ class SurfaceStore:
                  "atom_type": np.ascontiguousarray(arrays["atom_type"]),
                  "atom_groups": np.ascontiguousarray(arrays["atom_groups"]),
                  "region_cache": {}}
+        if self.pockets is not None:
+            regions, pmap = self.pockets.map(key, arrays["xyz"])
+            entry["ext_regions"] = [torch.from_numpy(r) for r in regions]
+            entry["ext_map"] = torch.from_numpy(pmap)
         self._mem[key] = entry
         while len(self._mem) > self.ram:
             self._mem.popitem(last=False)
@@ -333,7 +340,8 @@ class SurfaceStore:
         s = self.stats
         total = s["ram"] + s["disk"] + s["sampled"]
         return (f"surfaces: {total} requests, {s['ram']} RAM / {s['disk']} disk / "
-                f"{s['sampled']} sampled; {len(self._mem)}/{self.ram} resident")
+                f"{s['sampled']} sampled; {len(self._mem)}/{self.ram} resident"
+                + ("" if self.pockets is None else "; " + self.pockets.report()))
 
 
 # ---------------------------------------------------------------------------
