@@ -51,6 +51,9 @@ instead of the head's map: its top k_pos pockets are the anchors, pooled as
 plain means, and the head only matters through its BCE. `external_map` feeds
 the finder's per-point map to the usual selector instead. The default,
 `predicted`, is the original loop exactly. src/slurm/train_fpocket.sbatch.
+`--pocket_select site` makes the one pocket region of each row the fpocket
+pocket at that row's ligand (known site), and `--pool_mode pairs` pools it as
+site types x distance bins (pair_pool.py): src/slurm/train_v3.sbatch.
 
 Stages:
     prepare    CPU venv. index.parquet -> runs/<name>/items.tsv.
@@ -120,6 +123,11 @@ def build_model(a, device):
         region_persistence=a.persistence, region_nms_iou=a.nms_iou,
         region_nms_alpha=a.nms_alpha, region_nms_score=a.nms_score,
         pool_mode=a.pool_mode, n_shells=a.n_shells, anchor_norm=a.anchor_norm,
+        # getattr: checkpoints from before pair pooling have no such args
+        pair_types=getattr(a, "pair_types", 8), pair_bins=getattr(a, "pair_bins", 8),
+        pair_rmin=getattr(a, "pair_rmin", 3.0), pair_rmax=getattr(a, "pair_rmax", 16.0),
+        pair_exclude=getattr(a, "pair_exclude", 2.0),
+        pair_feats=getattr(a, "pair_feats", True),
         # getattr: checkpoints saved before the descriptor branch existed have
         # no such args, and load_model_from_ckpt rebuilds from saved args
         desc_dims=getattr(a, "desc_dims", 0), desc_layers=getattr(a, "desc_layers", 3),
@@ -192,10 +200,16 @@ def pocket_source(a, cfg):
                          "directory from `external_pockets.py run`")
     from external_pockets import PocketSource
 
+    select = getattr(a, "pocket_select", None) or "topk"
+    if select == "site" and cfg.region_source != "external":
+        raise SystemExit("--pocket_select site picks THE pocket region per row, "
+                         "which needs --region_source external")
     k = a.pocket_max or (cfg.k_pos if cfg.region_source == "external" else None)
     return PocketSource(a.pockets, k=k, rank=a.pocket_rank, margin=a.pocket_margin,
                         shape=a.pocket_shape, ball_radius=cfg.region_ball_radius,
-                        min_points=cfg.min_region_points)
+                        min_points=cfg.min_region_points, select=select,
+                        site_cutoff=a.site_cutoff, site_frac=a.site_frac,
+                        site_lig_frac=a.site_lig_frac)
 
 
 def load_head(enc, path):
@@ -212,7 +226,16 @@ def load_head(enc, path):
     import torch
 
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    # Zero-pad the three input-side tensors when this encoder has more input
+    # channels (--chemo against a 16-channel head), exactly as load_pretrained
+    # does, so the head's function is preserved instead of those tensors being
+    # skipped and left random under a pretrained conv. A no-op otherwise.
     state = ckpt["state_dict"]
+    if hasattr(enc, "_inflate_inputs"):
+        try:
+            state = enc._inflate_inputs(state)
+        except RuntimeError as e:    # narrower than the head: left to the filter
+            print(f"  not inflating: {e}")
     have = enc.state_dict()
     take = {k: v for k, v in state.items()
             if k in have and tuple(have[k].shape) == tuple(v.shape)}
@@ -236,10 +259,23 @@ def build_batch(model, store, labels, table, rows, device):
     """-> (P, labs) for these row indices. Surfaces come from the store."""
     from test_encoder import to_batch
 
+    import torch
+
+    src = getattr(store, "pockets", None)
+    site = src is not None and src.select == "site"
     items, labs = [], []
     for i in rows:
         entry = store.get(model.encoder, table.rows[i])
-        labs.append(labels.get(int(i), entry))
+        lab = labels.get(int(i), entry)
+        if site:
+            # --pocket_select site: THE pocket region is the fpocket pocket at
+            # this row's own ligand. Per row, not per surface (two ligands on
+            # one receptor are two sites), so a shallow copy: the RAM entry is
+            # shared by every row of the receptor.
+            entry = dict(entry)
+            entry["ext_regions"] = [torch.from_numpy(r) for r in src.site(
+                entry["xyz"].numpy(), entry.get("ext_raw"), lab["lig"])]
+        labs.append(lab)
         items.append(entry)
     return to_batch(items, device), labs
 
@@ -257,7 +293,7 @@ def anchor_block(model, P, labs, a, generator=None):
     """
     import torch
 
-    from anchors import pool_regions
+    from surface_encoder import pool_region_vectors
     from train_data import fallback_region, region_labels
 
     cfg = model.encoder.cfg
@@ -276,6 +312,8 @@ def anchor_block(model, P, labs, a, generator=None):
 
     label = torch.zeros(B, K, dtype=torch.long, device=valid.device)
     extra_vec, extra_at = [], []
+    site = (cfg.region_source == "external"
+            and (getattr(a, "pocket_select", None) or "topk") == "site")
     for b, lb in enumerate(labs):
         sel = (out["batch"] == b).nonzero().squeeze(1)
         base = int(sel[0])
@@ -287,6 +325,12 @@ def anchor_block(model, P, labs, a, generator=None):
         # A negative patch is never scored, so its label cannot be read as a
         # trainable negative; mark it ignore.
         label[b, ~is_pos[b]] = -1
+        if site and bool(is_pos[b, 0] & valid[b, 0]):
+            # --pocket_select site: the one pocket region IS the ligand's site
+            # by construction, whatever its overlap with the 4 A label - a
+            # merged fpocket site can be larger than the label and fail the
+            # precision rule, and would then wrongly trigger the fallback
+            label[b, 0] = 1
 
         pos_here = bool(((label[b] == 1) & valid[b] & is_pos[b]).any())
         if not pos_here and a.fallback and bool(lb["pocket"].any()):
@@ -299,11 +343,12 @@ def anchor_block(model, P, labs, a, generator=None):
                 # pool_emb, not point_emb: the fallback anchor must be pooled
                 # from the same features as every selector anchor, descriptor
                 # branch included. .get for the selftest's stub encoder.
-                extra_vec.append(pool_regions(
-                    out.get("pool_emb", out["point_emb"])[sel], prob[sel],
-                    [reg.to(sel.device)],
-                    mode=cfg.pool_mode, xyz=out["xyz"][sel],
-                    n_shells=cfg.n_shells)[0])
+                feats = out.get("input_feats")
+                extra_vec.append(pool_region_vectors(
+                    cfg, getattr(model.encoder, "pair_pool", None),
+                    out.get("pool_emb", out["point_emb"])[sel],
+                    None if feats is None else feats[sel], prob[sel],
+                    [reg.to(sel.device)], out["xyz"][sel])[0])
                 extra_at.append(b)
 
     fallback = torch.zeros(B, dtype=torch.bool, device=valid.device)
@@ -759,7 +804,9 @@ def freeze_encoder(model):
     """
     n = 0
     for name, p in model.encoder.named_parameters():
-        if not name.startswith(("project.", "pool_norm.")):
+        # pair_pool is pooling, not encoder: fresh weights that would stay
+        # random if frozen, so it trains with the projection
+        if not name.startswith(("project.", "pool_norm.", "pair_pool.")):
             p.requires_grad_(False)
             n += p.numel()
     live = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1182,7 +1229,9 @@ def selftest(a):
     from ligand_encoder import LigandConfig, LigandEncoder
     from probe_retrieval import (draw_batch, group_index, info_nce,
                                  retrieval_metrics, split_by_group)
-    from surface_encoder import EncoderConfig, SurfaceEncoder, pocket_loss
+    from pair_pool import PairPool, pair_width
+    from surface_encoder import (EncoderConfig, SurfaceEncoder, pocket_loss,
+                                 select_and_pool)
     from test_encoder import to_batch
     from train_data import (ItemTable, LabelCache, SurfaceStore,
                             fallback_region, region_labels)
@@ -1413,6 +1462,11 @@ def selftest(a):
                 nn.Linear(64, cfg.out_dim))
             self.pocket_head = nn.Linear(EMB, 1)
             self.mix = nn.Linear(EMB, EMB)
+            # the real PairPool when asked for, as SurfaceEncoder builds it
+            self.pair_pool = (PairPool(EMB, 0, n_types=cfg.pair_types,
+                                       n_bins=cfg.pair_bins, r_min=cfg.pair_rmin,
+                                       r_max=cfg.pair_rmax, exclude=cfg.pair_exclude)
+                              if cfg.pool_mode == "pairs" else None)
 
         # the real tail, so the normalisation and projection under test are
         # the ones training uses
@@ -1427,6 +1481,20 @@ def selftest(a):
             emb = self.mix(P["planted"])
             logit = self.pocket_head(emb).squeeze(-1)
             prob = torch.sigmoid(logit)
+            if c.region_source != "predicted" or c.pool_mode == "pairs":
+                # the external sources and pair pooling go through the REAL
+                # select_and_pool (groups [9], [10]); every earlier group keeps
+                # the loop below, unchanged
+                sp = select_and_pool(c, P, xyz, batch, None, prob, emb, forced=forced,
+                                     generator=generator, pair_pool=self.pair_pool)
+                return {"xyz": xyz, "normals": P["normals"], "batch": batch,
+                        "point_emb": emb, "pocket_logit": logit,
+                        "anchor_vec": (self.project_anchors(sp["vec"], sp["valid"])
+                                       if project else None),
+                        "anchor_pooled": sp["vec"], "anchor_valid": sp["valid"],
+                        "anchor_is_pos": sp["is_pos"], "anchor_center": sp["center"],
+                        "anchor_size": sp["size"], "anchor_regions": sp["regions"],
+                        "pool_weight": sp["pool_weight"]}
             K = c.k_pos + c.k_neg
             B = int(batch.max()) + 1
             vec = emb.new_zeros(B, K, c.pooled_dims)
@@ -1690,7 +1758,6 @@ def selftest(a):
     import dataclasses
 
     from external_pockets import PocketSource, save_pockets
-    from surface_encoder import select_and_pool
 
     # Two fake fpocket pockets per protein: a decoy on the far side, ranked
     # FIRST by score, and the true one over the labelled pocket, ranked first
@@ -1806,6 +1873,52 @@ def selftest(a):
     check("predicted source: select_and_pool == select_regions on the head's map",
           same and torch.equal(spp["pool_weight"], prob_p))
 
+    # ---- v3: the site pocket, pair-pooled, through the real loop pieces ----
+    print("\n[10] v3 stack: --pocket_select site + --pool_mode pairs")
+    from types import SimpleNamespace
+
+    cfg10 = dataclasses.replace(cfg, region_source="external", pool_mode="pairs",
+                                pair_feats=False, anchor_norm="none")
+    model10 = SimpleNamespace(encoder=StubEncoder(cfg10))
+    check("pairs width: config, PairPool and projection agree",
+          cfg10.pooled_dims == pair_width(EMB) == model10.encoder.pair_pool.out_dims
+          == model10.encoder.project[0].in_features, f"{cfg10.pooled_dims} dims")
+    # rows 0-3 have a pocket file (group [9]); row 4 has none, so fpocket
+    # "found nothing" there and the step must fall back. The fake pocket is one
+    # sphere 25 A out against a ligand ~21 A out, so the site cutoff is 6 A
+    # here rather than the real 3 A between alpha-sphere centres and atoms.
+    ids10 = ids9 + [4]
+    table10 = ItemTable([rows[i] for i in ids10])
+    labels10 = LabelCache(table10, cutoff=4.0, ram=16)
+    st10 = FakeStore(tmp / "surfaces", ram=16, pockets=PocketSource(
+        pdir, k=cfg10.k_pos, min_points=cfg10.min_region_points, select="site",
+        site_cutoff=6.0))
+    P10, labs10 = build_batch(model10, st10, labels10, table10, np.arange(5), "cpu")
+    P10["planted"] = torch.randn(len(P10["xyz"]), EMB)
+    check("build_batch: exactly the true pocket per row, nothing for the row "
+          "without pockets",
+          [len(r) for r in P10["ext_regions"]] == [1, 1, 1, 1, 0]
+          and all(torch.equal(torch.sort(P10["ext_regions"][b][0]).values,
+                              torch.sort(P9["ext_regions"][b][1]).values)
+                  for b in range(4)), st10.report())
+    args10 = argparse.Namespace(**vars(args))
+    args10.pocket_select = "site"
+    model10.encoder.train()
+    blk10 = anchor_block(model10, P10, labs10, args10,
+                         generator=torch.Generator().manual_seed(0))
+    usable10 = blk10["usable"].sum(1).tolist()
+    check("anchor_block: one usable anchor per protein, labelled positive; the "
+          "pocketless row falls back to the ball",
+          usable10 == [1, 1, 1, 1, 1] and blk10["fallback"].tolist() == [False] * 4 + [True]
+          and all(int(blk10["label"][b][blk10["usable"][b]][0]) == 1 for b in range(5)),
+          f"usable {usable10}, fallback {blk10['fallback'].tolist()}")
+    blk10["anchors"][blk10["usable"]].sum().backward()
+    pp = model10.encoder.pair_pool
+    check("the loss reaches the pair pool's heads and the embedding",
+          all(p.grad is not None and float(p.grad.abs().sum()) > 0
+              for p in pp.parameters())
+          and model10.encoder.mix.weight.grad is not None)
+
     print("\nSELFTEST " + ("PASSED" if not fails else f"FAILED: {fails}"))
     print("Nothing here involves dMaSIF, KeOps or a GPU, so it says nothing about\n"
           "surface sampling or the convolution; chemo_test.sbatch's smoke pass is\n"
@@ -1843,7 +1956,8 @@ class _FakeLigands:
 
 # ---------------------------------------------------------------------------
 POCKET_DEFAULTS = {"pockets": "", "pocket_rank": "score", "pocket_shape": "pocket",
-                   "pocket_margin": 0.0, "pocket_max": 0}
+                   "pocket_margin": 0.0, "pocket_max": 0, "pocket_select": "topk",
+                   "site_cutoff": 3.0, "site_frac": 0.25, "site_lig_frac": 0.5}
 
 
 def add_region_args(p, defaults=True):
@@ -1888,6 +2002,20 @@ def add_region_args(p, defaults=True):
     p.add_argument("--pocket_margin", type=float, default=d(P["pocket_margin"]),
                    help="A added to each alpha sphere's radius when mapping it "
                         "onto the surface; external_pockets.py score sweeps it")
+    p.add_argument("--pocket_select", default=d(P["pocket_select"]),
+                   choices=("topk", "site"),
+                   help="topk: the receptor's best k_pos pockets, scored by max "
+                        "(blind, what a screen sees). site: per row, THE pocket "
+                        "fpocket found at that row's ligand (known-site, "
+                        "DrugCLIP-style); eval a site model blind with topk")
+    p.add_argument("--site_cutoff", type=float, default=d(P["site_cutoff"]),
+                   help="A between an alpha-sphere centre and a ligand atom")
+    p.add_argument("--site_frac", type=float, default=d(P["site_frac"]),
+                   help="a pocket is at the site if this fraction of its "
+                        "alpha spheres is within --site_cutoff of the ligand ...")
+    p.add_argument("--site_lig_frac", type=float, default=d(P["site_lig_frac"]),
+                   help="... or this fraction of the ligand's atoms is within "
+                        "--site_cutoff of its alpha spheres")
     p.add_argument("--pocket_max", type=int, default=d(P["pocket_max"]),
                    help="map at most this many pockets per protein (0 = k_pos "
                         "for external, all for external_map)")
@@ -1908,8 +2036,20 @@ def add_model_args(p):
     p.add_argument("--chemo", action="store_true",
                    help="add chemotype.py's 12 pharmacophore channels")
     p.add_argument("--pool_mode", default="mean",
-                   help="mean | mean_std | shells (anchors.pool_regions)")
+                   help="mean | mean_std | shells (anchors.pool_regions) | pairs "
+                        "(pair_pool.PairPool: site types x distance bins)")
     p.add_argument("--n_shells", type=int, default=3)
+    p.add_argument("--pair_types", type=int, default=8,
+                   help="pool_mode pairs: learned soft site types")
+    p.add_argument("--pair_bins", type=int, default=8,
+                   help="pool_mode pairs: Gaussian distance bins")
+    p.add_argument("--pair_rmin", type=float, default=3.0)
+    p.add_argument("--pair_rmax", type=float, default=16.0)
+    p.add_argument("--pair_exclude", type=float, default=2.0,
+                   help="A; closer point pairs are one atom's own cluster")
+    p.add_argument("--no_pair_feats", dest="pair_feats", action="store_false",
+                   help="type head reads the conv embedding only, not also the "
+                        "raw input channels")
     p.add_argument("--anchor_norm", default="none",
                    help="none | batch; 'batch' subtracts the shared direction "
                         "that puts different proteins at cosine 0.993")

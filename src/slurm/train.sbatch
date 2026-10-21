@@ -104,7 +104,7 @@ else
     echo "       sbatch src/slurm/head_ckpt.sbatch writes it in 30 min."
 fi
 N_ITEMS=$(($(wc -l < $DATA/items.tsv) - 1))
-echo "run $RUN (data $DATA); $N_ITEMS interactions; arm $ARM; pool $POOL_MODE; anchor_norm $ANCHOR_NORM"
+echo "run $RUN (data $DATA); $N_ITEMS interactions; arm $ARM; pool $POOL_MODE; anchor_norm $ANCHOR_NORM; chemo ${CHEMO:-0}"
 [ -n "${REGION_ARGS:-}" ] && echo "regions: $REGION_ARGS"
 echo "batch $BATCH; bank ${BANK:-0}; extra ligands ${EXTRA_LIG:-0}; descriptor ${DESC_DIMS:-0}; lr $LR $LR_SCHEDULE warmup $WARMUP; gpu neighbours ${GPU_NEIGHBORS:-0}"
 [ -f "$RUN/last.pt" ] && echo "found $RUN/last.pt: this job will RESUME it"
@@ -112,12 +112,13 @@ echo "batch $BATCH; bank ${BANK:-0}; extra ligands ${EXTRA_LIG:-0}; descriptor $
 COMMON="--items $DATA/items.tsv --lig_feats $DATA/ligand_feats.npz \
     --surface_cache $SURFACES --arm $ARM --pool_mode $POOL_MODE \
     --anchor_norm $ANCHOR_NORM --region_method ball --ball_radius 8 --ball_shift 2 \
-    $HEAD_ARG ${CHEMO:+--chemo} ${LIMIT:+--limit $LIMIT} \
+    $HEAD_ARG ${LIMIT:+--limit $LIMIT} \
     ${BANK:+--bank $BANK} ${EXTRA_LIG:+--extra_ligands $EXTRA_LIG} \
     ${DESC_DIMS:+--desc_dims $DESC_DIMS} ${REGION_ARGS:-}"
 # Switches: set and not 0, so FREEZE=0 means off rather than "set, so on".
 on() { [ -n "$1" ] && [ "$1" != 0 ]; }
 if on "${FREEZE:-}"; then COMMON="$COMMON --freeze_encoder"; fi
+if on "${CHEMO:-}"; then COMMON="$COMMON --chemo"; fi
 if on "${VAL_BALANCE:-}"; then COMMON="$COMMON --val_balance"; fi
 if on "${GPU_NEIGHBORS:-}"; then COMMON="$COMMON --gpu_neighbors"; fi
 

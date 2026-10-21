@@ -328,9 +328,12 @@ class SurfaceStore:
                  "atom_groups": np.ascontiguousarray(arrays["atom_groups"]),
                  "region_cache": {}}
         if self.pockets is not None:
-            regions, pmap = self.pockets.map(key, arrays["xyz"])
-            entry["ext_regions"] = [torch.from_numpy(r) for r in regions]
-            entry["ext_map"] = torch.from_numpy(pmap)
+            # ext_regions / ext_map: the receptor's top pockets; ext_raw: the
+            # spheres themselves, for the per-row `site` select
+            ext = self.pockets.map_entry(key, arrays["xyz"])
+            entry["ext_regions"] = [torch.from_numpy(r) for r in ext["ext_regions"]]
+            entry["ext_map"] = torch.from_numpy(ext["ext_map"])
+            entry["ext_raw"] = ext["ext_raw"]
         self._mem[key] = entry
         while len(self._mem) > self.ram:
             self._mem.popitem(last=False)

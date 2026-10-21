@@ -1,8 +1,9 @@
 # Project status (handoff)
 
-Read this first in a new session. **2026-10-21: the newest work is "External
-pockets (fpocket)" below - regions from fpocket instead of the pocket head,
-written and not yet run; its run order is in that section.** Before that, last updated 2026-10-18 on
+Read this first in a new session. **2026-10-21: the newest work is "v3" below
+(fpocket's pocket at each training ligand, pooled pairwise), built on
+"External pockets (fpocket)" after it. Both written, neither run; the run
+order is in the v3 section.** Before that, last updated 2026-10-18 on
 `claude/model-training`, after the FIRST REAL TRAINING RUN (`runs/v1`, 15,642
 steps, 10.96 h) came back. Its results are the "First training run" section
 below; read that before anything else in START HERE, which is the history of
@@ -519,6 +520,87 @@ What it says:
   val was dominated by a few big, easy targets. Every earlier val number in
   this file was flattered by that.
 
+## v3 (`src/slurm/train_v3.sbatch`) - WRITTEN, NOT YET RUN
+
+The stack, per training row: the WHOLE receptor surface -> dMaSIF conv (with
+`--chemo`) -> fpocket selects the pocket at this row's ligand -> the point
+embeddings inside it are pooled PAIRWISE -> projection -> InfoNCE against the
+ligand GNN. One anchor per protein; the score is a plain cosine.
+
+Why pairwise: specificity is a handful of sites (H-bond donors / acceptors,
+charges, aromatic and hydrophobic patches) in a particular ARRANGEMENT,
+matched by complementary ligand groups. `mean` keeps composition, `shells` one
+radial order; neither says "donor 7 A from acceptor".
+
+Pieces:
+- `--pocket_select site` (`external_pockets.site_pockets` / `site_region`,
+  `PocketSource.site`, resolved per ROW in `train.build_batch`, since two
+  ligands on one receptor are two sites): the union of the fpocket pockets the
+  ligand occupies - >= 0.25 of a pocket's alpha-sphere centres within 3 A of a
+  ligand heavy atom, or >= 0.5 of the ligand's atoms within 3 A of the
+  pocket's centres. Uses ligand COORDINATES and spheres only, never the
+  surface label. On 1ATP: the ATP pocket 0.97 of its centres, the next 0.00.
+  `anchor_block` labels that region positive by construction (a merged site can
+  fail the 4 A label's precision rule); a row where fpocket has no pocket at
+  the site trains on the fallback ball, so `fb` = the site-miss rate.
+  `--pocket_select topk` (default) is the blind setting; a site-trained
+  checkpoint is evaluated blind with `train.py eval --pocket_select topk`.
+- `--pool_mode pairs` (`src/pair_pool.py`, `PairPool`, owned by the encoder as
+  `pair_pool`): per point a learned soft site type a_i (T = 8 + "not a site")
+  and salience s_i from [conv embedding || raw input channels]
+  (`--no_pair_feats` drops the latter); m_i = s_i a_i; output =
+  [weighted mean embedding, log1p(type masses / 10),
+  log1p(sum_ij m_i m_j^T K_b(d_ij) / 100) over the upper triangle of T x T and
+  8 Gaussian distance bins 3-16 A, pairs under 2 A excluded (one atom's own
+  surface-point cluster)] = 16 + 8 + 36 x 8 = 312 dims. Rigid-motion and
+  permutation invariant; gradient through the types, salience and mean; the
+  n x n x B bin tensor is recomputed in backward (checkpoint), and regions over
+  4096 points are thinned by distance from the centroid. `--pair_types`,
+  `--pair_bins`, `--pair_rmin/rmax`, `--pair_exclude`. `surface_encoder.
+  pool_region_vectors` is now the one place a region becomes a vector (the
+  selector's anchors and the fallback anchor both).
+- `--freeze_encoder` keeps `pair_pool.` trainable (fresh weights).
+- `load_head` now zero-pads the input-side tensors when the encoder has more
+  input channels than the head (`--chemo` against `head_pretrained_300.pt`), as
+  `load_pretrained` already did. Before this, `--chemo --head_ckpt` would have
+  left those three tensors RANDOM under a pretrained conv.
+- `train.sbatch`: `CHEMO=0` used to switch chemo ON (`${CHEMO:+--chemo}`); now
+  `on()` like FREEZE.
+- `external_pockets.py score` prints a second table, the site pocket per row:
+  `found` (= the rows v3 can train on), size, iou / cover / prec against the
+  4 A label, dcc, merged; also written to `<out>.site.tsv`.
+
+Tests: `external_pockets.py selftest` [5] (site rule: single pocket, none,
+union of two, lig_frac, PocketSource.site) PASSES locally. `pair_pool.py`'s
+own self-test (shape, rotation / translation / permutation invariance, same
+composition + different arrangement -> same mean / mass but different pairs in
+the right bins, gradient through the checkpointed pair block, thinning) and
+`train.py selftest` [10] (build_batch picks exactly the true pocket per row
+and nothing for a pocketless row; anchor_block gives one positive usable
+anchor each and the fallback for the pocketless row; gradient reaches the
+pair heads) need torch: **not run.** The stub encoder routes only external /
+pairs configs through the real `select_and_pool`; groups [1]-[8] are
+unchanged.
+
+Run order:
+```
+bash src/slurm/build_fpocket.sh                      # once
+EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
+$EX src/pair_pool.py && $EX src/train.py selftest    # [9], [10] new
+sbatch src/slurm/fpocket.sbatch
+python src/external_pockets.py score --items runs/v1/items.tsv \
+    --surface_cache surfaces --pockets pockets/fpocket --n 1000 \
+    --out pockets/fpocket/score.tsv               # read the site table: found
+sbatch src/slurm/train_v3.sbatch
+CKPTS="$WORK/runs/v3/best.pt" EVAL_ARGS="--use_ckpt_split --pocket_select topk" \
+    sbatch src/slurm/eval.sbatch                     # the same model, blind
+```
+v3's log is KNOWN-SITE retrieval and is not comparable to runs/b32 (blind,
+head regions); the blind eval is. Ablations in the sbatch header (pool
+mean / shells, no chemo, no bank, ball shape). v3 also switches on v2's bank
+and extra ligands and the cosine schedule; if v2 has still not run on a GPU,
+those are untested there too, and `BANK= EXTRA_LIG=` removes them.
+
 ## External pockets (fpocket) - WRITTEN, NOT YET RUN
 
 Why: the results are still poor, and the one component every run shares is
@@ -1024,11 +1106,12 @@ before the real run.
 | `ligand_encoder.py` | ligand arms (`LigandConfig`, `LigandEncoder`, `LigandData`); `python src/ligand_encoder.py` self-tests |
 | `probe_retrieval.py` | frozen-anchor retrieval probe: `prepare` / `dump` / `probe` / `selftest` |
 | `anchors.py` | region selectors, negatives, pooling (`mean` / `mean_std` / `shells`) |
-| `external_pockets.py` | fpocket pockets as regions: `run` / `score` / `selftest`, `PocketSource` for `--region_source external` |
+| `external_pockets.py` | fpocket pockets as regions: `run` / `score` / `selftest`, `PocketSource` for `--region_source external`, the per-row site pocket (`--pocket_select site`) |
+| `pair_pool.py` | `PairPool`: learned site types x distance-bin pair pooling (`--pool_mode pairs`); `python src/pair_pool.py` self-tests |
 | `train_data.py` | items, surface store (disk + RAM LRU), pocket + other-site labels, the fallback region |
 | `train.py` | the contrastive loop: `prepare` / `cache` / `train` / `eval` / `selftest` |
 | `train_check.sh` | login-node end-to-end check of the whole pipeline, 7 stages, no GPU |
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
-| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, build / fetch / smoke jobs; `dmasif.def` container |
+| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, `train_v3`, build / fetch / smoke jobs; `dmasif.def` container |

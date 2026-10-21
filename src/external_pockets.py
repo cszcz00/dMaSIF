@@ -108,6 +108,7 @@ POCKET_KEYS = ("sphere_xyz", "sphere_r", "sphere_pocket", "pocket_score",
 RANKS = ("score", "drug", "volume")
 SHAPES = ("pocket", "ball")
 SOURCES = ("predicted", "external", "external_map")
+SELECTS = ("topk", "site")
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +325,61 @@ def surface_pockets(xyz, pk, k=None, rank="score", margin=0.0, shape="pocket",
     return regions, pmap
 
 
+def site_pockets(pk, lig, cutoff=3.0, frac=0.25, lig_frac=0.5):
+    """Pocket ids fpocket found AT this ligand's binding site -> int array.
+
+    Alpha-sphere centres sit in the void a bound ligand fills, so a pocket is
+    at the site when the ligand occupies it:
+        >= frac of its sphere centres lie within `cutoff` A of a ligand heavy
+        atom, or
+        >= lig_frac of the ligand's heavy atoms lie within `cutoff` A of its
+        sphere centres (a big pocket the ligand fills only part of).
+    Several pockets can qualify when fpocket splits one site; the caller
+    takes their union. Uses the ligand's coordinates only, never the surface.
+    On fpocket's 1ATP sample: the ATP pocket has 0.97 of its centres within
+    3 A of the ligand, the next pocket 0.00.
+    """
+    lig = np.asarray(lig, np.float32)
+    n = len(pk["pocket_score"])
+    if not len(lig) or not len(pk["sphere_xyz"]) or not n:
+        return np.zeros(0, np.int64)
+    d = np.sqrt(((pk["sphere_xyz"][:, None] - lig[None]) ** 2).sum(-1))   # (S, L)
+    near = d < cutoff
+    out = []
+    for p in range(n):
+        m = pk["sphere_pocket"] == p
+        if not m.any():
+            continue
+        if near[m].any(1).mean() >= frac or near[m].any(0).mean() >= lig_frac:
+            out.append(p)
+    return np.asarray(out, np.int64)
+
+
+def site_region(xyz, pk, lig, margin=0.0, shape="pocket", ball_radius=8.0,
+                min_points=20, cutoff=3.0, frac=0.25, lig_frac=0.5):
+    """The surface region of the pocket(s) at this ligand's site -> (indices or
+    None, number of fpocket pockets merged).
+
+    The union of every site pocket's covered points (`pocket_points`), or a
+    ball at that union's centroid for shape "ball". None when fpocket found no
+    pocket at the site, or it maps onto fewer than min_points points.
+    """
+    if shape not in SHAPES:
+        raise ValueError(f"unknown pocket shape {shape!r}; expected one of {SHAPES}")
+    xyz = np.asarray(xyz, np.float32)
+    ids = site_pockets(pk, lig, cutoff, frac, lig_frac)
+    if not len(ids):
+        return None, 0
+    m = np.isin(pk["sphere_pocket"], ids)
+    r = pocket_points(xyz, pk["sphere_xyz"][m], pk["sphere_r"][m], margin)
+    if shape == "ball" and len(r):
+        c = xyz[r].mean(0)
+        r = np.nonzero(((xyz - c) ** 2).sum(-1) < ball_radius ** 2)[0]
+    if len(r) < min_points:
+        return None, len(ids)
+    return r.astype(np.int64), len(ids)
+
+
 class PocketSource:
     """A directory of <input_id>.npz pocket files, mapped onto surfaces.
 
@@ -333,28 +389,79 @@ class PocketSource:
     failed) gets NO external regions rather than an exception: training then
     leans on the fallback ball for it and evaluation drops it, and the
     `missing` count is reported with the store's statistics.
+
+    select:
+      topk  the receptor's best k pockets, the same for every row of it. What
+            a screen sees: no ligand, so the score is a max over them.
+      site  per ROW, the pocket(s) at that row's own ligand (`site_region`),
+            as the single pocket region. The known-site setting (DrugCLIP's):
+            training is told WHERE the ligand binds and learns only what the
+            pocket there looks like. Needs the ligand, so it is resolved in
+            train.build_batch via `site`, not here; the entry keeps the raw
+            spheres (`ext_raw`) for it. Evaluate a site-trained model blind
+            with `train.py eval --pocket_select topk`.
     """
 
     def __init__(self, directory, k=None, rank="score", margin=0.0, shape="pocket",
-                 ball_radius=8.0, min_points=20):
+                 ball_radius=8.0, min_points=20, select="topk", site_cutoff=3.0,
+                 site_frac=0.25, site_lig_frac=0.5):
         self.dir = Path(directory)
         if not self.dir.is_dir():
             raise SystemExit(f"--pockets {directory}: no such directory; run "
                              "`external_pockets.py run` first")
+        if select not in SELECTS:
+            raise ValueError(f"unknown pocket select {select!r}; expected one of {SELECTS}")
         self.kw = dict(k=k, rank=rank, margin=margin, shape=shape,
                        ball_radius=ball_radius, min_points=min_points)
+        self.select = select
+        self.site_kw = dict(cutoff=site_cutoff, frac=site_frac, lig_frac=site_lig_frac)
         self.stats = {"mapped": 0, "missing": 0, "empty": 0}
+        self.site_stats = {"rows": 0, "found": 0, "merged": 0}
         self._warned = 0
 
     def describe(self):
         kw = self.kw
-        return (f"external pockets from {self.dir}: top {kw['k'] or 'all'} by "
-                f"{kw['rank']}, shape {kw['shape']}"
+        sk = self.site_kw
+        how = (f"the pocket at each row's ligand (site: >= {sk['frac']:g} of its "
+               f"alpha spheres or >= {sk['lig_frac']:g} of the ligand within "
+               f"{sk['cutoff']:g} A)" if self.select == "site"
+               else f"top {kw['k'] or 'all'} by {kw['rank']}")
+        return (f"external pockets from {self.dir}: {how}, shape {kw['shape']}"
                 + (f" R={kw['ball_radius']:g}" if kw["shape"] == "ball" else "")
                 + f", margin {kw['margin']:g} A, min {kw['min_points']} points")
 
-    def map(self, input_id, xyz):
+    def map_entry(self, input_id, xyz):
+        """-> the SurfaceStore entry fields, numpy (the store makes the first
+        two torch): ext_regions (list of index arrays), ext_map ((N,)),
+        ext_raw (the pocket arrays, or None)."""
         path = self.dir / f"{input_id}.npz"
+        raw = load_pockets(path) if path.exists() else None
+        regions, pmap = self.map(input_id, xyz, raw)
+        return {"ext_regions": regions, "ext_map": pmap, "ext_raw": raw}
+
+    def site(self, xyz, raw, lig):
+        """This row's site region as a one-element list (or [] if fpocket found
+        nothing there) - the `site` select."""
+        self.site_stats["rows"] += 1
+        if raw is None:
+            return []
+        kw = self.kw
+        r, n = site_region(np.asarray(xyz, np.float32), raw, lig, kw["margin"],
+                           kw["shape"], kw["ball_radius"], kw["min_points"],
+                           **self.site_kw)
+        if r is None:
+            return []
+        self.site_stats["found"] += 1
+        self.site_stats["merged"] += n > 1
+        return [r]
+
+    def map(self, input_id, xyz, raw=None):
+        path = self.dir / f"{input_id}.npz"
+        if raw is not None:
+            regions, pmap = surface_pockets(xyz, raw, **self.kw)
+            self.stats["mapped"] += 1
+            self.stats["empty"] += not regions
+            return regions, pmap
         if not path.exists():
             self.stats["missing"] += 1
             if self._warned < 5:
@@ -370,8 +477,14 @@ class PocketSource:
 
     def report(self):
         s = self.stats
-        return (f"external pockets: {s['mapped']} mapped ({s['empty']} with no "
-                f"usable pocket), {s['missing']} without a file")
+        out = (f"external pockets: {s['mapped']} mapped ({s['empty']} with no "
+               f"usable pocket), {s['missing']} without a file")
+        t = self.site_stats
+        if self.select == "site" and t["rows"]:
+            out += (f"; site found for {t['found']}/{t['rows']} rows "
+                    f"({t['found'] / t['rows']:.0%}), {t['merged']} merged "
+                    "from several fpocket pockets")
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +573,23 @@ def region_metrics(regions, xyz, pocket, lig, k, min_cover=0.5, min_prec=0.3, dc
     return st
 
 
+SITE_METRICS = ["found", "size", "iou", "cover", "prec", "dcc", "merged"]
+
+
+def site_metrics(r, n_merged, xyz, pocket, lig, dcc=4.0):
+    """The site region against the labelled pocket. `dcc`: its centroid within
+    4 A of the ligand's; `merged`: fpocket split the site into several."""
+    st = {"found": float(r is not None), "merged": float(n_merged > 1)}
+    if r is None:
+        return st
+    inter = float(pocket[r].sum())
+    n_pocket = float(pocket.sum())
+    st.update(size=float(len(r)), iou=inter / (len(r) + n_pocket - inter),
+              cover=inter / max(n_pocket, 1.0), prec=inter / len(r),
+              dcc=float(np.linalg.norm(xyz[r].mean(0) - lig.mean(0)) < dcc))
+    return st
+
+
 def score(a):
     from test_encoder import read_sdf_heavy
     from train_data import read_items
@@ -480,6 +610,8 @@ def score(a):
     shapes, ranks = a.shapes.split(","), a.ranks.split(",")
     settings = [(s, r, m) for s in shapes for r in ranks for m in margins]
     per = {st: [] for st in settings}
+    site_settings = [(sh, m) for sh in shapes for m in margins]
+    per_site = {st: [] for st in site_settings}
     per_item = []
     t0 = time.time()
     for j, row in enumerate(have, 1):
@@ -504,6 +636,12 @@ def score(a):
             per[st].append(m)
             per_item.append({"system_id": row["system_id"], "shape": shape, "rank": rank,
                              "margin": margin, **m})
+        for st in site_settings:
+            shape, margin = st
+            r, n_merged = site_region(xyz, pk, lig, margin, shape, a.ball_radius,
+                                      a.min_points, a.site_cutoff, a.site_frac,
+                                      a.site_lig_frac)
+            per_site[st].append(site_metrics(r, n_merged, xyz, pocket, lig))
         if j % 100 == 0 or j == len(have):
             print(f"  {j}/{len(have)}  {(time.time() - t0) / j:.2f}s/row", flush=True)
 
@@ -520,6 +658,18 @@ def score(a):
             for m in METRICS))
         lines.append("\t".join([st[0], st[1], f"{st[2]:g}"]
                                + [f"{mean[m]:.4f}" for m in METRICS]))
+    print("\nthe pocket AT the ligand's site (--pocket_select site, known-site "
+          "training): found = fpocket has a pocket there; the rest over found rows")
+    site_lines = ["\t".join(["shape", "margin", *SITE_METRICS])]
+    print(f"{'setting':{W}s}" + "".join(f"{m:>7s}" for m in SITE_METRICS))
+    for st, ms in per_site.items():
+        found = [x for x in ms if x["found"]]
+        mean = {m: float(np.mean([x[m] for x in (ms if m == "found" else found)]))
+                if (found or m == "found") else np.nan for m in SITE_METRICS}
+        print(f"{f'site {st[0]} m={st[1]:g}':{W}s}" + "".join(
+            f"{mean[m]:7.0f}" if m == "size" else f"{mean[m]:7.2f}" for m in SITE_METRICS))
+        site_lines.append("\t".join([st[0], f"{st[1]:g}"]
+                                    + [f"{mean[m]:.4f}" for m in SITE_METRICS]))
     n_pk = [x["n_pockets"] for x in next(iter(per.values()))]
     print(f"\nfpocket pockets per receptor: median {np.median(n_pk):.0f}, "
           f"none on {int(np.sum(np.asarray(n_pk) == 0))}")
@@ -531,7 +681,9 @@ def score(a):
           "becomes top-1. share = fraction of the surface inside a kept pocket.")
     if a.out:
         Path(a.out).write_text("\n".join(lines) + "\n")
-        print(f"\nwrote {a.out}")
+        site_out = Path(a.out).with_suffix(".site.tsv")
+        site_out.write_text("\n".join(site_lines) + "\n")
+        print(f"\nwrote {a.out} and {site_out}")
     if a.per_item:
         keys = ["system_id", "shape", "rank", "margin", *METRICS, "n_pockets"]
         Path(a.per_item).write_text("\n".join(
@@ -653,6 +805,32 @@ def selftest(a):
         check("a mapped receptor and a missing one",
               len(r1) == 2 and r2 == [] and not m2.any()
               and src.stats == {"mapped": 1, "missing": 1, "empty": 0})
+
+        print("[5] the pocket at a ligand's site")
+        lig_n = np.asarray([[0, 0, 21.5], [1.0, 0, 21.0], [0, 1.0, 21.5]], np.float32)
+        check("a ligand in the north pocket selects pocket 0 only",
+              site_pockets(pk, lig_n).tolist() == [0])
+        far = np.asarray([[30.0, 0, 0]], np.float32)
+        check("a ligand nowhere near a pocket selects none",
+              site_pockets(pk, far).tolist() == [] and site_region(xyz, pk, far)[0] is None)
+        both = np.concatenate([lig_n, [[0, 0, -22.5], [0, 1.5, -22.5]]]).astype(np.float32)
+        r_both, n_both = site_region(xyz, pk, both, min_points=5)
+        r_n, _ = site_region(xyz, pk, lig_n, min_points=5)
+        r_s = surface_pockets(xyz, pk, min_points=5)[0][1]
+        check("a ligand spanning two pockets gets their union",
+              n_both == 2 and set(r_both.tolist()) == set(r_n.tolist()) | set(r_s.tolist()))
+        check("the site region is the pocket's own covered points",
+              np.array_equal(np.sort(r_n), np.sort(surface_pockets(xyz, pk, min_points=5)[0][0])))
+        big = dict(pk, sphere_xyz=np.concatenate([c1, c2 + [0, 0, 60.0]]))
+        check("lig_frac: a pocket holding the ligand counts even if mostly empty",
+              0 in site_pockets(big, lig_n[:1], frac=0.9, lig_frac=0.5).tolist())
+        src = PocketSource(tmp / "pk", min_points=5, select="site")
+        e = src.map_entry("rec1", xyz)
+        got = src.site(xyz, e["ext_raw"], lig_n)
+        check("PocketSource.site: one region, counted",
+              len(got) == 1 and np.array_equal(got[0], r_n)
+              and src.site(xyz, e["ext_raw"], far) == []
+              and src.site_stats == {"rows": 2, "found": 1, "merged": 0})
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{'PASS' if not fails else 'FAIL: ' + ', '.join(fails)}")
@@ -689,6 +867,9 @@ def main():
     p.add_argument("--ball_radius", type=float, default=8.0)
     p.add_argument("--min_points", type=int, default=20)
     p.add_argument("--cutoff", type=float, default=4.0)
+    p.add_argument("--site_cutoff", type=float, default=3.0)
+    p.add_argument("--site_frac", type=float, default=0.25)
+    p.add_argument("--site_lig_frac", type=float, default=0.5)
     p.add_argument("--min_cover", type=float, default=0.5)
     p.add_argument("--min_prec", type=float, default=0.3)
     p.add_argument("--seed", type=int, default=0)

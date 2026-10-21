@@ -39,6 +39,7 @@ sys.path.insert(0, str(HERE))
 import chemotype  # noqa: E402
 import dmasif_compat  # noqa: E402
 from anchors import pool_regions, pooled_width, select_regions  # noqa: E402
+from pair_pool import PairPool  # noqa: E402
 
 DEFAULT_REPO = HERE.parent / "dMaSIF"
 
@@ -106,8 +107,20 @@ class EncoderConfig:
     neg_exclusion: float = 4.0             # A; negatives keep off pocket regions
     neg_flat_quantile: float | None = None # e.g. 0.5: negative seeds on flatter half
     # (6) pooling and output
-    pool_mode: str = "mean"      # mean | mean_std | shells (anchors.pool_regions)
+    pool_mode: str = "mean"      # mean | mean_std | shells | pairs
     n_shells: int = 3            # pool_mode "shells": radial shells per region
+    # pool_mode "pairs" (pair_pool.PairPool): learned soft site types x types x
+    # distance bins over each region - which kinds of site sit at what
+    # distance from each other. pair_feats feeds the raw input channels
+    # (curvature, AtomNet, and the pharmacophore ones under `chemo`) to the
+    # type head beside the conv embedding, since they are sharp where the
+    # 12 A conv is smeared.
+    pair_types: int = 8
+    pair_bins: int = 8
+    pair_rmin: float = 3.0
+    pair_rmax: float = 16.0
+    pair_exclude: float = 2.0
+    pair_feats: bool = True
     # Standardisation of the pooled vector before the projection. "none" is the
     # original path; "batch" is a BatchNorm1d over the batch's USABLE anchors,
     # which subtracts the per-feature mean the whole dataset shares. Worth
@@ -135,7 +148,7 @@ class EncoderConfig:
     def pooled_dims(self):
         """Width of a pooled region vector, which pool_mode decides."""
         return pooled_width(self.emb_dims + self.desc_dims, self.pool_mode,
-                            self.n_shells)
+                            self.n_shells, self.pair_types, self.pair_bins)
 
 
 def _mlp(i, h, o):
@@ -171,6 +184,13 @@ class SurfaceEncoder(nn.Module):
         # per-phase timing line
         self.last_select_sec = 0.0
         self.pocket_head = _mlp(E, cfg.head_hidden, 1)
+        # Only built for pool_mode "pairs", so every other encoder keeps exactly
+        # its original state dict.
+        self.pair_pool = (PairPool(E + cfg.desc_dims, I if cfg.pair_feats else 0,
+                                   n_types=cfg.pair_types, n_bins=cfg.pair_bins,
+                                   r_min=cfg.pair_rmin, r_max=cfg.pair_rmax,
+                                   exclude=cfg.pair_exclude)
+                          if cfg.pool_mode == "pairs" else None)
         Pd = cfg.pooled_dims
         # named pool_norm, not anchor_norm: cfg.anchor_norm is the string that
         # chose it, and two attributes of one name would be a trap
@@ -317,7 +337,8 @@ class SurfaceEncoder(nn.Module):
         prob = torch.sigmoid(logit)
 
         sp = select_and_pool(c, P, xyz, batch, feats, prob, pool_emb,
-                             forced=forced, generator=generator)
+                             forced=forced, generator=generator,
+                             pair_pool=self.pair_pool)
         self.last_select_sec = sp["select_sec"]
         vec, valid = sp["vec"], sp["valid"]
         out = self.project_anchors(vec, valid) if project else None
@@ -394,8 +415,18 @@ class SurfaceEncoder(nn.Module):
 REGION_SOURCES = ("predicted", "external", "external_map")
 
 
+def pool_region_vectors(c, pair_pool, emb, feats, w, regions, xyz):
+    """One protein's regions -> (R, cfg.pooled_dims), by cfg.pool_mode. The
+    one place a region becomes a vector, so the selector's anchors and the
+    training loop's fallback anchor are pooled identically."""
+    if c.pool_mode == "pairs":
+        return pair_pool(emb, feats if c.pair_feats else None, w, regions, xyz)
+    return pool_regions(emb, w, regions, mode=c.pool_mode, xyz=xyz,
+                        n_shells=c.n_shells)
+
+
 def select_and_pool(c, P, xyz, batch, feats, prob, pool_emb, forced=None,
-                    generator=None):
+                    generator=None, pair_pool=None):
     """Region selection and pooling for every protein of a batch.
 
     The tail of SurfaceEncoder.forward, as a function of its tensors so the
@@ -403,8 +434,11 @@ def select_and_pool(c, P, xyz, batch, feats, prob, pool_emb, forced=None,
     without KeOps (train.py selftest). `c` is the EncoderConfig; `prob` the
     head's per-point probability. Returns vec / center / size / is_pos / valid
     (B, K, ...), the per-protein GLOBAL region index lists, the per-point
-    pool_weight, and select_sec.
+    pool_weight, and select_sec. pair_pool: the encoder's PairPool, needed
+    for pool_mode "pairs" (with `feats` when cfg.pair_feats).
     """
+    if c.pool_mode == "pairs" and pair_pool is None:
+        raise ValueError("pool_mode 'pairs' needs the encoder's pair_pool")
     if c.region_source not in REGION_SOURCES:
         raise ValueError(f"unknown region_source {c.region_source!r}; expected "
                          f"one of {REGION_SOURCES}")
@@ -467,9 +501,9 @@ def select_and_pool(c, P, xyz, batch, feats, prob, pool_emb, forced=None,
             cache=None if caches is None else caches[b])
         n = len(regions)
         if n:
-            vec[b, :n] = pool_regions(pool_emb[sel], pool_w[sel], regions,
-                                      mode=c.pool_mode, xyz=xyz[sel],
-                                      n_shells=c.n_shells)
+            vec[b, :n] = pool_region_vectors(c, pair_pool, pool_emb[sel],
+                                             None if feats is None else feats[sel],
+                                             pool_w[sel], regions, xyz[sel])
             center[b, :n] = pool_regions(xyz[sel], pool_w[sel].detach(), regions)
             size[b, :n] = torch.tensor([len(r) for r in regions], device=xyz.device)
             is_pos[b, :n] = pos.to(xyz.device)
