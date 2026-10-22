@@ -38,7 +38,11 @@
 # which scored the head's top-8 regions blind. The blind number, top k_pos
 # fpocket pockets with a max:
 #   CKPTS="$WORK/runs/v3/best.pt" \
-#   EVAL_ARGS="--use_ckpt_split --pocket_select topk" sbatch src/slurm/eval.sbatch
+#   EVAL_ARGS="--use_ckpt_split --pocket_select topk --pocket_rank drug" \
+#       sbatch src/slurm/eval.sbatch
+# Rank by druggability, not fpocket's score: on 1,000 training rows the top 8
+# by drug hit the ligand's pocket for 0.78 of proteins against 0.65 by score
+# (external_pockets.py score, 2026-10-22). Adding --k_pos 16 widens the net.
 # and the same with "--pocket_select site" reproduces the log's own number.
 #
 # Ablations, one GPU each (compare at matched steps):

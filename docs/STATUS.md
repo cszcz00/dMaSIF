@@ -595,9 +595,39 @@ python src/external_pockets.py score --items runs/v1/items.tsv \
     --surface_cache surfaces --pockets pockets/fpocket --n 1000 \
     --out pockets/fpocket/score.tsv               # read the site table: found
 sbatch src/slurm/train_v3.sbatch
-CKPTS="$WORK/runs/v3/best.pt" EVAL_ARGS="--use_ckpt_split --pocket_select topk" \
+CKPTS="$WORK/runs/v3/best.pt" \
+    EVAL_ARGS="--use_ckpt_split --pocket_select topk --pocket_rank drug" \
     sbatch src/slurm/eval.sbatch                     # the same model, blind
 ```
+**fpocket run + score (2026-10-22): DONE.** 19,293 pocket files = every
+surface, 0 failures, median 20 pockets per receptor, none empty.
+`external_pockets.py score` on 1,000 of the 20,711 rows:
+
+| site pocket (v3 training) | found | size | iou | cover | prec | dcc | merged |
+|---|---|---|---|---|---|---|---|
+| pocket m=-1 | 0.96 | 230 | 0.43 | 0.55 | 0.71 | 0.74 | 0.22 |
+| **pocket m=0 (v3 default)** | 0.96 | 435 | **0.56** | **0.90** | 0.62 | 0.74 | 0.22 |
+| pocket m=1 | 0.96 | 541 | 0.51 | 0.95 | 0.53 | 0.73 | 0.22 |
+| ball m=0 | 0.96 | 298 | 0.52 | 0.75 | 0.62 | 0.75 | 0.22 |
+
+| blind top 8 | hit | top1 | dcc1 | dccA | iou | size |
+|---|---|---|---|---|---|---|
+| pocket, rank score, m=0 | 0.65 | 0.35 | 0.28 | 0.51 | 0.41 | 172 |
+| **pocket, rank drug, m=0** | **0.78** | **0.54** | 0.41 | 0.59 | 0.48 | 199 |
+| ball, rank drug, m=-1 | 0.77 | 0.52 | 0.42 | 0.61 | 0.45 | 261 |
+| ball_R8 on the head's map (held-out 64, earlier) | 0.84 | 0.64 | 0.44 | 0.77 | 0.53 | ~290 |
+
+Read: (1) known-site training is well supplied - fpocket has a pocket at the
+ligand for 96% of rows (so expect fb ~0.04), and the default shape/margin
+(pocket, 0) is the best setting: iou 0.56 and cover 0.90 against the 4 A label,
+better than ball_R8's 0.53 / 0.70; prec 0.62 means ~40% rim, which the pair
+pooling's salience can down-weight. A fifth of sites are merged from several
+fpocket pockets. (2) Blind, rank by DRUGGABILITY, not fpocket's score (hit
+0.78 vs 0.65); even so it trails the head's ball_R8 (0.84 / dccA 0.77),
+though not on the same proteins and dcc uses plain centroids of irregular
+pockets here, so dcc is harsher for fpocket. The blind eval therefore passes
+`--pocket_rank drug`; --k_pos 16 is the obvious next lever if blind lags.
+
 v3's log is KNOWN-SITE retrieval and is not comparable to runs/b32 (blind,
 head regions); the blind eval is. Ablations in the sbatch header (pool
 mean / shells, no chemo, no bank, ball shape). v3 also switches on v2's bank
