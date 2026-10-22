@@ -167,7 +167,7 @@ def _selftest():
     R = torch.linalg.qr(torch.randn(3, 3))[0]
     v_rot = pool(emb, feats, w, regs, xyz @ R.T + torch.tensor([5.0, -3.0, 9.0]))
     check("rigid-motion invariant", torch.allclose(v, v_rot, atol=1e-4),
-          f"max diff {float((v - v_rot).abs().max()):.1e}")
+          f"max diff {float((v - v_rot).detach().abs().max()):.1e}")
     perm = torch.randperm(n)
     inv = torch.argsort(perm)
     v_p = pool(emb[perm], feats[perm], w[perm], [inv[r] for r in regs], xyz[perm])

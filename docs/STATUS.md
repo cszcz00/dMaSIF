@@ -578,9 +578,12 @@ the right bins, gradient through the checkpointed pair block, thinning) and
 `train.py selftest` [10] (build_batch picks exactly the true pocket per row
 and nothing for a pocketless row; anchor_block gives one positive usable
 anchor each and the fallback for the pocketless row; gradient reaches the
-pair heads) need torch: **not run.** The stub encoder routes only external /
-pairs configs through the real `select_and_pool`; groups [1]-[8] are
-unchanged.
+pair heads) **PASSED on the login node (2026-10-22)**, as did groups [1]-[9]
+and `external_pockets.py selftest`: pair_pool rigid-motion max diff 1.2e-07,
+thinned-region pair-block cosine 1.000; the planted loop still peaks at MRR
+0.983. The stub encoder routes only external / pairs configs through the real
+`select_and_pool`; groups [1]-[8] are unchanged. Still never run: anything on
+a GPU, real fpocket output at scale, `--chemo` with the inflating `load_head`.
 
 Run order:
 ```
