@@ -628,6 +628,27 @@ though not on the same proteins and dcc uses plain centroids of irregular
 pockets here, so dcc is harsher for fpocket. The blind eval therefore passes
 `--pocket_rank drug`; --k_pos 16 is the obvious next lever if blind lags.
 
+**runs/v3 (2026-10-23): FAILED TO LEARN, cancelled at step 4,125/6,000.**
+The plumbing worked - site found for 94% of rows (fb 0.058 as predicted), 0
+missing files, GPU peak 7.7 GB, RSS 5.2 GB, ~4.1 s per 32-protein step (~3x
+b32's throughput; load 0.5 / fwd 1.6 / bwd 2.0). But val MRR stayed at chance
+(0.015-0.026 vs 0.017, top10 ~0.025) the whole way, train nce flat at
+6.1-7.0 against ~7.3 chance for 32 + 2,048 bank / 32 + 1,024 extra candidates
+(so not overfitting: not fitting), and pooled cosdiff ROSE 0.83 -> 0.98-0.999
+(v1's fell 0.99 -> 0.70). Leading hypothesis: pair pooling's scale - 288 of
+312 pooled dims are all-positive log pair counts that grow with pocket size,
+and with a near-uniform type head at init all 36 type pairs carry the same
+histogram, so every pocket points the same way, with anchor_norm none.
+Unproven: v3 changed four things at once against b32 (site pockets, pairs,
+chemo, bank / extra ligands / cosine, the last never run on a GPU).
+
+Diagnostic ladder, `bash src/slurm/v3_diag.sh` (three 1,500-step runs, one
+change each on b32's setup - batch 32, const lr, no chemo / bank / extras, the
+same val rows): A `v3a_site_mean` (site pockets, mean pool), B
+`v3b_site_pairs` (+ pairs), C `v3c_site_pairs_bn` (+ anchor_norm batch). Read
+at step 1,250 against b32's 0.087; how to read each outcome is in the script.
+Results: PENDING.
+
 v3's log is KNOWN-SITE retrieval and is not comparable to runs/b32 (blind,
 head regions); the blind eval is. Ablations in the sbatch header (pool
 mean / shells, no chemo, no bank, ball shape). v3 also switches on v2's bank
@@ -1147,4 +1168,4 @@ before the real run.
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
-| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, `train_v3`, build / fetch / smoke jobs; `dmasif.def` container |
+| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, `train_v3`, `v3_diag.sh`, build / fetch / smoke jobs; `dmasif.def` container |
