@@ -695,7 +695,30 @@ change each on b32's setup - batch 32, const lr, no chemo / bank / extras, the
 same val rows): A `v3a_site_mean` (site pockets, mean pool), B
 `v3b_site_pairs` (+ pairs), C `v3c_site_pairs_bn` (+ anchor_norm batch). Read
 at step 1,250 against b32's 0.087; how to read each outcome is in the script.
-Results: PENDING.
+
+**Results (jobs 145246-8, 2026-10-23): ALL THREE TRAIN.** Val MRR (chance
+0.017), means over evaluation windows because one evaluation moves +-0.015:
+
+| run | mrr 500-875 | mrr 1000-1500 | top10 1000-1500 | best | nce @1500 | cosdiff |
+|---|---|---|---|---|---|---|
+| A site + mean | 0.076 | 0.096 | 0.19 | 0.109 | 2.23 | 0.94 -> 0.80 |
+| B + pairs | 0.078 | 0.103 | 0.21 | 0.126 | 2.24 | 0.87 -> 0.74 |
+| C + pairs + BN | 0.083 | **0.114** | **0.22** | 0.127 | 2.29 | 0.87 -> 0.82 (pre-BN) |
+
+Read: (1) neither fpocket site pockets nor pair pooling broke v3 - the
+pair-pooling-scale hypothesis was WRONG (B learns un-normalised). The culprit
+is among what v3 added: chemo, bank + extra ligands, cosine schedule. (2) C >=
+B >= A in every window and on top10: pairs + BN lead mean pooling by ~0.02
+MRR, about the noise, so suggestive, not proven - the first evidence that
+spatial arrangement helps. (3) All still rising at 1,500 steps. (4) At matched
+steps b32 (blind, head regions) was 0.087 at 1,250: A matches it (0.088), C is
+ahead (0.115); known-site + mean pooling does NOT beat the head's top-8 max.
+~2.5 s/step (A), ~3.3 s/step (B, C).
+
+Round 2, `bash src/slurm/v3_diag2.sh`, each one change from C: `v3d` + chemo,
+`v3e` + bank 2048 / 1024 extra ligands (judge by mrr / cosdiff, its nce is over
+~2,000 candidates), `v3c+` C resumed 1,500 -> 5,000 steps (where it
+plateaus). Results: PENDING.
 
 v3's log is KNOWN-SITE retrieval and is not comparable to runs/b32 (blind,
 head regions); the blind eval is. Ablations in the sbatch header (pool
@@ -1217,4 +1240,4 @@ before the real run.
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
-| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, `train_v3`, `v3_diag.sh`, `plip` (+ `setup_plip.sh`), build / fetch / smoke jobs; `dmasif.def` container |
+| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, `train_v3`, `v3_diag.sh`, `v3_diag2.sh`, `plip` (+ `setup_plip.sh`), build / fetch / smoke jobs; `dmasif.def` container |
