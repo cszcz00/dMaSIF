@@ -520,7 +520,7 @@ What it says:
   val was dominated by a few big, easy targets. Every earlier val number in
   this file was flattered by that.
 
-## PLIP interaction labels (`src/plip_labels.py`) - WRITTEN, NOT YET RUN on the HPC
+## PLIP interaction labels (`src/plip_labels.py`) - INSTALLED on the HPC, array not yet run
 
 For supervising pair pooling's site types (and any later site-based pooling):
 which protein atoms each training ligand actually H-bonds, salt-bridges,
@@ -552,6 +552,10 @@ wired into training: that waits for the A/B/C diagnostics.
   original's protein atoms (the original binds the phosphates through Mn ions
   and waters we leave out, so ours finds direct partners instead). 0.8 s per
   complex for a 2,900-atom receptor. `plip_labels.py selftest` PASSES.
+- `setup_plip.sh` PASSED on the login node (2026-10-23): wheels installed into
+  `$WORK/envs/plip_pkgs`, torch / Biopython / PLIP / OpenBabel import together
+  (numpy 1.26.4 untouched), selftest PASS, and the 1ATP demo reproduces the
+  local numbers exactly (7 / 5 H-bonds, 3 / 3 salt bridges).
 - After the run: `plip_labels.py check` (CPU venv) - interactions per row by
   kind, and on cached surfaces the labelled points per class and the share of
   them inside the 4 A pocket label.
