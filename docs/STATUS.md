@@ -520,6 +520,50 @@ What it says:
   val was dominated by a few big, easy targets. Every earlier val number in
   this file was flattered by that.
 
+## PLIP interaction labels (`src/plip_labels.py`) - WRITTEN, NOT YET RUN on the HPC
+
+For supervising pair pooling's site types (and any later site-based pooling):
+which protein atoms each training ligand actually H-bonds, salt-bridges,
+pi-stacks or packs against, from PLIP run on every training complex. Labels on
+the protein side only, at training time; inference needs none of it. NOT yet
+wired into training: that waits for the A/B/C diagnostics.
+
+- Install (`src/slurm/setup_plip.sh`, login node, once): PLIP 3.0.1 +
+  OpenBabel 3.2.1 have manylinux wheels for the container's Python 3.12, so the
+  container's pip installs them `--no-deps --target $WORK/envs/plip_pkgs`, and
+  jobs add that to PYTHONPATH. The container's numpy / torch are untouched. The
+  script then checks the imports, runs the self-test and a demo on fpocket's
+  1ATP sample.
+- Per row (`run`, `src/slurm/plip.sbatch`, 16 CPU tasks): protein atoms exactly
+  as the surface sees them (`load_protein_atoms`, chain filter, no H) via
+  `external_pockets.write_pdb`, plus the row's ligand converted from its SDF
+  by OpenBabel (bond orders kept as repeated CONECT - PLIP protonates the
+  complex itself and needs them), merged as TEXT (OpenBabel's residue API, on a
+  merged molecule, put the ligand atoms in a protein residue). PLIP finds the
+  LIG residue; every interaction is kept as (kind, protein-side xyz,
+  ligand-side xyz) -> `plip/<system_id>.npz`. No waters or metals in the
+  complex, by design (our receptor input has none).
+- Kinds -> classes in the chemotype vocabulary (donor, acceptor, cation, anion,
+  aromatic, hydrophobic); `site_labels(xyz, rec)` marks surface points within
+  3 A of the protein atom (4 A of a ring / charge centre), optionally only on
+  the side facing the ligand partner.
+- Checked locally on fpocket's 1ATP: ATP site found in our merged complex, salt
+  bridges 3 / 3 against PLIP on the original file, 8 of our 12 H-bonds on the
+  original's protein atoms (the original binds the phosphates through Mn ions
+  and waters we leave out, so ours finds direct partners instead). 0.8 s per
+  complex for a 2,900-atom receptor. `plip_labels.py selftest` PASSES.
+- After the run: `plip_labels.py check` (CPU venv) - interactions per row by
+  kind, and on cached surfaces the labelled points per class and the share of
+  them inside the 4 A pocket label.
+
+Run order:
+```
+bash src/slurm/setup_plip.sh
+sbatch src/slurm/plip.sbatch
+python src/plip_labels.py check --items runs/v1/items.tsv --plip plip \
+    --surface_cache surfaces --n 500
+```
+
 ## v3 (`src/slurm/train_v3.sbatch`) - WRITTEN, NOT YET RUN
 
 The stack, per training row: the WHOLE receptor surface -> dMaSIF conv (with
@@ -1161,6 +1205,7 @@ before the real run.
 | `probe_retrieval.py` | frozen-anchor retrieval probe: `prepare` / `dump` / `probe` / `selftest` |
 | `anchors.py` | region selectors, negatives, pooling (`mean` / `mean_std` / `shells`) |
 | `external_pockets.py` | fpocket pockets as regions: `run` / `score` / `selftest`, `PocketSource` for `--region_source external`, the per-row site pocket (`--pocket_select site`) |
+| `plip_labels.py` | PLIP interaction labels per training row (`run` / `demo` / `check` / `selftest`) and `site_labels` onto a surface |
 | `pair_pool.py` | `PairPool`: learned site types x distance-bin pair pooling (`--pool_mode pairs`); `python src/pair_pool.py` self-tests |
 | `train_data.py` | items, surface store (disk + RAM LRU), pocket + other-site labels, the fallback region |
 | `train.py` | the contrastive loop: `prepare` / `cache` / `train` / `eval` / `selftest` |
@@ -1168,4 +1213,4 @@ before the real run.
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
-| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, `train_v3`, `v3_diag.sh`, build / fetch / smoke jobs; `dmasif.def` container |
+| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, `train_v3`, `v3_diag.sh`, `plip` (+ `setup_plip.sh`), build / fetch / smoke jobs; `dmasif.def` container |
