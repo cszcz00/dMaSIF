@@ -43,6 +43,7 @@
 #     EXTRA_LIG (extra ligand negatives per step), DESC_DIMS (descriptor
 #     branch width), LR_SCHEDULE (const | cosine), WARMUP (steps),
 #     GPU_NEIGHBORS=1 (region neighbour lists on the GPU),
+#   TAU_MIN (floor on the learned temperature; train.py's default 0.01),
 #   TRAIN_ARGS (anything else passed through verbatim, main run only),
 #   REGION_ARGS (passed to the smoke AND the main run; where
 #     src/slurm/train_fpocket.sbatch puts --region_source external etc.).
@@ -106,7 +107,7 @@ fi
 N_ITEMS=$(($(wc -l < $DATA/items.tsv) - 1))
 echo "run $RUN (data $DATA); $N_ITEMS interactions; arm $ARM; pool $POOL_MODE; anchor_norm $ANCHOR_NORM; chemo ${CHEMO:-0}"
 [ -n "${REGION_ARGS:-}" ] && echo "regions: $REGION_ARGS"
-echo "batch $BATCH; bank ${BANK:-0}; extra ligands ${EXTRA_LIG:-0}; descriptor ${DESC_DIMS:-0}; lr $LR $LR_SCHEDULE warmup $WARMUP; gpu neighbours ${GPU_NEIGHBORS:-0}"
+echo "batch $BATCH; bank ${BANK:-0}; extra ligands ${EXTRA_LIG:-0}; descriptor ${DESC_DIMS:-0}; lr $LR $LR_SCHEDULE warmup $WARMUP; gpu neighbours ${GPU_NEIGHBORS:-0}; tau_min ${TAU_MIN:-0.01}"
 [ -f "$RUN/last.pt" ] && echo "found $RUN/last.pt: this job will RESUME it"
 
 COMMON="--items $DATA/items.tsv --lig_feats $DATA/ligand_feats.npz \
@@ -114,7 +115,7 @@ COMMON="--items $DATA/items.tsv --lig_feats $DATA/ligand_feats.npz \
     --anchor_norm $ANCHOR_NORM --region_method ball --ball_radius 8 --ball_shift 2 \
     $HEAD_ARG ${LIMIT:+--limit $LIMIT} \
     ${BANK:+--bank $BANK} ${EXTRA_LIG:+--extra_ligands $EXTRA_LIG} \
-    ${DESC_DIMS:+--desc_dims $DESC_DIMS} ${REGION_ARGS:-}"
+    ${DESC_DIMS:+--desc_dims $DESC_DIMS} ${TAU_MIN:+--tau_min $TAU_MIN} ${REGION_ARGS:-}"
 # Switches: set and not 0, so FREEZE=0 means off rather than "set, so on".
 on() { [ -n "$1" ] && [ "$1" != 0 ]; }
 if on "${FREEZE:-}"; then COMMON="$COMMON --freeze_encoder"; fi

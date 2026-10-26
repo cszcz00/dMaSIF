@@ -54,6 +54,16 @@ the finder's per-point map to the usual selector instead. The default,
 `--pocket_select site` makes the one pocket region of each row the fpocket
 pocket at that row's ligand (known site), and `--pool_mode pairs` pools it as
 site types x distance bins (pair_pool.py): src/slurm/train_v3.sbatch.
+`--n_decoys N` (site only) adds up to N of the receptor's OTHER fpocket
+pockets as decoy anchors: never scored against other proteins' ligands, but
+trained against this row's ligand by the lam_site term, which is the choice a
+blind (topk) screen has to make. Same protein, so no decoy can be a homologue
+of the positive (site_decoys).
+
+Temperature. The learned logit scale is capped at 1 / --tau_min (default
+0.01, CLIP's cap). A low temperature puts the gradient on the top-scoring
+negatives, which with a bank of thousands are the likeliest false negatives;
+the current value is in every evaluation line and in history.json.
 
 Stages:
     prepare    CPU venv. index.parquet -> runs/<name>/items.tsv.
@@ -137,6 +147,9 @@ def build_model(a, device):
                            dropout=a.lig_dropout, gnn_hidden=a.gnn_hidden,
                            gnn_layers=a.gnn_layers)
 
+    # getattr: checkpoints from before --tau_min existed were capped at 100
+    tau_min = getattr(a, "tau_min", 0.01)
+
     class RetrievalModel(nn.Module):
         """Both encoders plus the learnable temperature, as one module so a
         checkpoint, an optimiser and a .to(device) each take one object."""
@@ -150,8 +163,8 @@ def build_model(a, device):
         def scale(self):
             # Clamped like CLIP's: an unbounded temperature can run away early,
             # when every pair looks alike and sharpening is the cheapest way to
-            # reduce the loss.
-            return self.logit_scale.exp().clamp(max=100.0)
+            # reduce the loss. The cap is 1 / --tau_min.
+            return self.logit_scale.exp().clamp(max=1.0 / tau_min)
 
         def scores(self, anchors, usable, lig_vec):
             """(B, K, D) anchors x (L, D) ligands -> (B, L), max over anchors."""
@@ -160,6 +173,9 @@ def build_model(a, device):
             return sim.max(dim=1).values * self.scale()
 
     model = RetrievalModel().to(device)
+    if a.tau < tau_min:
+        print(f"[warn] --tau {a.tau} is below --tau_min {tau_min}: the "
+              f"temperature starts at the floor")
     print(f"encoder: {enc_cfg.in_channels} input channels -> {enc_cfg.emb_dims} dims "
           + (f"+ {enc_cfg.desc_dims} descriptor ({enc_cfg.desc_layers} layers) "
              if enc_cfg.desc_dims else "")
@@ -255,8 +271,50 @@ def load_head(enc, path):
 # ---------------------------------------------------------------------------
 # one batch of proteins: surfaces, labels, anchors
 # ---------------------------------------------------------------------------
-def build_batch(model, store, labels, table, rows, device):
-    """-> (P, labs) for these row indices. Surfaces come from the store."""
+def site_decoys(pockets, site, lab, n, ignore_overlap=0.1):
+    """The receptor's other external pockets, as this row's decoys -> list.
+
+    `pockets` are the receptor's mapped pockets (PocketSource.map: its top
+    --pocket_max, else k_pos, by --pocket_rank), best first; `site` is this
+    row's site region list (empty when fpocket found nothing there). A pocket
+    is dropped when region_labels would not call it a clean negative against
+    the 4 A label and the sibling ligands' sites (cover or prec >= 0.1 with
+    either), or when it overlaps the site region itself the same way - the
+    site is a union of fpocket pockets, so its own members are in `pockets`
+    too. The first n survivors, in rank order: the pockets a blind screen
+    would rank highest are the hardest decoys.
+
+    Not a homology question at all: a decoy is on the SAME protein, so the
+    only way it binds this ligand is a second site no structure shows.
+    """
+    import torch
+
+    from anchors import region_overlap
+    from train_data import region_labels
+
+    cand = [torch.as_tensor(r).long() for r in pockets]
+    if not n or not cand:
+        return []
+    lab_c, _, _ = region_labels(cand, lab["pocket"], lab["other"],
+                                ignore_overlap=ignore_overlap)
+    keep = lab_c == 0
+    if site:
+        s = torch.zeros(len(lab["pocket"]), dtype=torch.bool)
+        for r in site:
+            s[torch.as_tensor(r).long()] = True
+        prec, cover = region_overlap(cand, s)
+        keep &= (prec < ignore_overlap) & (cover < ignore_overlap)
+    return [cand[i] for i in keep.nonzero().flatten().tolist()][:n]
+
+
+def build_batch(model, store, labels, table, rows, device, n_decoys=0):
+    """-> (P, labs) for these row indices. Surfaces come from the store.
+
+    n_decoys (--pocket_select site only): append up to this many of the
+    receptor's other pockets after the site (site_decoys). Each lab then
+    carries n_site (0 or 1) and n_decoy, which is how anchor_block tells the
+    site slot from the decoy slots.
+    """
     from test_encoder import to_batch
 
     import torch
@@ -271,10 +329,13 @@ def build_batch(model, store, labels, table, rows, device):
             # --pocket_select site: THE pocket region is the fpocket pocket at
             # this row's own ligand. Per row, not per surface (two ligands on
             # one receptor are two sites), so a shallow copy: the RAM entry is
-            # shared by every row of the receptor.
+            # shared by every row of the receptor. So is the label record.
             entry = dict(entry)
-            entry["ext_regions"] = [torch.from_numpy(r) for r in src.site(
+            found = [torch.from_numpy(r) for r in src.site(
                 entry["xyz"].numpy(), entry.get("ext_raw"), lab["lig"])]
+            decoys = site_decoys(entry["ext_regions"], found, lab, n_decoys)
+            entry["ext_regions"] = found + decoys
+            lab = dict(lab, n_site=len(found), n_decoy=len(decoys))
         labs.append(lab)
         items.append(entry)
     return to_batch(items, device), labs
@@ -288,6 +349,8 @@ def anchor_block(model, P, labs, a, generator=None):
         usable   (B, K')      predicted pocket anchors, which is what a score
                               may be taken over - at training and at inference
         label    (B, K')      1 positive / 0 negative / -1 ignore per region
+        decoy    (B, K')      site decoys (build_batch n_decoys): label 0,
+                              never usable, so only lam_site sees them
         fallback (B,)         True where the positive is the fallback ball
         out                   the raw encoder output, for the pocket loss
     """
@@ -311,6 +374,7 @@ def anchor_block(model, P, labs, a, generator=None):
         prob = torch.sigmoid(out["pocket_logit"])
 
     label = torch.zeros(B, K, dtype=torch.long, device=valid.device)
+    decoy = torch.zeros(B, K, dtype=torch.bool, device=valid.device)
     extra_vec, extra_at = [], []
     site = (cfg.region_source == "external"
             and (getattr(a, "pocket_select", None) or "topk") == "site")
@@ -325,14 +389,26 @@ def anchor_block(model, P, labs, a, generator=None):
         # A negative patch is never scored, so its label cannot be read as a
         # trainable negative; mark it ignore.
         label[b, ~is_pos[b]] = -1
-        if site and bool(is_pos[b, 0] & valid[b, 0]):
+        # .get: rows built without the site select carry neither count, and
+        # a site row from before decoys always had its site in slot 0
+        n_site = lb.get("n_site", 1)
+        if site and n_site and bool(is_pos[b, 0] & valid[b, 0]):
             # --pocket_select site: the one pocket region IS the ligand's site
             # by construction, whatever its overlap with the 4 A label - a
             # merged fpocket site can be larger than the label and fail the
             # precision rule, and would then wrongly trigger the fallback
             label[b, 0] = 1
+        n_dec = lb.get("n_decoy", 0) if site else 0
+        if n_dec:
+            # The decoys follow the site (none when fpocket missed it, and
+            # then slot 0 is a decoy, not the site). site_decoys kept only
+            # clean negatives; a different --pos_cover / --ignore_overlap can
+            # still relabel one, and a decoy must never count as a positive.
+            d = slice(n_site, n_site + n_dec)
+            decoy[b, d] = is_pos[b, d] & valid[b, d]
+            label[b] = torch.where(decoy[b] & (label[b] == 1), -1, label[b])
 
-        pos_here = bool(((label[b] == 1) & valid[b] & is_pos[b]).any())
+        pos_here = bool(((label[b] == 1) & valid[b] & is_pos[b] & ~decoy[b]).any())
         if not pos_here and a.fallback and bool(lb["pocket"].any()):
             # The label masks live on the CPU with the cached surface; this
             # indexes the encoder's own xyz, which is on the device, and a
@@ -367,13 +443,14 @@ def anchor_block(model, P, labs, a, generator=None):
         valid = torch.cat([valid, v1], dim=1)
         is_pos = torch.cat([is_pos, p1], dim=1)
         label = torch.cat([label, l1], dim=1)
+        decoy = torch.cat([decoy, torch.zeros_like(v1)], dim=1)
     # `valid`, not `usable`: the normalisation sees every real anchor, pocket
     # and negative alike, in training and in evaluation, so its statistics mean
     # the same thing in both.
     anchors = model.encoder.project_anchors(pooled, valid)
-    return {"anchors": anchors, "usable": valid & is_pos, "label": label,
-            "valid": valid, "is_pos": is_pos, "fallback": fallback, "out": out,
-            "pooled": pooled}
+    return {"anchors": anchors, "usable": valid & is_pos & ~decoy, "label": label,
+            "decoy": decoy, "valid": valid, "is_pos": is_pos, "fallback": fallback,
+            "out": out, "pooled": pooled}
 
 
 def pair_mask(table, rows, ligands, device, tanimoto):
@@ -543,7 +620,9 @@ def site_loss(scores_per_anchor, label):
 
     The negatives here are the selector's OTHER predicted pocket regions, not
     its negative patches: anchor_block marks those ignore, because nothing
-    scores them at inference and a loss over them would be free marks.
+    scores them at inference and a loss over them would be free marks. Under
+    --pocket_select site the negatives are the site decoys (--n_decoys), the
+    receptor's other fpocket pockets, which a blind topk screen does score.
     """
     import torch
 
@@ -582,7 +661,8 @@ def collect(model, store, labels, table, rows, a, device):
     with torch.no_grad():
         for s in range(0, len(rows), a.eval_batch):
             chunk = rows[s:s + a.eval_batch]
-            P, labs = build_batch(model, store, labels, table, chunk, device)
+            P, labs = build_batch(model, store, labels, table, chunk, device,
+                                  getattr(a, "n_decoys", 0) or 0)
             blk = anchor_block(model, P, labs, a, generator=gen)
             for b, lb in enumerate(labs):
                 m = blk["out"]["batch"] == b
@@ -618,6 +698,32 @@ def collect(model, store, labels, table, rows, a, device):
             "fallback_rate": n_fallback / max(len(rows), 1)}
 
 
+def site_rate(sim, label, usable, site_mode):
+    """The `site` metric -> (rate, coverage): is the ligand's best anchor over
+    its own pocket? sim (B, K) ligand x own anchors, label as anchor_block's.
+
+    Selector / topk: the argmax over the scored (usable) anchors, over the
+    proteins with a positive anchor anywhere. Site select: only the site is
+    usable, so that would read 1.0 by construction; instead the argmax over
+    the site AND its decoys (every label >= 0 slot), over proteins that have
+    both - how often the ligand would pick its own pocket out of the
+    receptor's others, which is what a blind screen asks. NaN without decoys.
+    """
+    import torch
+
+    has_pos = (label == 1).any(1)
+    if site_mode:
+        cand = label >= 0
+        rows = has_pos & (label == 0).any(1)
+    else:
+        cand, rows = usable, has_pos
+    best = sim.masked_fill(~cand, -1e4).argmax(1)
+    lb = label.gather(1, best[:, None]).squeeze(1)
+    rate = (float((lb[rows] == 1).float().mean()) if bool(rows.any())
+            else float("nan"))
+    return rate, float(rows.float().mean())
+
+
 def evaluate(model, store, labels, table, rows, ligands, a, device):
     """Retrieval + pocket + anchor-spread metrics over `rows`."""
     import torch
@@ -638,7 +744,8 @@ def evaluate(model, store, labels, table, rows, ligands, a, device):
                                 "site", "site_cov", "cos_diff", "shared",
                                 "eff_dims")}
         met.update(n=int(keep.sum()), auroc=got["auroc"], ap=got["ap"],
-                   fallback_rate=got["fallback_rate"])
+                   fallback_rate=got["fallback_rate"],
+                   tau=1.0 / float(model.scale()))
         return met
     kn = keep.cpu().numpy()
     rows, anchors, usable = rows[kn], anchors[keep], usable[keep]
@@ -655,14 +762,9 @@ def evaluate(model, store, labels, table, rows, ligands, a, device):
         p2l = retrieval_metrics(scores.cpu(), mask.cpu())        # protein -> ligand
         met["p2l_mrr"], met["p2l_top1"] = p2l["mrr"], p2l["top1"]
 
-        # Is the ligand's best anchor the one over its own pocket?
-        sim = torch.einsum("bkd,bd->bk", anchors, lig).masked_fill(~usable, -1e4)
-        best = sim.argmax(1)
-        lb = label.to(device).gather(1, best[:, None]).squeeze(1)
-        has_pos = (label.to(device) == 1).any(1)
-        met["site"] = (float((lb[has_pos] == 1).float().mean())
-                       if bool(has_pos.any()) else float("nan"))
-        met["site_cov"] = float(has_pos.float().mean())
+        met["site"], met["site_cov"] = site_rate(
+            torch.einsum("bkd,bd->bk", anchors, lig), label.to(device), usable,
+            (getattr(a, "pocket_select", None) or "topk") == "site")
 
         # The 0.993 readout: are different proteins' anchors still one cone?
         # On the TOP-ranked pocket anchor, which is the vector apo_eval's
@@ -677,8 +779,10 @@ def evaluate(model, store, labels, table, rows, ligands, a, device):
             met["shared"] = sp["shared"]
             met["eff_dims"] = sp["eff_dims"]
     model.train()
+    # The temperature the scores were taken at: 1 / the clamped logit scale,
+    # so a run sitting at --tau_min reads exactly tau_min.
     met.update(auroc=got["auroc"], ap=got["ap"],
-               fallback_rate=got["fallback_rate"])
+               fallback_rate=got["fallback_rate"], tau=1.0 / float(model.scale()))
     return met
 
 
@@ -833,6 +937,17 @@ def train(a):
     table, ligands = load_rows(a)
 
     model, enc_cfg, lig_cfg = build_model(a, device)
+    if a.n_decoys:
+        if enc_cfg.region_source != "external" or a.pocket_select != "site":
+            raise SystemExit("--n_decoys needs --region_source external "
+                             "--pocket_select site: a decoy is a pocket that is "
+                             "NOT the row's site, so there has to be a site")
+        if a.n_decoys + 1 > enc_cfg.k_pos:
+            raise SystemExit(f"--n_decoys {a.n_decoys} + the site exceeds --k_pos "
+                             f"{enc_cfg.k_pos}, the pocket slots per protein")
+        if not a.lam_site:
+            print("[warn] --n_decoys with --lam_site 0: the decoys are pooled "
+                  "and reported (site) but nothing trains on them")
     if a.freeze_encoder:
         freeze_encoder(model)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
@@ -968,8 +1083,17 @@ def train(a):
           + f"; neighbour lists on {anchors_mod.NEIGHBOR_DEVICE or 'the CPU'}")
     print("fb = fraction of val proteins whose positive anchor had to be the "
           "fallback ball\n")
+    if a.n_decoys:
+        print(f"site decoys: up to {a.n_decoys} of each receptor's other pockets "
+              f"(top {a.pocket_max or enc_cfg.k_pos} by {a.pocket_rank}, clean of "
+              f"the site, its label and sibling sites), trained against the "
+              f"row's ligand by lam_site {a.lam_site}; never scored across "
+              f"proteins. site = how often the ligand scores its own pocket "
+              f"above every decoy on the receptor")
+    print(f"temperature: learned from {a.tau}, floor --tau_min {a.tau_min} "
+          f"(column tau)")
     hdr = ("step", "sec", "loss", "nce", "pock", "mrr", "chance", "top1",
-           "top10", "site", "AUROC", "AP", "fb", "cosdiff")
+           "top10", "site", "AUROC", "AP", "fb", "cosdiff", "tau")
     print("".join(f"{h:>8s}" for h in hdr), flush=True)
 
     for step in range(step0, a.steps + 1):
@@ -983,7 +1107,7 @@ def train(a):
             vals = (step, met["sec"], met["loss"], met["nce"], met["pock"],
                     met["mrr"], met["chance"], met["top1"], met["top10"],
                     met["site"], met["auroc"], met["ap"], met["fallback_rate"],
-                    met.get("cos_diff", float("nan")))
+                    met.get("cos_diff", float("nan")), met["tau"])
             # Seconds as an integer: at 8.3f, 1000 s and up is 8+ characters
             # and runs into the step column ("22912.301" was step 2, 2912 s).
             print(f"{step:8d} {met['sec']:7.0f}" + "".join(
@@ -1022,7 +1146,7 @@ def train(a):
             g["lr"] = lr_at(a, step)
         t0 = clock()
         rows = train_rows[draw_batch(rng, members, counts, a.batch, a.alpha)]
-        P, labs = build_batch(model, store, labels, table, rows, device)
+        P, labs = build_batch(model, store, labels, table, rows, device, a.n_decoys)
         t1 = clock()
         nbr0 = anchors_mod.NEIGHBOR_SECONDS[0]
         blk = anchor_block(model, P, labs, a, generator=gen)
@@ -1097,14 +1221,17 @@ def train(a):
     print("\nmrr / top1 / top10   ligand -> protein retrieval on the val groups"
           "\nchance               exact expected MRR of a random ranking"
           "\nsite                 of proteins WITH a pocket-matching anchor, how"
-          "\n                     often the ligand's best anchor is that one"
+          "\n                     often the ligand's best anchor is that one; under"
+          "\n                     --pocket_select site, how often it scores its own"
+          "\n                     pocket above every decoy (NaN without --n_decoys)"
           "\nAUROC / AP           the per-point pocket head, unchanged in meaning"
           "\n                     from encoder_test, so it is comparable to 0.937 / 0.47"
           "\nfb                   fraction of val proteins needing the fallback ball;"
           "\n                     if this stays high the loop is leaning on labels"
           "\ncosdiff              median cosine between DIFFERENT proteins' top"
           "\n                     anchors. 0.993 before any contrastive training;"
-          "\n                     this is the number the whole exercise has to move")
+          "\n                     this is the number the whole exercise has to move"
+          "\ntau                  the learned temperature; at --tau_min it is pinned")
 
 
 def evaluate_only(a):
@@ -1919,6 +2046,94 @@ def selftest(a):
               for p in pp.parameters())
           and model10.encoder.mix.weight.grad is not None)
 
+    # ---- site decoys: the receptor's other pockets as within-protein negatives
+    print("\n[11] site decoys (--n_decoys) and the site metric")
+    srt = lambda t: torch.sort(t).values
+    # Rows 0-3 have two pockets each (group [9]): the far-side decoy (rank 0
+    # by score) and the true one, which is the site. Every row is its own
+    # receptor, so there are no sibling sites to keep clear of.
+    P11, labs11 = build_batch(model10, st10, labels10, table10, np.arange(5), "cpu",
+                              n_decoys=3)
+    P11["planted"] = torch.randn(len(P11["xyz"]), EMB)
+    check("build_batch: the site, then the far-side pocket as the one decoy; the "
+          "true pocket is never its own decoy",
+          [len(r) for r in P11["ext_regions"]] == [2, 2, 2, 2, 0]
+          and all(torch.equal(srt(P11["ext_regions"][b][0]), srt(P10["ext_regions"][b][0]))
+                  and torch.equal(srt(P11["ext_regions"][b][1]),
+                                  srt(P9["ext_regions"][b][0]))
+                  for b in range(4))
+          and [lb["n_site"] for lb in labs11] == [1, 1, 1, 1, 0]
+          and [lb["n_decoy"] for lb in labs11] == [1, 1, 1, 1, 0])
+    e11 = st10.get(model10.encoder, table10.rows[0])
+    check("build_batch leaves the shared label record alone",
+          "n_site" not in labels10.get(0, e11))
+    cands = list(e11["ext_regions"])                       # [far side, true]
+    blank = {"pocket": torch.zeros(len(e11["xyz"]), dtype=torch.bool), "other": None}
+    by_site = site_decoys(cands, [cands[1]], blank, 5)
+    check("site_decoys: a pocket overlapping the site region is dropped even with "
+          "no label to catch it; n caps the count",
+          len(by_site) == 1 and torch.equal(by_site[0], torch.as_tensor(cands[0]).long())
+          and len(site_decoys(cands, [], blank, 5)) == 2
+          and len(site_decoys(cands, [], blank, 1)) == 1
+          and site_decoys(cands, [cands[1]], blank, 0) == [])
+
+    blk11 = anchor_block(model10, P11, labs11, args10,
+                         generator=torch.Generator().manual_seed(0))
+    check("anchor_block: the decoy is a negative and never usable; still one "
+          "usable positive per protein",
+          blk11["usable"].sum(1).tolist() == [1] * 5
+          and blk11["decoy"].sum(1).tolist() == [1, 1, 1, 1, 0]
+          and all(int(blk11["label"][b, 0]) == 1 and int(blk11["label"][b, 1]) == 0
+                  and bool(blk11["decoy"][b, 1]) for b in range(4))
+          and blk11["fallback"].tolist() == [False] * 4 + [True],
+          f"usable {blk11['usable'].sum(1).tolist()}, "
+          f"decoys {blk11['decoy'].sum(1).tolist()}")
+
+    model10.encoder.zero_grad(set_to_none=True)
+    lig11 = F.normalize(torch.randn(5, cfg10.out_dim), dim=1)
+    per11 = torch.einsum("bkd,bd->bk", blk11["anchors"], lig11) * 10.0
+    sl11 = site_loss(per11, blk11["label"])
+    sl11_none = site_loss(per11, torch.where(blk11["decoy"], -1, blk11["label"]))
+    sl11.backward()
+    check("lam_site's term trains the site against its decoys, and is 0 without them",
+          bool(torch.isfinite(sl11)) and float(sl11) > 0 and float(sl11_none) == 0.0
+          and any(p.grad is not None and float(p.grad.abs().sum()) > 0
+                  for p in pp.parameters()),
+          f"site_loss {float(sl11):.3f}")
+
+    # fpocket finds nothing at the site (fractions above 1 cannot be met):
+    # slot 0 is then a DECOY, and labelling it the site would train the
+    # ligand onto the wrong pocket.
+    st11 = FakeStore(tmp / "surfaces", ram=16, pockets=PocketSource(
+        pdir, k=cfg10.k_pos, min_points=cfg10.min_region_points, select="site",
+        site_frac=1.01, site_lig_frac=1.01))
+    P11m, labs11m = build_batch(model10, st11, labels10, table10, np.arange(5),
+                                "cpu", n_decoys=3)
+    P11m["planted"] = torch.randn(len(P11m["xyz"]), EMB)
+    blk11m = anchor_block(model10, P11m, labs11m, args10,
+                          generator=torch.Generator().manual_seed(0))
+    check("site missed: slot 0 is a decoy (negative, unusable), the true pocket "
+          "is not a decoy, the fallback ball is the positive",
+          [len(r) for r in P11m["ext_regions"]] == [1, 1, 1, 1, 0]
+          and [lb["n_site"] for lb in labs11m] == [0] * 5
+          and blk11m["fallback"].tolist() == [True] * 5
+          and blk11m["usable"].sum(1).tolist() == [1] * 5
+          and all(int(blk11m["label"][b, 0]) == 0 and bool(blk11m["decoy"][b, 0])
+                  for b in range(4)),
+          f"fallback {blk11m['fallback'].tolist()}")
+
+    sim_r = torch.tensor([[0.9, 0.1, 0.5], [0.1, 0.9, 0.0], [0.2, 0.8, 0.9]])
+    lab_r = torch.tensor([[1, 0, -1], [1, 0, -1], [1, -1, -1]])
+    use_r = torch.tensor([[True, False, False]] * 3)
+    r_site, c_site = site_rate(sim_r, lab_r, use_r, True)
+    r_sel, c_sel = site_rate(sim_r, lab_r, use_r, False)
+    check("site_rate: under site select, the site beating its decoys (rows with "
+          "decoys only, NaN with none); otherwise the old argmax over usable",
+          r_site == 0.5 and abs(c_site - 2 / 3) < 1e-6 and r_sel == 1.0
+          and c_sel == 1.0
+          and np.isnan(site_rate(sim_r[2:], lab_r[2:], use_r[2:], True)[0]),
+          f"site {r_site} over {c_site:.2f}; selector {r_sel}")
+
     print("\nSELFTEST " + ("PASSED" if not fails else f"FAILED: {fails}"))
     print("Nothing here involves dMaSIF, KeOps or a GPU, so it says nothing about\n"
           "surface sampling or the convolution; chemo_test.sbatch's smoke pass is\n"
@@ -1957,7 +2172,8 @@ class _FakeLigands:
 # ---------------------------------------------------------------------------
 POCKET_DEFAULTS = {"pockets": "", "pocket_rank": "score", "pocket_shape": "pocket",
                    "pocket_margin": 0.0, "pocket_max": 0, "pocket_select": "topk",
-                   "site_cutoff": 3.0, "site_frac": 0.25, "site_lig_frac": 0.5}
+                   "site_cutoff": 3.0, "site_frac": 0.25, "site_lig_frac": 0.5,
+                   "n_decoys": 0}
 
 
 def add_region_args(p, defaults=True):
@@ -2019,6 +2235,11 @@ def add_region_args(p, defaults=True):
     p.add_argument("--pocket_max", type=int, default=d(P["pocket_max"]),
                    help="map at most this many pockets per protein (0 = k_pos "
                         "for external, all for external_map)")
+    p.add_argument("--n_decoys", type=int, default=d(P["n_decoys"]),
+                   help="--pocket_select site: also pool up to this many of the "
+                        "receptor's other mapped pockets (by --pocket_rank) as "
+                        "decoys, trained against the ligand by --lam_site and "
+                        "reported as `site`; never scored across proteins")
 
 
 def add_model_args(p):
@@ -2148,6 +2369,9 @@ def main():
     p.add_argument("--weight_decay", type=float, default=1e-2)
     p.add_argument("--clip", type=float, default=5.0)
     p.add_argument("--tau", type=float, default=0.07)
+    p.add_argument("--tau_min", type=float, default=0.01,
+                   help="floor on the learned temperature (the logit scale is "
+                        "capped at 1 / this); 0.01 is CLIP's cap of 100")
     p.add_argument("--alpha", type=float, default=1.0,
                    help="1 = uniform over targets, 0 = uniform over rows")
     p.add_argument("--lam_pocket", type=float, default=1.0,

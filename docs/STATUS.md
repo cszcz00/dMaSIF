@@ -1,6 +1,8 @@
 # Project status (handoff)
 
-Read this first in a new session. **2026-10-21: the newest work is "v3" below
+Read this first in a new session. **2026-10-26: newest is v3 round 3 (site
+decoys, temperature floor) at the end of the v3 section - selftest [11] first.**
+**2026-10-21: the newest work is "v3" below
 (fpocket's pocket at each training ligand, pooled pairwise), built on
 "External pockets (fpocket)" after it. Both written, neither run; the run
 order is in the v3 section.** Before that, last updated 2026-10-18 on
@@ -520,7 +522,11 @@ What it says:
   val was dominated by a few big, easy targets. Every earlier val number in
   this file was flattered by that.
 
-## PLIP interaction labels (`src/plip_labels.py`) - INSTALLED on the HPC, array not yet run
+## PLIP interaction labels (`src/plip_labels.py`) - RUN and CHECKED, not yet wired into training
+
+2026-10-26: `plip.sbatch` and `plip_labels.py check --n 500` run; the user
+reports the check looks good. Numbers not recorded here yet - paste them in.
+
 
 For supervising pair pooling's site types (and any later site-based pooling):
 which protein atoms each training ligand actually H-bonds, salt-bridges,
@@ -719,6 +725,43 @@ Round 2, `bash src/slurm/v3_diag2.sh`, each one change from C: `v3d` + chemo,
 `v3e` + bank 2048 / 1024 extra ligands (judge by mrr / cosdiff, its nce is over
 ~2,000 candidates), `v3c+` C resumed 1,500 -> 5,000 steps (where it
 plateaus). Results: PENDING.
+
+**Round 3 (2026-10-26), `bash src/slurm/v3_diag3.sh`: WRITTEN, NOT RUN.
+`train.py selftest` group [11] is new and has not run yet (no torch in
+Claude's container) - run it first.** Motivation: the bank's ~2,000 candidates
+per row pass the masks (UniProt group, same ligand, Tanimoto >= 0.8) for
+homologues under other UniProt IDs, cofactor binders and scaffold hops, so
+false negatives likely grew from ~0.3 per query at batch 32 to tens. Two
+levers, both off by default (earlier runs and resumes reproduce):
+- `--n_decoys N` (site select only; `train.site_decoys`): up to N of the
+  receptor's other mapped fpocket pockets, minus any overlapping the site
+  region, its 4 A label or a sibling site (the region_labels 0.1 rule). Label
+  0, never usable (not in cross-protein scores, the bank or eval ranking);
+  `--lam_site` (`site_loss`, first use) trains the site against them. Same
+  protein, so never a homologue. If fpocket misses the site, slot 0 is a
+  decoy and the fallback ball is the positive (labs carry n_site / n_decoy).
+  `train_v3.sbatch`: `DECOYS=7 POCKET_RANK=drug`; LAM_SITE defaults to 1 and
+  reaches the smoke too.
+- `--tau_min` (default 0.01, the old cap): logit scale capped at 1 / tau_min.
+  `TAU_MIN=0.05` in train.sbatch.
+Log changes from this commit: a `tau` column (also history.json, `train.py
+eval`); in site mode `site` = share of val rows whose ligand scores its own
+pocket above every decoy (NaN without decoys; it read ~1.0 by construction
+before). Runs: `v3f` = C + decoys, `v3g` = C + bank + TAU_MIN 0.05 (read
+against v3e). Final temperature of runs that predate the column:
+```
+apptainer exec --cleanenv $WORK/dmasif_sandbox python -c '
+import sys, torch
+for p in sys.argv[1:]:
+    ck = torch.load(p, map_location="cpu", weights_only=False)
+    s = min(float(ck["state_dict"]["logit_scale"].exp()), 100.0)
+    print(p, "step", ck["step"], "tau %.4f" % (1 / s))
+' $WORK/runs/*/last.pt
+```
+Baselines and the blind comparison (C's decoy `site` rate, then C vs v3f
+with topk / drug) are in the script's header. Not built: soft-weighted or
+debiased InfoNCE, property-matched decoy ligands, a false-negative exposure
+count.
 
 v3's log is KNOWN-SITE retrieval and is not comparable to runs/b32 (blind,
 head regions); the blind eval is. Ablations in the sbatch header (pool

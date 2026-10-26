@@ -52,8 +52,15 @@
 #   BANK= EXTRA_LIG= RUN=$WORK/runs/v3_nobank
 #   POCKET_SHAPE=ball RUN=$WORK/runs/v3_ball
 #
+# Site decoys (off unless DECOYS is set): DECOYS=7 pools up to 7 of the
+# receptor's other fpocket pockets per row as within-protein negatives,
+# trained by --lam_site (LAM_SITE, 1 when DECOYS is set). POCKET_RANK=drug
+# draws them from the top k_pos by druggability, the pockets the blind eval
+# scores. The `site` column then reads "own pocket above every decoy".
+#
 # Overrides here: POCKETS, POCKET_SHAPE, POCKET_MARGIN, PAIR_ARGS (e.g.
-#   "--pair_types 12 --pair_bins 10"), plus everything train.sbatch takes.
+#   "--pair_types 12 --pair_bins 10"), DECOYS, POCKET_RANK, plus everything
+#   train.sbatch takes (TAU_MIN among them).
 POCKETS=${POCKETS:-$WORK/pockets/fpocket}
 [ -d "$POCKETS" ] || { echo "no $POCKETS; sbatch src/slurm/fpocket.sbatch first"; exit 1; }
 export RUN=${RUN:-$WORK/runs/v3}
@@ -71,6 +78,13 @@ export LR_SCHEDULE=${LR_SCHEDULE:-cosine}
 export WARMUP=${WARMUP:-200}
 # In REGION_ARGS so the smoke runs the v3 path too, not just the main run.
 export REGION_ARGS="--region_source external --pockets $POCKETS --pocket_select site \
---pocket_shape ${POCKET_SHAPE:-pocket} --pocket_margin ${POCKET_MARGIN:-0} ${PAIR_ARGS:-}"
+--pocket_shape ${POCKET_SHAPE:-pocket} --pocket_margin ${POCKET_MARGIN:-0} ${PAIR_ARGS:-} \
+${POCKET_RANK:+--pocket_rank $POCKET_RANK}"
+if [ -n "${DECOYS:-}" ] && [ "$DECOYS" != 0 ]; then
+    # --lam_site here too, so the smoke runs the decoy LOSS and not only the
+    # pooling; train.sbatch passes the same LAM_SITE again to the main run.
+    export LAM_SITE=${LAM_SITE:-1.0}
+    export REGION_ARGS="$REGION_ARGS --n_decoys $DECOYS --lam_site $LAM_SITE"
+fi
 export TRAIN_ARGS=${TRAIN_ARGS:-"--eval_every 125 --save_every 125"}
 exec bash $WORK/src/slurm/train.sbatch
