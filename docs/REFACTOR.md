@@ -173,6 +173,77 @@ Nine stale path references were updated across `train.sbatch`,
 `RESULTS.md` (five) and `DESIGN.md`'s code map. A repo-wide grep confirms no
 reference to the old paths remains.
 
+## Stage 6 — a `data/` directory (PROPOSED, not started)
+
+`$WORK` has ~16 top-level directories and the code is four of them. The user's
+instinct is right, and so is the distinction they drew: `structures/` and
+`systems/` are upstream PLINDER content, while `surfaces/`, `pockets/` and
+`plip/` are things we computed. One correction to the premise: neither
+`structures/` nor `systems/` is "all of PLINDER" - both hold only the
+receptors and systems in OUR manifest. The genuinely PLINDER-wide copy is
+`$PLINDER_DIR`, which already lives outside `$WORK`.
+
+**A second axis matters more than upstream/derived, and `dataset_v2` is about
+to make it urgent: what each artefact is KEYED by, because that says what a
+rebuild costs.**
+
+| artefact | keyed by | survives a dataset rebuild? |
+|---|---|---|
+| `structures/`, `systems/` | receptor_key / system_id | yes, and re-fetchable for free |
+| `surfaces/`, `pockets/<finder>/` | `input_id` | **yes** - 19,293 files each, the expensive ones |
+| `plip/` | `system_id` | yes, for rows that survive |
+| `meta/`, `datasets/` | the dataset | no, rebuilt |
+| ligand features (`runs/<n>/ligand_feats.npz`) | `fp_row` | **no** - `build_dataset` RE-INDEXES fp_row per dataset |
+
+So the layout should make it obvious that a dataset_v2 rebuild does NOT touch
+surfaces or pockets, and DOES invalidate ligand features. Proposed:
+
+```
+$WORK/
+  src/ configs/ docs/ dMaSIF/            code, unchanged
+  data/
+    upstream/   structures/  systems/    re-fetchable; free to delete under disk pressure
+    derived/    surfaces/  pockets/  plip/
+    index/      meta/  datasets/
+  runs/  reports/                        experiment outputs, not data
+  tools/  envs/  keops_cache/            build and cache junk
+```
+
+`encoder_test/`, `apo_test/` and `probe/` are also experiment outputs and
+could go under an `out/`; left out of this proposal because the user did not
+ask and `runs/` alone is referenced 34 times in job scripts.
+
+**The blocker, and why this splits in two.** `input_path` is not computed at
+load time - it is a PERSISTED column holding a relative path
+(`structures/<receptor_key>.cif`), written into `items.tsv` (`ITEM_COLS` in
+probe_retrieval) and `index.parquet` (build_dataset), and resolved against the
+cwd. **Moving `structures/` therefore invalidates every existing `items.tsv`
+and `index.parquet`.** `systems/` is reached through `sdf_paths`, the same way.
+
+The derived directories have no such problem: `surfaces/`, `pockets/` and
+`plip/` appear only in job-script defaults and CLI flags, never inside a data
+file.
+
+So:
+
+- **Now, cheap and safe: move the derived three.** `surfaces/` (7 references),
+  `pockets/` (3), `plip/` (1), plus the `meta/` and `datasets/` defaults in the
+  Python CLIs. Roughly a dozen default lines and a `git mv` on the HPC; nothing
+  persisted changes.
+- **With `dataset_v2`: move `upstream/`.** That rebuild regenerates
+  `index.parquet` and `items.tsv` anyway, so the new `input_path` is written
+  correct first time and the migration costs nothing extra. Doing it before
+  then means either rewriting the parquet/TSV columns by hand or teaching
+  `receptor_inputs.plinder_receptor` a configurable data root.
+
+**Open question for the inventory to answer first: what is `feats/`?** It is
+the `extract.py`-era surface cache (`feats/<tag>.npz`, per `ids.py` and
+`labels.py`), from before `SurfaceStore` and `surfaces/`. Nothing current
+writes it. If it is dead it should be deleted, not migrated, and it may be
+sizeable. `src/inventory.py report` will say how many files and how large.
+(Its description in `inventory.py` said "ligand feature blocks", which was
+wrong and is fixed.)
+
 ## Not planned, and why
 
 - **Renaming `probe_retrieval.py`.** It is referenced throughout

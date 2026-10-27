@@ -59,7 +59,9 @@ TREES = [
     ("surfaces", "*.npz", "cached dMaSIF surfaces, one per input_id"),
     ("systems", "*", "PLINDER system directories (ligand SDFs)"),
     ("plip", "*.npz", "PLIP interactions per training row"),
-    ("feats", "*", "ligand feature blocks"),
+    ("feats", "*.npz", "extract.py-era SURFACE blocks, feats/<tag>.npz; the "
+                       "pre-SurfaceStore cache. Probably superseded by "
+                       "surfaces/ - check before relying on it"),
     ("reports", "*", "retrieval_report dumps and TSVs"),
 ]
 
