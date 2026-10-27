@@ -10,8 +10,10 @@
 #        protein. Never scored across proteins, so mrr / nce mean what they
 #        meant for C.
 #   v3g  runs/v3g_pairs_bn_bank_tau C + bank 2048 / 1024 extra ligands (= v3e)
-#        + --tau_min 0.05. Whether the temperature floor keeps the bank from
-#        sharpening onto its false negatives.
+#        + --tau_min 0.06. Whether the temperature floor keeps the bank from
+#        sharpening onto its false negatives. 0.06 because every run that
+#        learned ended at 0.064-0.076, while the two bank runs ended at 0.036
+#        (v2) and 0.043 (v3) - a floor that blocks only what the bank added.
 #
 # Read (1,500 steps, the same 400 val rows, eval every 125):
 #   v3f  mrr against C (0.114) at matched steps; `site` = how often a val
@@ -51,4 +53,4 @@ submit() {   # job name, run name, then VAR=value overrides
 # v3f keeps the smoke: the decoy path (pooling + lam_site) has never run on a
 # GPU, and the smoke now runs its loss too.
 submit v3f  v3f_pairs_bn_decoys   SKIP_SMOKE=0 DECOYS=7 LAM_SITE=1 POCKET_RANK=drug
-submit v3g  v3g_pairs_bn_bank_tau BANK=2048 EXTRA_LIG=1024 TAU_MIN=0.05
+submit v3g  v3g_pairs_bn_bank_tau BANK=2048 EXTRA_LIG=1024 TAU_MIN=0.06

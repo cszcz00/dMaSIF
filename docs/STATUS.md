@@ -682,7 +682,8 @@ though not on the same proteins and dcc uses plain centroids of irregular
 pockets here, so dcc is harsher for fpocket. The blind eval therefore passes
 `--pocket_rank drug`; --k_pos 16 is the obvious next lever if blind lags.
 
-**runs/v3 (2026-10-23): FAILED TO LEARN, cancelled at step 4,125/6,000.**
+**runs/v3 (2026-10-23): FAILED TO LEARN, cancelled after step 4,250/6,000
+(its last.pt is at 4,250).**
 The plumbing worked - site found for 94% of rows (fb 0.058 as predicted), 0
 missing files, GPU peak 7.7 GB, RSS 5.2 GB, ~4.1 s per 32-protein step (~3x
 b32's throughput; load 0.5 / fwd 1.6 / bwd 2.0). But val MRR stayed at chance
@@ -759,7 +760,29 @@ for p in sys.argv[1:]:
 ' $WORK/runs/*/last.pt
 ```
 Baselines and the blind comparison (C's decoy `site` rate, then C vs v3f
-with topk / drug) are in the script's header. Not built: soft-weighted or
+with topk / drug) are in the script's header.
+
+Final temperatures (2026-10-27, that readout; all started at 0.07, cap 0.01):
+
+| run | step | tau |
+|---|---|---|
+| v1 | 20,000 | 0.068 |
+| frozen | 14,554 | 0.076 |
+| shells | 12,547 | 0.073 |
+| b32 | 2,875 | 0.064 |
+| v3a / v3b / v3c | 1,500 | 0.068 / 0.070 / 0.071 |
+| **v2** (bank + extras + cosine + descriptor) | 4,884 | **0.036** |
+| **v3** (bank + extras + cosine + chemo + site + pairs) | 4,250 | **0.043** |
+
+No run reached the cap. Every run without a bank stayed within 0.064-0.076;
+only the two with a bank sharpened, to about half the start. So the bank does
+drive the temperature down, but not to an extreme, and v3g's floor is 0.06
+(above both bank runs, below every run that learned) rather than 0.05, which
+would barely have bound. `runs/v2` exists at 4,884 steps although the v2
+section below says not run: its results are not recorded here and are the
+key datum (bank on the head's regions, no site pockets or pairs) - get its
+log / history.json. `runs/v3c_1500` is the copy of C at 1,500 steps; C itself
+was still at 1,500, so v3c+ had not run when it was made. Not built: soft-weighted or
 debiased InfoNCE, property-matched decoy ligands, a false-negative exposure
 count.
 
