@@ -17,7 +17,7 @@ Rule for every stage: move code **verbatim**, change imports only, and run the
 affected self-tests before and after. If a move requires editing the moved
 lines, it belongs in a separate commit from the move.
 
-## Stage 1 — split `docs/STATUS.md` (no code, no risk)
+## Stage 1 — split `docs/STATUS.md` — DONE 2026-10-27
 
 1,591 lines doing three jobs at once: a handoff, a lab notebook, and a design
 record. It is appended to after every run and is now hard to navigate.
@@ -29,7 +29,26 @@ record. It is appended to after every run and is now hard to navigate.
 | `docs/DATA.md` | what each directory under `$WORK` is, which job builds it, what invalidates it, and what `src/inventory.py` checks. |
 | `docs/DESIGN.md` | the settled decisions (selector, scoring, region labels, other sites, batch negatives) now buried mid-STATUS. |
 
-`START HERE` stays at the top of `STATUS.md` and links to the other three.
+Landed as four files: STATUS 300 lines, RESULTS 790, DESIGN 532, DATA 68.
+Verified mechanically: no source line used twice, and of the 29 original `##`
+headings none is duplicated and only two are absent - `START HERE` and
+`Pending jobs`, both deliberately replaced by STATUS's rewritten header and
+`## Pending work`.
+
+Results, design and data text moved VERBATIM. Status text was rewritten,
+because a status file is a snapshot and the old one had rotted: it still led
+with "the one open question" about a `train_check.sh` log from 2026-10-18,
+still listed the training loop as "never run on a GPU", and its `Pending jobs`
+section had the finished `train_check` run as item 0. That narrative was not
+deleted - it is `RESULTS.md`'s "Getting the loop onto a GPU", where it is
+correct as a record.
+
+RESULTS is also reordered chronologically; the original interleaved the region
+sweep with the v3 ladder. Six cross-references that the split or the reordering
+broke were fixed: three "results recorded in this file" pointers now name
+`RESULTS.md`, the Goal section's stale "never run on a GPU / outcome still
+unseen" paragraph was rewritten, the Training loop heading in DESIGN now points
+at `RESULTS.md`, and one "the v2 section below" became "above".
 
 ## Stage 2 — extract the self-tests (mechanical, low risk)
 
