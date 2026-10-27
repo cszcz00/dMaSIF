@@ -37,13 +37,17 @@ record. It is appended to after every run and is now hard to navigate.
 `main()`'s argparse**. The self-test is ~990 lines of pure test code imported
 by nothing.
 
-- `selftest()` and its fixtures → `src/train_selftest.py`, invoked by
-  `train.py selftest` as a one-line delegate so the command does not change.
-- The same for `probe_retrieval.py` (1,214 lines) if its self-test is a
-  comparable share.
+`selftest()` (lines 1336-2325) and its fixtures → `src/train_selftest.py`,
+invoked by `train.py selftest` as a one-line delegate so the command does not
+change. Nothing else moves. `train.py` drops to ~1,450 lines and the eleven
+test groups become findable.
 
-Nothing else moves. `train.py` drops to ~1,450 lines and the test groups become
-findable. Verify: `train.py selftest` prints the same group list and passes.
+**`train.py` is the only module that needs this.** Measured: probe_retrieval
+12% self-test, external_pockets 19%, plip_labels 15%, chemotype 22% — all
+healthy, a self-test beside the code it tests. train.py is the outlier at 41%,
+and only because it accumulated eleven groups covering the whole pipeline.
+
+Verify: `train.py selftest` prints the same group list and passes.
 
 ## Stage 3 — a real shared core (medium risk, highest clarity gain)
 
@@ -61,6 +65,19 @@ Extract, verbatim, into modules named for what they are:
 | `src/masks.py` | probe_retrieval | `mask_pairs`, `tanimoto`, and `train.cross_mask` |
 | `src/sampling.py` | probe_retrieval | `group_index`, `draw_batch`, `sample_weights`, `split_by_group` |
 | `src/metrics.py` | probe_retrieval | `retrieval_metrics`, `anchor_spread`, `info_nce`, and `train.nce_extended` |
+
+The exact coupling today is nine names over seven call sites in `train.py`:
+`mask_pairs`, `tanimoto`, `anchor_spread`, `retrieval_metrics`, `draw_batch`,
+`group_index`, `info_nce`, `split_by_group` — and `apply_overrides`, which is
+the odd one out: it writes region CLI flags onto an `EncoderConfig` and belongs
+with the model/config code, not with masks or metrics. Decide its home when
+stage 4 moves `build_model`; until then leave it where it is.
+
+Note every one of these imports is FUNCTION-LOCAL, not module-level. That is
+deliberate throughout the repo: it keeps torch-free paths torch-free (the CPU
+venv has no torch, and `inventory.py`, `companion_funnel.py` and
+`retrieval_report.py report` all depend on that). Preserve the pattern when
+moving them.
 
 Both `probe_retrieval.py` and `train.py` then import from these. The anti-drift
 property is strengthened, not weakened: there is one definition and neither
