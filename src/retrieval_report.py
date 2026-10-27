@@ -351,20 +351,38 @@ def analyse(tag, d, table, ligands, desc_names, a):
     return summ, recs, counts
 
 
+def load_ligand_arrays(path):
+    """The ligand arrays `report` needs, WITHOUT importing ligand_encoder.
+
+    LigandData lives in ligand_encoder, which imports torch at module level,
+    and the whole point of the report stage is that it runs in the CPU venv on
+    numpy alone. Everything used here is a plain array in the same .npz.
+    """
+    from types import SimpleNamespace
+
+    with np.load(path, allow_pickle=False) as f:
+        d = {k: f[k] for k in f.files}
+    fp = d["fp"]
+    return SimpleNamespace(
+        fp=fp, desc_raw=d["desc"].astype(np.float32),
+        desc_names=[str(x) for x in d["desc_names"]],
+        failed=d.get("failed", np.zeros(len(fp), bool)),
+        smiles=d.get("smiles", np.array([""] * len(fp))),
+        n_heavy=d.get("n_heavy", np.diff(d["atom_ptr"]).astype(np.int32)),
+    )
+
+
 def report(a):
-    from ligand_encoder import LigandData
     from train_data import ItemTable, read_items
 
     dump_npz = {k: v for k, v in np.load(a.dump, allow_pickle=False).items()}
     table = ItemTable(read_items(a.items, 0))
-    ligands = LigandData(a.lig_feats)
-    with np.load(a.lig_feats, allow_pickle=False) as f:
-        desc_names = [str(x) for x in f["desc_names"]]
-    # the UNstandardised descriptors: this is chemistry, not model input
-    ligands.desc_raw = ligands.desc
+    ligands = load_ligand_arrays(a.lig_feats)
+    desc_names = ligands.desc_names
     bad = ligands.failed[table.fp_row]
     if bad.any():
         table = ItemTable([r for r, b in zip(table.rows, bad) if not b])
+    print(f"{len(table)} rows after dropping unfeaturised ligands")
     print(f"{a.dump}: step {int(dump_npz['step'])}, pocket_select "
           f"{str(dump_npz['pocket_select'])}, {len(ligands)} candidate ligands\n")
 

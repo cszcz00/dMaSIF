@@ -364,21 +364,15 @@ lists that systematically EXCLUDED the right answer. Groups [1]-[4] cover the
 Tanimoto / rank / entropy helpers, anchor masking, a planted perfect ranking,
 and a planted hub collapse.
 
-Run it on C at 5,000 steps, both selects, before tweaking anything:
+Run it on C at 5,000 steps, both selects, before tweaking anything.
+`src/slurm/report.sbatch` is the GPU half (both selects, ~30 min test queue)
+and prints the CPU commands to follow it:
 ```
-# container, GPU
-for SEL in site topk; do
-  python src/retrieval_report.py dump --ckpt runs/v3c_site_pairs_bn/best.pt \
+sbatch src/slurm/report.sbatch                 # -> reports/<run>_{site,topk}.npz
+# then, CPU venv (numpy only; load_ligand_arrays avoids ligand_encoder's torch)
+python src/retrieval_report.py report --dump reports/v3c_site_pairs_bn_topk.npz \
     --items runs/v1/items.tsv --lig_feats runs/v1/ligand_feats.npz \
-    --surface_cache surfaces --pocket_select $SEL --pocket_rank drug \
-    --n_train 400 --n_val 400 --out reports/v3c5000_$SEL.npz
-done
-# CPU venv
-for SEL in site topk; do
-  python src/retrieval_report.py report --dump reports/v3c5000_$SEL.npz \
-    --items runs/v1/items.tsv --lig_feats runs/v1/ligand_feats.npz \
-    --out reports/v3c5000_$SEL
-done
+    --out reports/v3c_topk
 ```
 
 ## Companion ligands and the `n_ligand_chains == 1` restriction (`src/companion_funnel.py`) - WRITTEN, NOT RUN
