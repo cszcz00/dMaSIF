@@ -325,6 +325,99 @@ since a screening candidate has no pose. GINE is implemented directly on
 `index_add_` / `scatter_reduce` instead of importing PyG, so the whole ligand
 side and every test of it runs on plain CPU torch.
 
+## Retrieval inspection (`src/retrieval_report.py`) - WRITTEN, selftest PASSES, never run on real data
+
+Every number so far is a scalar (mrr, top1, site, cosdiff): it says how well
+the ranking does, never WHAT it ranks. This dumps the top-k ligands per
+receptor for a TRAIN and a VAL slice and reports the diagnostics that tell
+apart three different models at the same mrr - one finding the right chemotype
+and missing the molecule, one matching ligand SIZE to pocket size, and one
+returning the same hub ligands for every receptor. `dump` (GPU, ~2 min) writes
+anchors + every ligand vector; `report` (numpy, CPU) scores and analyses, so
+one dump answers every later question. It imports from `train.py` and never
+writes to it, so it is safe to run while a job holds the same files.
+
+What it answers, and the decision each line drives:
+- **hubs**: share of top-k slots held by the 20 most-retrieved ligands,
+  normalised entropy, ligands covering half the slots, and the TRAIN/VAL
+  Jaccard of the hub sets. A low entropy is a ligand prior, not retrieval; a
+  high Jaccard means ONE global prior rather than per-receptor matching.
+- **chemotype rank**: best rank among candidates at Tanimoto >= 0.4 / 0.5 /
+  0.7 to the truth. If molecule mrr is 0.18 and chemotype mrr is ~0.45, the
+  model finds the class and misses the molecule - a success, and an argument
+  for reporting (and maybe training) at chemotype level.
+- **size-only baseline**: rank candidates by |heavy atoms - heavy atoms of
+  truth| and take its mrr. If the model is near it, the signal is size
+  matching. This is "Next steps" item 6, answered for free.
+- **coherence**: mean pairwise Tanimoto inside each top-k against a random-k
+  baseline, plus the top-k's Tanimoto to truth. Coherent but wrong = something
+  systematic to find; both low = noise.
+- **properties**: Spearman between the true ligand's descriptors and the
+  top-1's, per column, so "it matches polarity but not shape" is readable.
+- per-row TSV carries fallback, site_size and group, for slicing success by
+  pocket size / merged sites / target-group size (the memorisation axis).
+
+`selftest` (numpy only) PASSES and already earned itself: the top-k list was
+built over the masked candidates, and a row's own ligand is masked because it
+shares its own target group, so every statistic would have been computed on
+lists that systematically EXCLUDED the right answer. Groups [1]-[4] cover the
+Tanimoto / rank / entropy helpers, anchor masking, a planted perfect ranking,
+and a planted hub collapse.
+
+Run it on C at 5,000 steps, both selects, before tweaking anything:
+```
+# container, GPU
+for SEL in site topk; do
+  python src/retrieval_report.py dump --ckpt runs/v3c_site_pairs_bn/best.pt \
+    --items runs/v1/items.tsv --lig_feats runs/v1/ligand_feats.npz \
+    --surface_cache surfaces --pocket_select $SEL --pocket_rank drug \
+    --n_train 400 --n_val 400 --out reports/v3c5000_$SEL.npz
+done
+# CPU venv
+for SEL in site topk; do
+  python src/retrieval_report.py report --dump reports/v3c5000_$SEL.npz \
+    --items runs/v1/items.tsv --lig_feats runs/v1/ligand_feats.npz \
+    --out reports/v3c5000_$SEL
+done
+```
+
+## Companion ligands and the `n_ligand_chains == 1` restriction (`src/companion_funnel.py`) - WRITTEN, NOT RUN
+
+`configs/datasets/dataset_v1.yaml` keeps a system only if it has exactly ONE
+ligand chain of ANY kind, ions and crystallisation additives included. So a
+drug-like ligand with a magnesium, or with a glycerol 30 A away, is discarded
+whole. (The row-level `not_cofactor` / `not_ion` filters are a different and
+wanted thing: they stop a cofactor being the TARGET.) That costs data, and
+`v3c+` showed the ceiling is MEMORISATION - ~69 visits per target group with
+val mrr flat while train nce falls - so more distinct targets is the lever
+that matters.
+
+The restriction has one real justification: `extract.load_protein_atoms` keeps
+amino acids only, so a companion molecule leaves a VOID, fpocket fills that
+void with alpha spheres, and the void can merge into the site region the model
+pools over. Whether that matters is a DISTANCE question - a companion far from
+the proper ligand cannot reach its site region.
+
+`companion_funnel.py funnel` (manifest, pandas) gives the rows / receptors /
+groups a relaxed query would add and what the companions are by kind;
+`distance` (manifest + PLINDER system SDFs) gives the minimum companion-to-
+ligand heavy-atom distance for a sample of them, against 4 A (the pocket
+label), 8 A (roughly a site region's span) and a proposed `--gate`. Then:
+- few rows added -> leave the query alone.
+- many rows, companions far -> relax to one PROPER ligand and keep the
+  current extraction. **Cheap**: existing surfaces and pocket files stay
+  valid, only new receptors need sampling and fpocket, and both jobs skip
+  work already done.
+- many rows, companions close -> relax with a distance gate, or pay the
+  expensive path (keep metals / cofactors as receptor atoms), which
+  invalidates all 19,293 surfaces, every pocket file, the PLIP labels and the
+  comparability of every run here - and costs AlphaFold compatibility, since
+  predicted structures have no cofactors and the apo test's 6% AP finding was
+  measured with everything stripped on both sides.
+Fold into **dataset_v2** with the two issues already queued there (per-`pdb_id`
+dedup for the symmetry copies, and a properly sized val/test): one rebuild
+rather than three.
+
 ## Results so far
 
 **Pocket head** (pretrained start, 300 steps, 32 training receptors, pocket BCE
