@@ -725,7 +725,33 @@ ahead (0.115); known-site + mean pooling does NOT beat the head's top-8 max.
 Round 2, `bash src/slurm/v3_diag2.sh`, each one change from C: `v3d` + chemo,
 `v3e` + bank 2048 / 1024 extra ligands (judge by mrr / cosdiff, its nce is over
 ~2,000 candidates), `v3c+` C resumed 1,500 -> 5,000 steps (where it
-plateaus). Results: PENDING.
+plateaus). Results: `v3c+` DONE (below); `v3d` / `v3e` still PENDING.
+
+**`v3c+` (C resumed 1,500 -> 5,000 steps, 2026-10-27): C PLATEAUS AT ~0.18
+KNOWN-SITE MRR, and the limit is now MEMORISATION, not optimisation.**
+
+| step | mrr | top1 | top10 | nce | cosdiff | tau |
+|---|---|---|---|---|---|---|
+| 1,500 (C) | 0.114 | - | 0.22 | 2.29 | 0.82 | 0.071 |
+| 3,625 | 0.173 | 0.100 | 0.322 | 1.470 | 0.760 | 0.065 |
+| 4,875 (best) | 0.184 | 0.102 | 0.317 | 1.224 | 0.747 | 0.060 |
+| 5,000 | 0.172 | 0.097 | 0.340 | 1.148 | 0.743 | 0.059 |
+
+(Three of the ~12 evaluations in 3,625-5,000; read the window mean off
+`history.json`.) Read: (1) 0.114 -> ~0.176 between 1,500 and 3,625, then FLAT
+within noise (+-0.015) over the next 1,375 steps, while train nce keeps
+falling 1.47 -> 1.15. That is v1's divergence again - at 32 proteins/step over
+2,315 groups, step 5,000 is ~69 visits per group. More steps will not help;
+more distinct TARGETS will. (2) So do not extend C further, and expect the
+1,500-step ladder to rank runs by how fast they start, not by where they end.
+(3) cosdiff still creeping down (0.76 -> 0.74): the anchors keep spreading.
+(4) tau drifts to 0.059 with NO bank, so v3g's 0.06 floor - chosen above the
+bank runs' 0.036 / 0.043 - would start to bind on a run this long. It is still
+above C at 1,500 (0.071), which is where v3g is read. (5) STILL NOT comparable
+to b32's 0.127 (blind, head regions); the blind eval is. (6) ~4.2 s/step, of
+which bwd 2.09 and select+pool 1.18 of the 1.45 forward - pair pooling
+dominates both directions. GPU peak 7.6 GB, RSS 5.2 GB, 0 surfaces sampled,
+69% RAM hits. `best.pt` is step 4,875.
 
 **Round 3 (2026-10-26), `bash src/slurm/v3_diag3.sh`: WRITTEN, NOT RUN.
 `train.py selftest` group [11] is new and has not run yet (no torch in
