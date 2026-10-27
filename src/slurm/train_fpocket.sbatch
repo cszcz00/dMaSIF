@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=12:00:00
-#SBATCH --output=train_fpocket_%j.log
+#SBATCH --output=logs/train_fpocket_%j.log
 # train.sbatch with the pocket regions taken from fpocket instead of the
 # pocket head (--region_source external). A preset: every train.sbatch
 # override still works, and this resumes itself the same way.

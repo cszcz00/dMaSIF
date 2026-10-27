@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=01:30:00
-#SBATCH --output=encoder_test_%j.log
+#SBATCH --output=logs/encoder_test_%j.log
 # Needs $WORK/encoder_test/items.tsv from (CPU venv):
 #   python src/test_encoder.py prepare --index datasets/dataset_v1/index.parquet --n 48 --out encoder_test/
 set -e

@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=01:00:00
-#SBATCH --output=build_%j.log
+#SBATCH --output=logs/build_%j.log
 set -e
 module load apptainer
 cd $WORK

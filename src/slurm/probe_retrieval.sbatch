@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=01:30:00
-#SBATCH --output=probe_retrieval_%j.log
+#SBATCH --output=logs/probe_retrieval_%j.log
 # Which ligand encoder pairs with our surface anchors? Two stages:
 #   1. dump   frozen anchors from a trained pocket head (GPU, one pass)
 #   2. probe  train each ligand arm on those anchors (CPU is enough)

@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=12:00:00
-#SBATCH --output=fetch_%j.log
+#SBATCH --output=logs/fetch_%j.log
 set -e
 source $HOME/venvs/plinder/bin/activate
 cd $WORK

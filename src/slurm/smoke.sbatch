@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=00:15:00
-#SBATCH --output=smoke_%j.log
+#SBATCH --output=logs/smoke_%j.log
 set -e
 module load apptainer
 cd $WORK

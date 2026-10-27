@@ -14,6 +14,11 @@ meta_*/
 /runs/
 /surfaces/
 /train_selftest/
+/logs/
+/tmp/
+/reports/
+/job_console/
+/job_console_tests/
 inspect*.txt
 *.log
 *.out

@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=00:30:00
-#SBATCH --output=head_ckpt_%j.log
+#SBATCH --output=logs/head_ckpt_%j.log
 # Train the pocket head and save ONLY the checkpoint, nothing else.
 #
 # Step 1 of apo_test.sbatch, split out so it can be queued on its own. That job

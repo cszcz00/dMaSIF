@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=01:30:00
-#SBATCH --output=region_test_%j.log
+#SBATCH --output=logs/region_test_%j.log
 # Region-selector comparison (anchors.py options 1-3) on ONE trained pocket head:
 #   1. train the head (pretrained start, pocket BCE, as in encoder_test.sbatch)
 #      and dump its probability maps for train + held-out items

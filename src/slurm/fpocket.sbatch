@@ -4,7 +4,7 @@
 #SBATCH --mem=8G
 #SBATCH --time=04:00:00
 #SBATCH --array=0-15
-#SBATCH --output=fpocket_%A_%a.log
+#SBATCH --output=logs/fpocket_%A_%a.log
 # fpocket on every receptor surface of items.tsv -> $POCKETS/<input_id>.npz
 # (src/external_pockets.py run). CPU only: no GPU, no KeOps. The container is
 # only for Biopython, which reads the receptor exactly as the surface does.

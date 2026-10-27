@@ -4,7 +4,7 @@
 #SBATCH --mem=8G
 #SBATCH --time=04:00:00
 #SBATCH --array=0-15
-#SBATCH --output=plip_%A_%a.log
+#SBATCH --output=logs/plip_%A_%a.log
 # PLIP interaction labels for every row of items.tsv -> $PLIP/<system_id>.npz
 # (src/plip_labels.py run). CPU only.
 #

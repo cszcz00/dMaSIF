@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=00:30:00
-#SBATCH --output=report_%j.log
+#SBATCH --output=logs/report_%j.log
 # The retrieval inspection's GPU half (src/retrieval_report.py dump): a
 # checkpoint -> anchors for a train and a val slice + every ligand's vector,
 # one .npz per --pocket_select. Nothing is scored here, so one dump serves

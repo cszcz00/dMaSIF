@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=00:30:00
-#SBATCH --output=eval_%j.log
+#SBATCH --output=logs/eval_%j.log
 # Validation metrics from saved checkpoints (`train.py eval`); nothing trains.
 #
 # Written to put runs/v1 on the SAME validation set as the second round of

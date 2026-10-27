@@ -5,7 +5,7 @@
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
 #SBATCH --array=0-15
-#SBATCH --output=cache_surfaces_%A_%a.log
+#SBATCH --output=logs/cache_surfaces_%A_%a.log
 # Prefill the surface cache src/train.py reads, as an array job.
 #
 # Optional: training fills the cache lazily, so this only moves work earlier.

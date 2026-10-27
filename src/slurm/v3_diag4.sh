@@ -60,7 +60,7 @@ submit() {   # job name, run name, then VAR=value overrides
     local job=$1 name=$2; shift 2
     env SKIP_SMOKE=1 STEPS=1500 CHEMO=0 BANK= EXTRA_LIG= LR_SCHEDULE=const WARMUP=0 \
         POOL_MODE=pairs ANCHOR_NORM=batch RUN=$WORK/runs/$name "$@" \
-        sbatch --job-name=$job --output=${job}_%j.log \
+        sbatch --job-name=$job --output=logs/${job}_%j.log \
         $WORK/src/slurm/train_v3.sbatch
 }
 # Both touch the k_neg path for the first time, so both keep the smoke: with

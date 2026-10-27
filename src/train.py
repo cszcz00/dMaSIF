@@ -1592,7 +1592,7 @@ def main():
                    help="subsample round-robin over target groups")
 
     p = sub.add_parser("selftest", help="planted signal; no data, no GPU, no KeOps")
-    p.add_argument("--tmp", default="train_selftest")
+    p.add_argument("--tmp", default="tmp/train_selftest")
     p.add_argument("--steps", type=int, default=180)
     p.add_argument("--batch", type=int, default=12)
     p.add_argument("--min_mrr", type=float, default=0.30)

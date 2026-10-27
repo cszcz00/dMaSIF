@@ -509,7 +509,7 @@ def main():
     p.add_argument("--tsv", default="", help="also write a machine-readable TSV")
 
     p = sub.add_parser("selftest", help="planted tree, no real data")
-    p.add_argument("--tmp", default="inventory_selftest")
+    p.add_argument("--tmp", default="tmp/inventory_selftest")
 
     a = ap.parse_args()
     {"report": report, "selftest": selftest}[a.cmd](a)

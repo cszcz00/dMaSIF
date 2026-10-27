@@ -1197,7 +1197,7 @@ def main():
     add_probe_args(p)
 
     p = sub.add_parser("selftest", help="planted signal; no data, no GPU")
-    p.add_argument("--tmp", default="probe_selftest")
+    p.add_argument("--tmp", default="tmp/probe_selftest")
     p.add_argument("--min_mrr", type=float, default=0.25)
     add_probe_args(p)
     # Cheap on purpose: this is a wiring check, not a benchmark. fp's 2048-wide

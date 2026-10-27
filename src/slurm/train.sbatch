@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=12:00:00
-#SBATCH --output=train_%j.log
+#SBATCH --output=logs/train_%j.log
 # Contrastive protein-ligand training (src/train.py). The real loop: both
 # encoders train, the loss is InfoNCE over max-over-anchor scores plus the
 # pocket BCE, and validation reports retrieval metrics every --eval_every.

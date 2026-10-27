@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=12:00:00
-#SBATCH --output=train_v3_%j.log
+#SBATCH --output=logs/train_v3_%j.log
 # v3: known-site pockets from fpocket, pooled pairwise. A preset over
 # train.sbatch, like archive/train_v2.sbatch: every value below is a default that the
 # submitting shell can override, the smoke + resume check runs first, and the

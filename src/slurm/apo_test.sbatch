@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
-#SBATCH --output=apo_test_%j.log
+#SBATCH --output=logs/apo_test_%j.log
 # Apo vs holo test of the protein encoder (src/apo_eval.py):
 #   1. train the pocket head once (pretrained start, as in region_test.sbatch) and
 #      save it - skipped when the checkpoint already exists

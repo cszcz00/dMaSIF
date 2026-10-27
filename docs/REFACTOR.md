@@ -173,6 +173,28 @@ Nine stale path references were updated across `train.sbatch`,
 `RESULTS.md` (five) and `DESIGN.md`'s code map. A repo-wide grep confirms no
 reference to the old paths remains.
 
+## Stage 7 — logs and scratch out of `$WORK` — DONE 2026-10-27
+
+`$WORK` had ~70 loose `.log` files (16 each from the `cache_surfaces`,
+`fpocket` and `plip` arrays alone) and three selftest scratch directories
+sitting beside the real ones.
+
+- All 18 `src/slurm/*.sbatch` now write `--output=logs/<name>_%j.log`, and
+  `v3_diag4.sh` passes `--output=logs/...` too. The archived ladders are left
+  as they ran, for the record.
+- The three selftest `--tmp` defaults move under `tmp/`:
+  `tmp/train_selftest`, `tmp/probe_selftest`, `tmp/inventory_selftest`. All
+  three `mkdir(parents=True)`, so nothing needs creating by hand. This also
+  ends the confusing collision between the `train_selftest/` scratch directory
+  and the new `src/train_selftest.py`.
+- `.gitignore` gains `logs/`, `tmp/`, `reports/` and the two `job_console*/`
+  directories.
+
+**`src/slurm/setup_dirs.sh` must be run once on the login node before the next
+job.** SLURM does not create an `--output` directory: with `logs/` missing a
+job is submitted and then fails with no output file explaining why. The script
+also prints the one-liner that sweeps the existing loose logs into `logs/`.
+
 ## Stage 6 — a `data/` directory (PROPOSED, not started)
 
 `$WORK` has ~16 top-level directories and the code is four of them. The user's
@@ -236,7 +258,14 @@ So:
   then means either rewriting the parquet/TSV columns by hand or teaching
   `receptor_inputs.plinder_receptor` a configurable data root.
 
-**Open question for the inventory to answer first: what is `feats/`?** It is
+**`feats/` is ANSWERED: it does not exist.** A directory listing of `$WORK`
+(2026-10-27) shows no `feats/`, so the `extract.py`-era surface cache is gone
+or was never built here. Nothing to migrate and nothing to delete; the
+paragraph below is kept only because `ids.py` and `labels.py` still describe
+that layout in their docstrings, which is now misleading and worth a later
+one-line fix.
+
+**(superseded) Open question for the inventory: what is `feats/`?** It is
 the `extract.py`-era surface cache (`feats/<tag>.npz`, per `ids.py` and
 `labels.py`), from before `SurfaceStore` and `surfaces/`. Nothing current
 writes it. If it is dead it should be deleted, not migrated, and it may be

@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
-#SBATCH --output=chemo_test_%j.log
+#SBATCH --output=logs/chemo_test_%j.log
 # Do the pharmacophore channels raise the pocket head's ceiling?
 #
 # Two arms on the SAME items, seed and step count, differing only in the conv's
