@@ -375,6 +375,45 @@ python src/retrieval_report.py report --dump reports/v3c_site_pairs_bn_topk.npz 
     --out reports/v3c_topk
 ```
 
+## Data inventory (`src/inventory.py`) - WRITTEN, selftest PASSES, never run on real data
+
+What is on disk, is it complete, is any of it stale. Read-only (parquet, .npz
+headers, history.json), so it is safe while jobs train, and numpy/pandas only -
+no torch, so it runs in the CPU venv. `python src/inventory.py report --items
+runs/v1/items.tsv`. Three things `du` and `ls` cannot answer:
+- **coverage**: a surface / pocket / PLIP file per row of an items.tsv, keyed
+  correctly per artefact (surfaces and pockets by `input_id`, PLIP by
+  `system_id`), with the missing ones named. A missing surface costs sampling
+  time; a missing pocket file silently drops that receptor's regions and
+  raises `fb`.
+- **staleness**, as an exact test rather than a date: `ligand_feats.npz` built
+  before the RemoveAllHs fix kept isotopic H / H2 / hydrides as GRAPH atoms,
+  so `n_heavy` disagrees with `diff(atom_ptr)`. Any mismatch means rebuild.
+  START HERE records `probe/` and `train_check/` as affected; this says which
+  files on disk actually are.
+- **runs**: every `runs/<name>/` summarised from history.json alone -
+  evaluations, last step, best val MRR and where, last cosdiff / tau / fb,
+  which checkpoints exist. The index of what each directory holds, which
+  otherwise lives only in this file's prose.
+`selftest` (planted tree, numpy only) PASSES: 13 checks over tree counts, the
+pocket subdirectory and its failure log, per-artefact coverage keys, the
+staleness test on a planted bad file, run summaries, and the degenerate cases
+(a NaN-only history, an unreadable history, absent directories).
+
+## Refactor plan - `docs/REFACTOR.md`, NOTHING DONE YET
+
+13,382 lines over 24 modules, 26 slurm files, and this file at 1,591 lines.
+Five stages ordered by risk: (1) split this file into STATUS / RESULTS / DATA /
+DESIGN; (2) extract `train.py`'s selftest, which is 990 of its 2,436 lines;
+(3) move the shared mask / sampling / metric functions out of
+`probe_retrieval.py`, which `train.py` imports from today, into `masks.py` /
+`sampling.py` / `metrics.py`; (4) split the rest of `train.py` into model /
+batching / losses / evaluate; (5) archive the spent `v3_diag*.sh` and
+`train_v2.sbatch`. The rule for every stage: move code VERBATIM, change
+imports only, run the affected selftests before and after. Stage 3 is the one
+most likely to break something, because those are the functions that keep the
+probe and the loop from drifting apart.
+
 ## Companion ligands and the `n_ligand_chains == 1` restriction (`src/companion_funnel.py`) - WRITTEN, NOT RUN
 
 `configs/datasets/dataset_v1.yaml` keeps a system only if it has exactly ONE
