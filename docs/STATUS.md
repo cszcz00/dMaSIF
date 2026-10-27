@@ -996,6 +996,60 @@ too. (6) `site` 0.543 in the blind eval is the ORIGINAL selector-style metric
 (argmax over the scored anchors), not the decoy rate - the two are not
 comparable, and site_rate picks by `--pocket_select`.
 
+**`v3f` = C + 7 site decoys + lam_site 1 (2026-10-27, 1,500 steps): THE DECOY
+LOSS WORKS AT ITS OWN JOB AND COSTS THE MAIN ONE.** Smoke passed including
+the resume, so the decoy path is GPU-proven.
+
+| run | mrr 500-875 | mrr 1000-1500 | top10 | site | cosdiff | s/step |
+|---|---|---|---|---|---|---|
+| C | 0.083 | **0.114** | 0.22 | 0.605 (eval, untrained) | 0.82 | 4.2 |
+| v3f | 0.076 | 0.093 | 0.195 | **0.794** | **0.78** | 6.3 |
+
+Read: (1) **Within-protein discrimination rose a lot: site 0.605 -> 0.794**
+(chance ~1/8), so `lam_site` on the decoys does exactly what it was built to
+do - the ligand now scores its own pocket over the receptor's others. (2) **But
+cross-protein retrieval fell, mrr 0.114 -> 0.093**, 0.021 down and just
+outside the +-0.015 noise, with top10 0.22 -> 0.195 and train nce 2.29 ->
+2.52. One shared encoder is now serving two objectives and the cross-protein
+one lost. (3) cosdiff is BETTER (0.782 against 0.820): the decoys spread the
+anchors more. (4) **The decisive test is still the blind eval**, because
+picking the right pocket among the receptor's others IS what blind screening
+needs - and that is the skill that improved. (5) Cost: 16 regions pooled per
+protein (1 site + 7 decoys + 8 k_neg patches) against C's 9, so select+pool
+1.15 -> 2.65 s and ~6.3 s/step against 4.2.
+
+**`v3g` = v3e + `--tau_min 0.06` (1,500 steps): NULL, exactly as predicted.**
+tau goes 0.069 -> 0.073 and never reaches the floor, so the floor never binds,
+and every number matches v3e to the third decimal (nce 7.297 both, cosdiff
+0.985 / 0.986, mrr 0.017 / 0.015, AP 0.526 / 0.525, best 0.0259 / 0.0257).
+**So the bank's collapse has nothing to do with the temperature**, the
+hypothesis `--tau_min` was built for is dead, and the flag survives only as a
+cheap guard worth leaving at its 0.01 default. The detached-bank /
+BatchNorm-mode suspects in the v3e entry are untouched by this.
+
+**`--k_neg` is now a real throughput lever.** `pool_region_vectors` runs on
+EVERY region, and in site mode only the site is ever scored across proteins:
+the 8 k_neg patches are label -1 (so `site_loss` ignores them), never
+`usable`, and exist solely to feed the BatchNorm's statistics. With decoys
+present they are redundant even for that - the 7 decoys already give
+BatchNorm 8 anchors per protein. `--k_neg 0` is safe (`negative_regions`
+returns [] for k <= 0) and would cut v3f from 16 regions to 8, recovering
+most of its 1.5x slowdown; for C it cuts 9 -> 1, though that leaves BatchNorm
+only 32 vectors per step, which is why `v3i` below measures it rather than
+assuming. Throughput matters now precisely because `v3c+` says the ceiling is
+target diversity, so more data per GPU-hour is the point.
+
+Round 4, `bash src/slurm/v3_diag4.sh` (two runs) plus three cheap evals and
+the retrieval dumps - the EVALS FIRST, they decide whether decoys stay:
+```
+# the decoy verdict, matched at 1,500 steps, and C's plateau scored blind
+CKPTS="$WORK/runs/v3c_1500/best.pt $WORK/runs/v3f_pairs_bn_decoys/best.pt \
+$WORK/runs/v3c_site_pairs_bn/best.pt" \
+EVAL_ARGS="--use_ckpt_split --pocket_select topk --pocket_rank drug" \
+    sbatch src/slurm/eval.sbatch
+bash src/slurm/v3_diag4.sh
+```
+
 Final temperatures (2026-10-27, that readout; all started at 0.07, cap 0.01):
 
 | run | step | tau |
