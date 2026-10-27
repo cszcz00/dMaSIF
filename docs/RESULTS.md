@@ -241,6 +241,13 @@ non-default `pool_mode shells` / `mean_std` and `anchor_norm batch` paths.
 
 ## First training run (`out/runs/v1`, train.sbatch on `ac72d67`, alphagpu52)
 
+**Correction (2026-10-27, from `inventory.py report`): v1 was RESUBMITTED and
+FINISHED.** Its history holds 41 evaluations, last step 20,000, best val MRR
+**0.117 at step 18,500** - so it was still improving near the end, not stalled
+at the 15,642 the text below describes. That text is the FIRST job only. v1
+validated on the row-uniform draw, so 0.117 is not comparable with the
+balanced-val numbers of the later rounds.
+
 Defaults: arm gnn, pool mean, anchor_norm none, batch 8, lr 3e-4 constant (no
 schedule), lam_pocket 1, lam_site 0, ball R8 shift 2, head
 `head_pretrained_300.pt` (118/118 tensors). 18,639 train / 400 val rows
