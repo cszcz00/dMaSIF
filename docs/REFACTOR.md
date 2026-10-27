@@ -142,7 +142,7 @@ Open question for this stage: `src/` is a flat directory on `sys.path` via
 every sbatch's `python src/<x>.py` entry point. **Not worth it** unless
 something else forces it.
 
-## Stage 5 — `src/slurm/` hygiene (low risk)
+## Stage 5 — `src/slurm/` hygiene — DONE 2026-10-27
 
 26 files, including four `v3_diag*.sh` that are now spent history and three
 `train_*.sbatch` presets layered over `train.sbatch`.
@@ -155,6 +155,23 @@ something else forces it.
 - Leave `build*.sbatch`, `fetch.sbatch`, `fpocket.sbatch`, `plip.sbatch`,
   `cache_surfaces.sbatch`, `eval.sbatch`, `report.sbatch` alone: each is the
   only way to rebuild one artefact.
+
+Landed: the four moved with `git mv` (history preserved) into
+`src/slurm/archive/`, which has a README saying what each ran and why it is
+spent. `src/slurm/` is 26 -> 22 files. Every archived script still RUNS from
+its new location — each uses absolute `$WORK/src/slurm/...` paths internally,
+which was checked, not assumed.
+
+Two scripts I had listed as candidates and kept instead: `smoke.sbatch` is a
+container sanity check (numpy / torch / pykeops / pyg versions), not an
+experiment; `region_test.sbatch` is superseded as a selector sweep but is
+still referenced by `apo_test.sbatch` for how it trains the head, and is the
+only way to regenerate the probability maps the sweep scores.
+
+Nine stale path references were updated across `train.sbatch`,
+`train_v3.sbatch`, the archived `train_v2.sbatch`'s own usage examples,
+`RESULTS.md` (five) and `DESIGN.md`'s code map. A repo-wide grep confirms no
+reference to the old paths remains.
 
 ## Not planned, and why
 

@@ -337,10 +337,11 @@ What it says:
   val was dominated by a few big, easy targets. Every earlier val number in
   this file was flattered by that.
 
-## v2 (`src/slurm/train_v2.sbatch`) - WRITTEN, NOT YET RUN
+## v2 (`src/slurm/archive/train_v2.sbatch`) - WRITTEN, NOT YET RUN
 
 Four levers, all flags defaulting OFF so every earlier run reproduces, and all
-switched on by `train_v2.sbatch` (a preset over `train.sbatch`):
+switched on by `train_v2.sbatch` (a preset over `train.sbatch`; archived
+2026-10-27, see `src/slurm/archive/README.md`):
 
 1. **Negatives.** `--bank N`: `ProteinBank` keeps the POOLED (pre-projection)
    anchors of the last N training proteins, detached, and re-projects them
@@ -498,7 +499,7 @@ histogram, so every pocket points the same way, with anchor_norm none.
 Unproven: v3 changed four things at once against b32 (site pockets, pairs,
 chemo, bank / extra ligands / cosine, the last never run on a GPU).
 
-Diagnostic ladder, `bash src/slurm/v3_diag.sh` (three 1,500-step runs, one
+Diagnostic ladder, `bash src/slurm/archive/v3_diag.sh` (three 1,500-step runs, one
 change each on b32's setup - batch 32, const lr, no chemo / bank / extras, the
 same val rows): A `v3a_site_mean` (site pockets, mean pool), B
 `v3b_site_pairs` (+ pairs), C `v3c_site_pairs_bn` (+ anchor_norm batch). Read
@@ -523,7 +524,7 @@ steps b32 (blind, head regions) was 0.087 at 1,250: A matches it (0.088), C is
 ahead (0.115); known-site + mean pooling does NOT beat the head's top-8 max.
 ~2.5 s/step (A), ~3.3 s/step (B, C).
 
-Round 2, `bash src/slurm/v3_diag2.sh`, each one change from C: `v3d` + chemo,
+Round 2, `bash src/slurm/archive/v3_diag2.sh`, each one change from C: `v3d` + chemo,
 `v3e` + bank 2048 / 1024 extra ligands (judge by mrr / cosdiff, its nce is over
 ~2,000 candidates), `v3c+` C resumed 1,500 -> 5,000 steps (where it
 plateaus). Results: ALL THREE DONE (below). **`v3e` REPRODUCES v3's failure:
@@ -634,7 +635,7 @@ which bwd 2.09 and select+pool 1.18 of the 1.45 forward - pair pooling
 dominates both directions. GPU peak 7.6 GB, RSS 5.2 GB, 0 surfaces sampled,
 69% RAM hits. `best.pt` is step 4,875.
 
-**Round 3 (2026-10-26), `bash src/slurm/v3_diag3.sh`: WRITTEN, NOT RUN.
+**Round 3 (2026-10-26), `bash src/slurm/archive/v3_diag3.sh`: WRITTEN, NOT RUN.
 `train.py selftest` group [11] is new and has not run yet (no torch in
 Claude's container) - run it first.** Motivation: the bank's ~2,000 candidates
 per row pass the masks (UniProt group, same ligand, Tanimoto >= 0.8) for

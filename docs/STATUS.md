@@ -261,6 +261,13 @@ imports only, run the affected selftests before and after. Stage 3 is the one
 most likely to break something, because those are the functions that keep the
 probe and the loop from drifting apart.
 
+**Stages 1, 2 and 5 are DONE** (2026-10-27): this file split four ways,
+`train.py` 2,437 -> 1,612 lines with its selftest in `src/train_selftest.py`,
+and the spent ladders in `src/slurm/archive/`. **One check outstanding: run
+`python src/train.py selftest` in the container once** - it is verified only
+statically, and it is also the first run of group [11]. Stages 3 and 4 are
+deliberately held until v3h / v3i are in.
+
 ## Companion ligands and the `n_ligand_chains == 1` restriction (`src/companion_funnel.py`) - WRITTEN, NOT RUN
 
 `configs/datasets/dataset_v1.yaml` keeps a system only if it has exactly ONE

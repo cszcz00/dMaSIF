@@ -32,8 +32,11 @@
 # few evaluations, not the best one.
 #
 # Leave-one-out ablations, one GPU each, when the full run looks worth it:
-#   RUN=$WORK/runs/v2_nobank BANK=0 EXTRA_LIG=0 sbatch src/slurm/train_v2.sbatch
-#   RUN=$WORK/runs/v2_nodesc DESC_DIMS=0 sbatch src/slurm/train_v2.sbatch
+#   RUN=$WORK/runs/v2_nobank BANK=0 EXTRA_LIG=0 sbatch src/slurm/archive/train_v2.sbatch
+#   RUN=$WORK/runs/v2_nodesc DESC_DIMS=0 sbatch src/slurm/archive/train_v2.sbatch
+# ARCHIVED (refactor stage 5): the bank and extra ligands this switches on are
+# known to collapse training (v3e / v3g in docs/RESULTS.md). Do not run as-is;
+# DESC_DIMS=32 on train_v3.sbatch isolates the one lever never tested alone.
 export RUN=${RUN:-$WORK/runs/v2}
 export DATA=${DATA:-$WORK/runs/v1}
 export BATCH=${BATCH:-32}

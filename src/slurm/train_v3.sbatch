@@ -6,7 +6,7 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=train_v3_%j.log
 # v3: known-site pockets from fpocket, pooled pairwise. A preset over
-# train.sbatch, like train_v2.sbatch: every value below is a default that the
+# train.sbatch, like archive/train_v2.sbatch: every value below is a default that the
 # submitting shell can override, the smoke + resume check runs first, and the
 # job resumes itself (resubmit the same command, SKIP_SMOKE=1 to save time).
 #

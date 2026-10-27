@@ -52,7 +52,8 @@
 #   TRAIN_ARGS (anything else passed through verbatim, main run only),
 #   REGION_ARGS (passed to the smoke AND the main run; where
 #     src/slurm/train_fpocket.sbatch puts --region_source external etc.).
-# src/slurm/train_v2.sbatch is this file with the v2 levers switched on.
+# src/slurm/archive/train_v2.sbatch is this file with the v2 levers switched
+# on. Archived: its bank + extra ligands collapse training (see RESULTS.md).
 # A resumed run keeps its checkpoint's split, so VAL_BALANCE only matters for
 # a NEW run directory; FREEZE must match the checkpoint or train.py refuses.
 #

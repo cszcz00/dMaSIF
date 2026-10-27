@@ -528,4 +528,4 @@ before the real run.
 | `test_encoder.py` | prepare / smoke / overfit; `--dump` maps, `--save_ckpt`, `load_checkpoint()` |
 | `region_sweep.py` | offline selector comparison on dumped maps |
 | `apo_pairs.py`, `apo_eval.py` | apo / AlphaFold vs holo test |
-| `slurm/` | `train`, `cache_surfaces`, `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `fpocket` (+ `build_fpocket.sh`), `train_fpocket`, `train_v3`, `v3_diag.sh`, `v3_diag2.sh`, `plip` (+ `setup_plip.sh`), build / fetch / smoke jobs; `dmasif.def` container |
+| `slurm/` | `train` (base) + `train_v3` (the C preset) + `train_fpocket`; `eval`, `report`, `v3_diag4.sh`; `cache_surfaces`, `fpocket` (+ `build_fpocket.sh`), `plip` (+ `setup_plip.sh`), build / fetch jobs; `encoder_test`, `region_test`, `apo_test`, `probe_retrieval`, `chemo_test`, `head_ckpt`, `smoke`; `dmasif.def` container; `archive/` spent ladders (see its README) |
