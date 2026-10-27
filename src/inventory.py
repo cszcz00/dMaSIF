@@ -74,20 +74,30 @@ def human(n):
 
 
 def dir_stats(path, pattern="*"):
-    """-> (n_files, total_bytes, newest_mtime) without following into subdirs."""
+    """-> (n_entries, total_bytes, newest_mtime, n_dirs) at the top level only.
+
+    `n_dirs` matters: a tree of per-system DIRECTORIES (`systems/`) would
+    otherwise report its 307k entries at 0 B, because only files have a size,
+    and read as empty when it is the biggest inode consumer here. Recursing to
+    size it would walk hundreds of thousands of directories, so the report says
+    "dirs" and leaves measuring to `du`.
+    """
     path = Path(path)
     if not path.is_dir():
         return None
-    n, size, newest = 0, 0, 0.0
+    n, size, newest, dirs = 0, 0, 0.0, 0
     for p in path.glob(pattern):
         try:
             st = p.stat()
         except OSError:
             continue
         n += 1
-        size += st.st_size if p.is_file() else 0
+        if p.is_dir():
+            dirs += 1
+        else:
+            size += st.st_size
         newest = max(newest, st.st_mtime)
-    return n, size, newest
+    return n, size, newest, dirs
 
 
 def read_items(path):
@@ -184,7 +194,8 @@ def collect(a):
         inv["trees"].append({"dir": name, "what": what,
                              "present": st is not None,
                              "n": None if st is None else st[0],
-                             "bytes": None if st is None else st[1]})
+                             "bytes": None if st is None else st[1],
+                             "dirs": None if st is None else st[3]})
     # data/pockets/ holds one subdirectory per finder
     pk = root / "data" / "pockets"
     if pk.is_dir():
@@ -195,7 +206,7 @@ def collect(a):
             inv["trees"].append({"dir": f"data/pockets/{sub.name}",
                                  "what": "alpha spheres per receptor, by pocket",
                                  "present": True, "n": st[0], "bytes": st[1],
-                                 "failed": failed})
+                                 "dirs": st[3], "failed": failed})
     else:
         inv["trees"].append({"dir": "data/pockets", "what": "fpocket output",
                              "present": False, "n": None, "bytes": None})
@@ -303,7 +314,13 @@ def report(a):
             print(f"  {t['dir']:<22s} ABSENT          {t['what']}")
             continue
         extra = f"  ({t['failed']} failed)" if t.get("failed") else ""
-        print(f"  {t['dir']:<22s} {t['n']:>8,} files {human(t['bytes']):>9s}"
+        if t.get("dirs"):
+            # a tree of directories: the byte total is meaningless, say so
+            size = f"{t['dirs']:>7,} dirs" if t["dirs"] == t["n"] else \
+                   f"{human(t['bytes'])} +{t['dirs']:,}d"
+        else:
+            size = f"{human(t['bytes']):>9s}"
+        print(f"  {t['dir']:<22s} {t['n']:>8,} entries {size:>14s}"
               f"{extra}   {t['what']}")
 
     print("\n== manifests and datasets ==")
@@ -440,6 +457,12 @@ def selftest(a):
           trees["data/surfaces"]["n"] == 2 and trees["data/plip"]["n"] == 1
           and trees["structures"]["present"] is False,
           f"surfaces {trees['data/surfaces']['n']}, plip {trees['data/plip']['n']}")
+    (tmp / "systems" / "sysA").mkdir(parents=True)
+    (tmp / "systems" / "sysB").mkdir()
+    t2 = {t["dir"]: t for t in collect(args)["trees"]}["systems"]
+    check("a tree of DIRECTORIES is counted as dirs, not as 0-byte files",
+          t2["n"] == 2 and t2["dirs"] == 2 and t2["bytes"] == 0,
+          f"{t2['n']} entries, {t2['dirs']} dirs")
     check("finds the pocket subdirectory and counts its failures",
           trees["data/pockets/fpocket"]["n"] == 1
           and trees["data/pockets/fpocket"]["failed"] == 1)
