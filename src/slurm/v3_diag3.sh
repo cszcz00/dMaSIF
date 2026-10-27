@@ -29,12 +29,15 @@
 #        temperature goes with ~2,000 candidates (if v3e ran before the
 #        column existed, its final value is in last.pt: docs/STATUS.md).
 #
-# Baselines from checkpoints that already exist (container, any node):
+# Baselines from checkpoints that already exist (container, any node). C's
+# own directory is resumed to 5,000 steps by v3c+ (v3_diag2.sh), which
+# overwrites its checkpoints, so these read the 1,500-step copy:
+#   cp -r runs/v3c_site_pairs_bn runs/v3c_1500        # once, before v3c+
 #   # C's own decoy `site` rate, never trained on decoys:
-#   CKPTS="$WORK/runs/v3c_site_pairs_bn/best.pt" EVAL_ARGS="--use_ckpt_split \
+#   CKPTS="$WORK/runs/v3c_1500/best.pt" EVAL_ARGS="--use_ckpt_split \
 #       --pocket_select site --n_decoys 7 --pocket_rank drug" sbatch src/slurm/eval.sbatch
 #   # blind, for C and (when done) v3f:
-#   CKPTS="$WORK/runs/v3c_site_pairs_bn/best.pt $WORK/runs/v3f_pairs_bn_decoys/best.pt" \
+#   CKPTS="$WORK/runs/v3c_1500/best.pt $WORK/runs/v3f_pairs_bn_decoys/best.pt" \
 #       EVAL_ARGS="--use_ckpt_split --pocket_select topk --pocket_rank drug" \
 #       sbatch src/slurm/eval.sbatch
 #
