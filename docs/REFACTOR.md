@@ -50,7 +50,7 @@ broke were fixed: three "results recorded in this file" pointers now name
 unseen" paragraph was rewritten, the Training loop heading in DESIGN now points
 at `RESULTS.md`, and one "the v2 section below" became "above".
 
-## Stage 2 — extract the self-tests (mechanical, low risk)
+## Stage 2 — extract the self-tests — DONE 2026-10-27
 
 `src/train.py` is 2,436 lines, of which **1,101 (45%) is `selftest()` plus
 `main()`'s argparse**. The self-test is ~990 lines of pure test code imported
@@ -66,7 +66,21 @@ test groups become findable.
 healthy, a self-test beside the code it tests. train.py is the outlier at 41%,
 and only because it accumulated eleven groups covering the whole pipeline.
 
-Verify: `train.py selftest` prints the same group list and passes.
+Landed: `train.py` 2,437 -> 1,612 lines, `src/train_selftest.py` 891.
+`selftest()` plus its two fixtures (`_fake_sdf`, `_FakeLigands`, used nowhere
+else) moved; `train.py selftest` delegates from inside the function so there
+is no import cycle.
+
+Verified mechanically, since this container has no torch and cannot run it:
+the moved block diffs BYTE-IDENTICAL against `git show HEAD:src/train.py`
+lines 1336-2171; all ten names `train_selftest` imports exist as top-level
+definitions in `train.py`; no reference to the moved fixtures is left behind;
+`main()` still dispatches `selftest`; and the CLI helpers stayed put, so
+`retrieval_report.py`'s three import sites still resolve. Both modules compile.
+
+**Still to do by hand: run `python src/train.py selftest` in the container
+once.** It should print the same eleven groups and pass. That is the one check
+no static analysis covers.
 
 ## Stage 3 — a real shared core (medium risk, highest clarity gain)
 
