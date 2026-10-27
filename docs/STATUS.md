@@ -725,7 +725,62 @@ ahead (0.115); known-site + mean pooling does NOT beat the head's top-8 max.
 Round 2, `bash src/slurm/v3_diag2.sh`, each one change from C: `v3d` + chemo,
 `v3e` + bank 2048 / 1024 extra ligands (judge by mrr / cosdiff, its nce is over
 ~2,000 candidates), `v3c+` C resumed 1,500 -> 5,000 steps (where it
-plateaus). Results: `v3c+` and `v3d` DONE (below); `v3e` still PENDING.
+plateaus). Results: ALL THREE DONE (below). **`v3e` REPRODUCES v3's failure:
+the bank + extra ligands is the culprit.**
+
+**`v3e` = C + bank 2048 / 1024 extra ligands (2026-10-27, 1,500 steps): DEAD
+AT CHANCE, and it rules out the temperature hypothesis that `--tau_min` was
+built for.**
+
+| step | mrr | nce | cosdiff | tau | AUROC / AP | pock |
+|---|---|---|---|---|---|---|
+| 0 | 0.017 | - | 0.867 | 0.070 | 0.919 / 0.464 | - |
+| 125 | 0.018 | 6.918 | **0.979** | 0.069 | 0.919 / 0.486 | 0.631 |
+| 750 | 0.026 | 7.310 | 0.982 | 0.071 | 0.926 / 0.502 | 0.552 |
+| 1,500 | 0.015 | 7.297 | 0.986 | **0.073** | 0.928 / 0.525 | 0.533 |
+
+mrr over 1000-1500 means 0.019 against chance 0.017; best 0.0257. Read:
+
+1. **The contrastive loss learns NOTHING, exactly.** Symmetric InfoNCE over
+   32 + 2048 protein candidates and 32 + 1024 ligand candidates has chance
+   (ln 2080 + ln 1056) / 2 = **7.3012**, and nce sits at 7.297-7.314 from step
+   250 to the end. Not "high": precisely its random value. (Step 125's 6.918
+   is the mean over the bank's 64-step fill.)
+2. **Collapse inside 125 steps**: cosdiff 0.867 -> 0.979 by the first
+   evaluation, then 0.986. Every protein's anchor points the same way, so
+   every score is the same and there is no gradient to escape with. v3 showed
+   the same 0.83 -> 0.98-0.999.
+3. **Not a plumbing bug.** The pocket BCE falls 0.631 -> 0.533 and AUROC / AP
+   rise 0.919 / 0.464 -> 0.928 / 0.525, so gradients flow and the encoder
+   trains - through the head, not the contrastive term. fb 0.058, site found
+   94%, 0 surfaces sampled: the data path is fine.
+4. **The temperature hypothesis is WRONG.** tau goes 0.070 -> 0.073 - it does
+   not sharpen at all, it drifts UP while the model sits at chance. So the
+   "low tau concentrates the gradient on false negatives" story does not
+   describe this failure, and v2/v3's eventual 0.036 / 0.043 must come later
+   or from their other changes. **`v3g` (C + bank + `--tau_min 0.06`) is
+   therefore a NULL experiment as designed**: its floor is BELOW the 0.069-
+   0.073 tau actually reaches here, so it never binds and v3g should just
+   reproduce v3e.
+
+Leading hypothesis now, UNTESTED: the bank's anchors are detached
+(`ProteinBank.anchors` runs under `no_grad`), so on the ligand -> protein side
+2,048 of 2,080 candidates push only the LIGAND encoder, away from 2,048 fixed
+points sampled from the whole protein manifold, while the protein side still
+sees only 31 negatives. A 64x one-sided repulsion with one positive to balance
+it. Second suspect: `pool_norm` runs in EVAL mode for the bank (running
+statistics) and TRAIN mode for the live batch, and the two disagree most
+during the first ~100 steps, which is exactly when the collapse happens.
+
+Cheap tests if the bank is ever wanted (none run): `BANK=2048 EXTRA_LIG=` and
+`BANK= EXTRA_LIG=1024` separately, to see which half does it; and
+`BANK=2048 ANCHOR_NORM=none` for the BatchNorm interaction.
+
+**But the strategic reading is to drop the bank.** It exists to supply more
+negatives, and `v3c+` showed C's ceiling is MEMORISATION (val mrr flat while
+train nce falls, ~69 visits per target group), not a shortage of negatives.
+More distinct TARGETS is the lever; more negatives is a solution to a problem
+we do not have. C without the bank stands as the best configuration.
 
 **`v3d` = C + chemo (2026-10-27, 1,500 steps): CHEMO IS NOT THE CULPRIT, AND
 CHEMO DOES NOT HELP AT SCALE.** Window means against C on the same 400 rows:
