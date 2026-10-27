@@ -76,7 +76,7 @@ import torch
 # what region_sweep.py and every earlier result used. train.py --gpu_neighbors
 # points it at the GPU: select_regions moves the surface to the CPU, so on a
 # training run this cdist was an O(N^2) CPU job on ~30k points every time a
-# surface left the RAM cache, which was 88% of loads in runs/v1. The lists come
+# surface left the RAM cache, which was 88% of loads in out/runs/v1. The lists come
 # back on the CPU either way, so nothing downstream changes. The GPU path takes
 # exact distances (no matmul shortcut), so a list can differ from the CPU one
 # only by float rounding at the radius boundary; the CPU path is untouched.

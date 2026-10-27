@@ -9,5 +9,5 @@
 set -e
 source $HOME/venvs/plinder/bin/activate
 cd $WORK
-python src/fetch_structures.py --receptors meta/receptors.txt --out structures/ \
-    --manifest meta/manifest.parquet --systems_out systems/ --workers 8
+python src/fetch_structures.py --receptors data/meta/receptors.txt --out structures/ \
+    --manifest data/meta/manifest.parquet --systems_out systems/ --workers 8

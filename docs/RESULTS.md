@@ -193,7 +193,7 @@ unknown.** What stages 1-4 showed, fixed in the commit after this note:
   keeps isotopic H (`[2H]`, deuterated ligands), H2 and hydrides, so those H
   were graph nodes and ECFP atoms. Now `RemoveAllHs`; an all-H molecule is
   flagged failed. **Any `ligand_feats.npz` built before this (`probe/`,
-  `train_check/`) is stale; `runs/v1/ligand_feats.npz` must be built after.**
+  `train_check/`) is stale; `out/runs/v1/ligand_feats.npz` must be built after.**
 - Cosmetic: a requires_grad scalar warning in the selftest print, numpy-2
   `np.int64(1)` reprs in `prepare`'s group sizes and `np.str_` in a warning.
 - Not a bug: the selftest's val MRR peaks at step 60 (0.983) and slides to
@@ -239,7 +239,7 @@ Still **never run on a GPU**: `train.py eval`, `src/slurm/cache_surfaces.sbatch`
 as a job (the surfaces were all on disk by the main run - "0 sampled"), and the
 non-default `pool_mode shells` / `mean_std` and `anchor_norm batch` paths.
 
-## First training run (`runs/v1`, train.sbatch on `ac72d67`, alphagpu52)
+## First training run (`out/runs/v1`, train.sbatch on `ac72d67`, alphagpu52)
 
 Defaults: arm gnn, pool mean, anchor_norm none, batch 8, lr 3e-4 constant (no
 schedule), lam_pocket 1, lam_site 0, ball R8 shift 2, head
@@ -259,7 +259,7 @@ schedule), lam_pocket 1, lam_site 0, ball R8 shift 2, head
 | 15,000 | 1.04 | 0.54 | 0.095 | 0.017 | 0.050 | 0.168 | 0.69 | 0.964 | 0.580 | 0.062 | 0.677 |
 | 15,500 | 0.96 | 0.54 | 0.092 | 0.017 | 0.043 | 0.185 | 0.69 | 0.964 | 0.592 | 0.062 | 0.711 |
 
-Full curve: `runs/v1/history.json`.
+Full curve: `out/runs/v1/history.json`.
 
 What it says:
 - **cosdiff moved: 0.986 -> ~0.70, still falling.** The collapse the whole
@@ -369,7 +369,7 @@ switched on by `train_v2.sbatch` (a preset over `train.sbatch`; archived
    function of the step alone, so resumes need no state. v2: cosine over 6000,
    warmup 200.
 
-**RESULT (`runs/v2`, log `train_v2_141204.log`, recovered 2026-10-27 - it had
+**RESULT (`out/runs/v2`, log `train_v2_141204.log`, recovered 2026-10-27 - it had
 been run all along and never recorded): DEAD AT CHANCE, and it is the second
 independent proof that THE BANK is what kills training.** 4,884 of 6,000 steps
 (hit `--max_hours`), ~7.5 s/step, GPU peak 13.7 GB.
@@ -415,7 +415,7 @@ Not tested anywhere, and the one v2 lever that never got a fair trial: the
 **descriptor branch** (`--desc_dims 32`). It rode along with the bank that
 broke everything. `DESC_DIMS=32` on `train_v3.sbatch` would isolate it.
 
-Bar: runs/b32's 0.127 MRR at 76k-92k proteins seen on the balanced val set;
+Bar: out/runs/b32's 0.127 MRR at 76k-92k proteins seen on the balanced val set;
 appreciable = ~0.20. Leave-one-out ablations are in the sbatch header.
 `train.py selftest` PASSED on the login node with [8] (2026-10-19).
 Untested on a GPU: everything above. `train.py selftest` [8] covers the
@@ -493,9 +493,9 @@ bash src/slurm/build_fpocket.sh                      # once
 EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
 $EX src/pair_pool.py && $EX src/train.py selftest    # [9], [10] new
 sbatch src/slurm/fpocket.sbatch
-python src/external_pockets.py score --items runs/v1/items.tsv \
-    --surface_cache surfaces --pockets pockets/fpocket --n 1000 \
-    --out pockets/fpocket/score.tsv               # read the site table: found
+python src/external_pockets.py score --items out/runs/v1/items.tsv \
+    --surface_cache data/surfaces --pockets data/pockets/fpocket --n 1000 \
+    --out data/pockets/fpocket/score.tsv               # read the site table: found
 sbatch src/slurm/train_v3.sbatch
 CKPTS="$WORK/runs/v3/best.pt" \
     EVAL_ARGS="--use_ckpt_split --pocket_select topk --pocket_rank drug" \
@@ -530,7 +530,7 @@ though not on the same proteins and dcc uses plain centroids of irregular
 pockets here, so dcc is harsher for fpocket. The blind eval therefore passes
 `--pocket_rank drug`; --k_pos 16 is the obvious next lever if blind lags.
 
-**runs/v3 (2026-10-23): FAILED TO LEARN, cancelled after step 4,250/6,000
+**out/runs/v3 (2026-10-23): FAILED TO LEARN, cancelled after step 4,250/6,000
 (its last.pt is at 4,250).**
 The plumbing worked - site found for 94% of rows (fb 0.058 as predicted), 0
 missing files, GPU peak 7.7 GB, RSS 5.2 GB, ~4.1 s per 32-protein step (~3x
@@ -716,7 +716,7 @@ for p in sys.argv[1:]:
 Baselines and the blind comparison (C's decoy `site` rate, then C vs v3f
 with topk / drug) are in the script's header.
 
-**C's two baseline evals (2026-10-27, `runs/v3c_1500/best.pt`, which is step
+**C's two baseline evals (2026-10-27, `out/runs/v3c_1500/best.pt`, which is step
 1,125 - C's best val MRR inside its first 1,500 steps, 0.127, a noise peak
 over the 0.114 window mean). Same 400 balanced val rows both times:**
 
@@ -821,15 +821,15 @@ No run reached the cap. Every run without a bank stayed within 0.064-0.076;
 only the two with a bank sharpened, to about half the start. So the bank does
 drive the temperature down, but not to an extreme, and v3g's floor is 0.06
 (above both bank runs, below every run that learned) rather than 0.05, which
-would barely have bound. `runs/v2` exists at 4,884 steps although the v2
+would barely have bound. `out/runs/v2` exists at 4,884 steps although the v2
 section ABOVE says not run: its results are not recorded here and are the
 key datum (bank on the head's regions, no site pockets or pairs) - get its
-log / history.json. `runs/v3c_1500` is the copy of C at 1,500 steps; C itself
+log / history.json. `out/runs/v3c_1500` is the copy of C at 1,500 steps; C itself
 was still at 1,500, so v3c+ had not run when it was made. Not built: soft-weighted or
 debiased InfoNCE, property-matched decoy ligands, a false-negative exposure
 count.
 
-v3's log is KNOWN-SITE retrieval and is not comparable to runs/b32 (blind,
+v3's log is KNOWN-SITE retrieval and is not comparable to out/runs/b32 (blind,
 head regions); the blind eval is. Ablations in the sbatch header (pool
 mean / shells, no chemo, no bank, ball shape). v3 also switches on v2's bank
 and extra ligands and the cosine schedule; if v2 has still not run on a GPU,

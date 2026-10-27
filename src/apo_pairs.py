@@ -30,8 +30,8 @@ appears once with all its set names in `sets`.
 
 Example (CPU venv):
     python src/apo_pairs.py --links $PLINDER_DIR/links \\
-        --index datasets/dataset_v1/index.parquet \\
-        --exclude encoder_test/items.tsv --out apo_test/
+        --index data/datasets/dataset_v1/index.parquet \\
+        --exclude out/encoder_test/items.tsv --out out/apo_test/
 """
 
 import argparse

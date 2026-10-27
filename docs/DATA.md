@@ -1,7 +1,7 @@
 # Data
 
 What exists under `$WORK`, where it comes from, and what invalidates it.
-`python src/inventory.py report --items runs/v1/items.tsv` checks all of it
+`python src/inventory.py report --items out/runs/v1/items.tsv` checks all of it
 against the disk: per-artefact coverage, the exact staleness test for ligand
 features, and a summary of every run directory. Run that before trusting
 anything below.
@@ -12,8 +12,8 @@ Split out of `STATUS.md` on 2026-10-27; section text is unchanged.
 
 - Repo root = `$WORK` = `/mnt/home/cjs2301/dmasif` on the HPC. `dMaSIF/` is the
   vendored upstream (+ PyTorch 2 fixes), `src/` is ours. Data and outputs
-  (`meta/ structures/ systems/ datasets/ feats/ keops_cache/ encoder_test/
-  apo_test/`) are gitignored.
+  (`data/meta/ structures/ systems/ data/datasets/ feats/ keops_cache/ out/encoder_test/
+  out/apo_test/`) are gitignored.
 - CPU work: `~/venvs/plinder` (`envs/cpu-requirements.txt`; pandas, pyarrow,
   rdkit; **no torch, no Biopython**). GPU work: Apptainer container
   `$WORK/dmasif_sandbox` from `src/slurm/dmasif.def`: NGC PyTorch 25.06 (CUDA
@@ -37,7 +37,7 @@ PLINDER 2024-06/v2. Local copy `$PLINDER_DIR = /mnt/home/cjs2301/plinder/2024-06
 | `linked_structures/{apo,pred}.zip` (+ unpacked `apo/`, `pred/`) | one `<id>.cif` per linked chain, 29,270 apo / 11,687 AlphaFold; each in its OWN frame (not superposed); every linked id has a file |
 
 Ours, under `$WORK`:
-- `meta/manifest.parquet` (`src/build_manifest.py`): 341,945 rows (system x
+- `data/meta/manifest.parquet` (`src/build_manifest.py`): 341,945 rows (system x
   proper ligand), 37 PLINDER columns + split + `pass_*` filter flags,
   `pass_all`, `strict_rep`, `receptor_key`; plus `receptors.txt`,
   `ligand_fps.npy` (ECFP4).
@@ -51,7 +51,7 @@ Ours, under `$WORK`:
 
 ## Dataset
 
-`configs/datasets/dataset_v1.yaml` -> `datasets/dataset_v1/index.parquet`
+`configs/datasets/dataset_v1.yaml` -> `data/datasets/dataset_v1/index.parquet`
 (`src/build_dataset.py`, receptor input policy `plinder_receptor` in
 `src/receptor_inputs.py`): `strict_rep` and one ligand chain. 21,209
 interactions, 19,782 receptors, 8,378 ligands; splits 20,810 / 94 / 305.

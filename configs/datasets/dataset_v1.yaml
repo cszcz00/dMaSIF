@@ -6,8 +6,8 @@ description: >
   pli_unique_qcov__95__strong__component and ligand) restricted to systems with
   a single ligand chain of any kind; PLINDER receptor as input.
 
-manifest: meta/manifest.parquet
-fingerprints: meta/ligand_fps.npy
+manifest: data/meta/manifest.parquet
+fingerprints: data/meta/ligand_fps.npy
 
 selection:
   splits: [train, val, test]

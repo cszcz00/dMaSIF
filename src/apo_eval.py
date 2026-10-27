@@ -40,9 +40,9 @@ summaries per set (A_near ... D_closed, eval). Reference: the median cosine
 between top-region vectors of DIFFERENT proteins' holo versions.
 
 Example (container; see src/slurm/apo_test.sbatch):
-    python src/apo_eval.py --ckpt encoder_test/head_pretrained_300.pt \\
-        --pairs apo_test/pairs.tsv --links_root $PLINDER_DIR/linked_structures \\
-        --out apo_test/
+    python src/apo_eval.py --ckpt out/encoder_test/head_pretrained_300.pt \\
+        --pairs out/apo_test/pairs.tsv --links_root $PLINDER_DIR/linked_structures \\
+        --out out/apo_test/
 """
 
 import argparse

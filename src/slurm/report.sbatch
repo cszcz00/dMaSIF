@@ -16,17 +16,17 @@
 # fpocket pockets, no ligand). The two reports side by side say how much of
 # the retrieval survives losing the site.
 #
-# Overrides: CKPT (runs/v3c_site_pairs_bn/best.pt), DATA (items.tsv /
-#   ligand_feats.npz; runs/v1), SURFACES, OUT (reports/), TAG (names the
+# Overrides: CKPT (out/runs/v3c_site_pairs_bn/best.pt), DATA (items.tsv /
+#   ligand_feats.npz; out/runs/v1), SURFACES, OUT (out/reports/), TAG (names the
 #   files; defaults to the checkpoint's run directory), SELECTS ("site topk"),
 #   N_TRAIN / N_VAL (400 each, group-balanced), DUMP_ARGS (verbatim).
 set -e
 module load apptainer
 cd $WORK
-CKPT=${CKPT:-$WORK/runs/v3c_site_pairs_bn/best.pt}
-DATA=${DATA:-$WORK/runs/v1}
-SURFACES=${SURFACES:-$WORK/surfaces}
-OUT=${OUT:-$WORK/reports}
+CKPT=${CKPT:-$WORK/out/runs/v3c_site_pairs_bn/best.pt}
+DATA=${DATA:-$WORK/out/runs/v1}
+SURFACES=${SURFACES:-$WORK/data/surfaces}
+OUT=${OUT:-$WORK/out/reports}
 SELECTS=${SELECTS:-"site topk"}
 N_TRAIN=${N_TRAIN:-400}
 N_VAL=${N_VAL:-400}

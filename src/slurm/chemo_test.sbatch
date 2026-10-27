@@ -19,7 +19,7 @@
 # today, and STATUS calls the head the main limit. Also compare the ball_R8 row
 # (the chosen selector) and the per-point AUROC / AP the overfit run prints.
 #
-# Needs $WORK/encoder_test/items.tsv (test_encoder.py prepare).
+# Needs $WORK/out/encoder_test/items.tsv (test_encoder.py prepare).
 #
 # Overrides: N_TRAIN (32), N_HOLD (64), STEPS (300),
 #   ARM (both | base | chemo)   - run one arm per job if the QoS walltime is
@@ -33,7 +33,7 @@ N_TRAIN=${N_TRAIN:-32}
 N_HOLD=${N_HOLD:-64}
 STEPS=${STEPS:-300}
 ARM=${ARM:-both}
-OUT=$WORK/encoder_test
+OUT=$WORK/out/encoder_test
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"
 RUN="$EXEC python $WORK/src/test_encoder.py"
 

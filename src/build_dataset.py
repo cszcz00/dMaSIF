@@ -2,7 +2,7 @@
 
 A dataset is a selection of manifest rows plus a receptor input policy, defined
 by a spec file kept in git (configs/datasets/<name>.yaml). Building it writes
-datasets/<name>/ under --root:
+data/datasets/<name>/ under --root:
 
     index.parquet       one row per interaction: every manifest column, plus
                         fp_row (re-indexed into this dataset's fingerprints),
@@ -57,8 +57,8 @@ import receptor_inputs  # noqa: E402
 
 DEFAULTS = {
     "description": "",
-    "manifest": "meta/manifest.parquet",
-    "fingerprints": "meta/ligand_fps.npy",
+    "manifest": "data/meta/manifest.parquet",
+    "fingerprints": "data/meta/ligand_fps.npy",
     "selection": {
         "splits": ["train", "val", "test"],
         "require": [],    # boolean manifest columns that must be true
@@ -171,7 +171,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("spec", help="configs/datasets/<name>.yaml")
     ap.add_argument("--root", default=os.environ.get("WORK", "."),
-                    help="project root holding meta/, structures/, datasets/ (default $WORK)")
+                    help="project root holding data/meta/, structures/, data/datasets/ (default $WORK)")
     ap.add_argument("--out", help="output directory (default <root>/datasets/<name>)")
     ap.add_argument("--dry_run", action="store_true", help="print attrition and counts; write nothing")
     ap.add_argument("--check_files", action="store_true",
@@ -218,7 +218,7 @@ def main():
         print("\n--dry_run: nothing written")
         return
 
-    # Fingerprints for this dataset only, so it does not depend on meta/ staying put.
+    # Fingerprints for this dataset only, so it does not depend on data/meta/ staying put.
     fps = np.load(fps_path)
     rows = np.sort(df["fp_row"].unique())
     df["manifest_fp_row"] = df["fp_row"]

@@ -34,10 +34,10 @@
 # measured on the pooled vectors, here the pair fingerprints.
 #
 # This validates KNOWN-SITE retrieval (each val protein's pocket is chosen by
-# its own ligand's position), so it is not comparable to runs/b32's 0.127,
+# its own ligand's position), so it is not comparable to out/runs/b32's 0.127,
 # which scored the head's top-8 regions blind. The blind number, top k_pos
 # fpocket pockets with a max:
-#   CKPTS="$WORK/runs/v3/best.pt" \
+#   CKPTS="$WORK/out/runs/v3/best.pt" \
 #   EVAL_ARGS="--use_ckpt_split --pocket_select topk --pocket_rank drug" \
 #       sbatch src/slurm/eval.sbatch
 # Rank by druggability, not fpocket's score: on 1,000 training rows the top 8
@@ -46,11 +46,11 @@
 # and the same with "--pocket_select site" reproduces the log's own number.
 #
 # Ablations, one GPU each (compare at matched steps):
-#   POOL_MODE=mean   RUN=$WORK/runs/v3_mean   ... is it the pooling?
-#   POOL_MODE=shells RUN=$WORK/runs/v3_shells
-#   CHEMO=0          RUN=$WORK/runs/v3_nochemo   (CHEMO= empty also works)
-#   BANK= EXTRA_LIG= RUN=$WORK/runs/v3_nobank
-#   POCKET_SHAPE=ball RUN=$WORK/runs/v3_ball
+#   POOL_MODE=mean   RUN=$WORK/out/runs/v3_mean   ... is it the pooling?
+#   POOL_MODE=shells RUN=$WORK/out/runs/v3_shells
+#   CHEMO=0          RUN=$WORK/out/runs/v3_nochemo   (CHEMO= empty also works)
+#   BANK= EXTRA_LIG= RUN=$WORK/out/runs/v3_nobank
+#   POCKET_SHAPE=ball RUN=$WORK/out/runs/v3_ball
 #
 # Site decoys (off unless DECOYS is set): DECOYS=7 pools up to 7 of the
 # receptor's other fpocket pockets per row as within-protein negatives,
@@ -61,10 +61,10 @@
 # Overrides here: POCKETS, POCKET_SHAPE, POCKET_MARGIN, PAIR_ARGS (e.g.
 #   "--pair_types 12 --pair_bins 10"), DECOYS, POCKET_RANK, plus everything
 #   train.sbatch takes (TAU_MIN among them).
-POCKETS=${POCKETS:-$WORK/pockets/fpocket}
+POCKETS=${POCKETS:-$WORK/data/pockets/fpocket}
 [ -d "$POCKETS" ] || { echo "no $POCKETS; sbatch src/slurm/fpocket.sbatch first"; exit 1; }
-export RUN=${RUN:-$WORK/runs/v3}
-export DATA=${DATA:-$WORK/runs/v1}
+export RUN=${RUN:-$WORK/out/runs/v3}
+export DATA=${DATA:-$WORK/out/runs/v1}
 export BATCH=${BATCH:-32}
 export STEPS=${STEPS:-6000}
 export VAL_BALANCE=${VAL_BALANCE-1}

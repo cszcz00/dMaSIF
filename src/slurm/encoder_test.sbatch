@@ -6,13 +6,13 @@
 #SBATCH --mem=64G
 #SBATCH --time=01:30:00
 #SBATCH --output=logs/encoder_test_%j.log
-# Needs $WORK/encoder_test/items.tsv from (CPU venv):
-#   python src/test_encoder.py prepare --index datasets/dataset_v1/index.parquet --n 48 --out encoder_test/
+# Needs $WORK/out/encoder_test/items.tsv from (CPU venv):
+#   python src/test_encoder.py prepare --index data/datasets/dataset_v1/index.parquet --n 48 --out out/encoder_test/
 set -e
 module load apptainer
 cd $WORK
 RUN="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER $WORK/dmasif_sandbox python $WORK/src/test_encoder.py"
-ITEMS=$WORK/encoder_test/items.tsv
+ITEMS=$WORK/out/encoder_test/items.tsv
 
 echo "node $(hostname): $(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader)"
 # Fail fast if this container's PyTorch was not built for this GPU (e.g. Blackwell

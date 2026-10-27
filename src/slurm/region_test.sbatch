@@ -11,10 +11,10 @@
 #      and dump its probability maps for train + held-out items
 #   2. score every selector setting on those maps (src/region_sweep.py, CPU)
 #
-# Needs $WORK/encoder_test/items.tsv with N_TRAIN + N_HOLD rows. More held-out
+# Needs $WORK/out/encoder_test/items.tsv with N_TRAIN + N_HOLD rows. More held-out
 # items than the first test's 16 (CPU venv; same seed, so the first 48 rows are
 # the items used so far):
-#   python src/test_encoder.py prepare --index datasets/dataset_v1/index.parquet --n 96 --out encoder_test/
+#   python src/test_encoder.py prepare --index data/datasets/dataset_v1/index.parquet --n 96 --out out/encoder_test/
 #
 # Overrides: N_TRAIN (32), N_HOLD (64), STEPS (300).
 # SWEEP_ONLY=1 reuses an existing maps.pt and only reruns step 2.
@@ -25,7 +25,7 @@ cd $WORK
 N_TRAIN=${N_TRAIN:-32}
 N_HOLD=${N_HOLD:-64}
 STEPS=${STEPS:-300}
-OUT=$WORK/encoder_test
+OUT=$WORK/out/encoder_test
 MAPS=$OUT/maps_pretrained_${STEPS}.pt
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"
 

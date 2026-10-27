@@ -20,7 +20,7 @@ Three things it answers that `du` and `ls` cannot:
                heuristic, and docs/STATUS.md records probe/ and train_check/
                as affected. Any mismatch here means rebuild before trusting a
                run that used it.
-  runs         every runs/<name>/ summarised from history.json alone (no torch,
+  runs         every out/runs/<name>/ summarised from history.json alone (no torch,
                no checkpoint load): evaluations, last step, best val MRR and
                where, last cosdiff and tau. This is the index of what each
                experiment directory actually contains, which otherwise lives
@@ -31,8 +31,8 @@ moves or deletes anything, so it is safe to run while jobs are training.
 
 Example:
     # CPU venv (pandas for the parquet sections, numpy otherwise; no torch)
-    python src/inventory.py report --items runs/v1/items.tsv
-    python src/inventory.py report --root $WORK --items runs/v1/items.tsv --tsv inv.tsv
+    python src/inventory.py report --items out/runs/v1/items.tsv
+    python src/inventory.py report --root $WORK --items out/runs/v1/items.tsv --tsv inv.tsv
     python src/inventory.py selftest          # planted tree, no real data
 
 `--items` is optional: without it the coverage checks are skipped and
@@ -56,13 +56,13 @@ sys.path.insert(0, str(HERE))
 # directory -> (glob, what it is). The layout docs/STATUS.md "Layout" records.
 TREES = [
     ("structures", "*.cif", "PLINDER receptor.cif per receptor_key"),
-    ("surfaces", "*.npz", "cached dMaSIF surfaces, one per input_id"),
+    ("data/surfaces", "*.npz", "cached dMaSIF surfaces, one per input_id"),
     ("systems", "*", "PLINDER system directories (ligand SDFs)"),
-    ("plip", "*.npz", "PLIP interactions per training row"),
+    ("data/plip", "*.npz", "PLIP interactions per training row"),
     ("feats", "*.npz", "extract.py-era SURFACE blocks, feats/<tag>.npz; the "
                        "pre-SurfaceStore cache. Probably superseded by "
                        "surfaces/ - check before relying on it"),
-    ("reports", "*", "retrieval_report dumps and TSVs"),
+    ("out/reports", "*", "retrieval_report dumps and TSVs"),
 ]
 
 
@@ -143,7 +143,7 @@ def ligand_feats(path):
 
 
 def run_summary(d):
-    """runs/<name>/ -> dict from history.json and the files present. No torch."""
+    """out/runs/<name>/ -> dict from history.json and the files present. No torch."""
     d = Path(d)
     out = {"name": d.name}
     for f in ("best.pt", "last.pt", "items.tsv", "ligand_feats.npz"):
@@ -185,28 +185,28 @@ def collect(a):
                              "present": st is not None,
                              "n": None if st is None else st[0],
                              "bytes": None if st is None else st[1]})
-    # pockets/ holds one subdirectory per finder
-    pk = root / "pockets"
+    # data/pockets/ holds one subdirectory per finder
+    pk = root / "data" / "pockets"
     if pk.is_dir():
         for sub in sorted(p for p in pk.iterdir() if p.is_dir()):
             st = dir_stats(sub, "*.npz")
             failed = sum(len(f.read_text().splitlines())
                          for f in sub.glob("failed*.tsv"))
-            inv["trees"].append({"dir": f"pockets/{sub.name}",
+            inv["trees"].append({"dir": f"data/pockets/{sub.name}",
                                  "what": "alpha spheres per receptor, by pocket",
                                  "present": True, "n": st[0], "bytes": st[1],
                                  "failed": failed})
     else:
-        inv["trees"].append({"dir": "pockets", "what": "fpocket output",
+        inv["trees"].append({"dir": "data/pockets", "what": "fpocket output",
                              "present": False, "n": None, "bytes": None})
 
     # meta / datasets, the only sections needing pandas
-    meta = root / "meta"
+    meta = root / "data" / "meta"
     for f, what in (("manifest.parquet", "every usable (system, ligand) row"),
                     ("ligand_fps.npy", "ECFP4 bits per distinct ligand"),
                     ("receptors.txt", "receptor_key -> surface tag")):
         p = meta / f
-        rec = {"file": f"meta/{f}", "what": what, "present": p.is_file(),
+        rec = {"file": f"data/meta/{f}", "what": what, "present": p.is_file(),
                "bytes": p.stat().st_size if p.is_file() else 0}
         if p.is_file() and f.endswith(".parquet"):
             try:
@@ -223,11 +223,11 @@ def collect(a):
             except Exception as e:
                 rec["error"] = f"{type(e).__name__}: {e}"
         inv["datasets"].append(rec)
-    ds = root / "datasets"
+    ds = root / "data" / "datasets"
     if ds.is_dir():
         for sub in sorted(p for p in ds.iterdir() if p.is_dir()):
             idx = sub / "index.parquet"
-            rec = {"file": f"datasets/{sub.name}/index.parquet",
+            rec = {"file": f"data/datasets/{sub.name}/index.parquet",
                    "what": "a built dataset", "present": idx.is_file(),
                    "bytes": idx.stat().st_size if idx.is_file() else 0}
             if idx.is_file():
@@ -248,7 +248,7 @@ def collect(a):
     # ligand features: the run dirs' own, plus any given explicitly
     seen = set()
     cands = [Path(p) for p in (a.lig_feats or [])]
-    runs_dir = root / "runs"
+    runs_dir = root / "out" / "runs"
     if runs_dir.is_dir():
         cands += sorted(runs_dir.glob("*/ligand_feats.npz"))
     for p in cands:
@@ -270,12 +270,12 @@ def collect(a):
         inv["items"] = {"path": a.items, "rows": len(rows),
                         "input_ids": len({r["input_id"] for r in rows
                                           if r.get("input_id")})}
-        checks = [("surfaces", root / "surfaces", "input_id")]
+        checks = [("data/surfaces", root / "data" / "surfaces", "input_id")]
         if pk.is_dir():
             for sub in sorted(p for p in pk.iterdir() if p.is_dir()):
-                checks.append((f"pockets/{sub.name}", sub, "input_id"))
-        if (root / "plip").is_dir():
-            checks.append(("plip", root / "plip", "system_id"))
+                checks.append((f"data/pockets/{sub.name}", sub, "input_id"))
+        if (root / "data" / "plip").is_dir():
+            checks.append(("data/plip", root / "data" / "plip", "system_id"))
         for label, d, key in checks:
             if not rows or key not in rows[0]:
                 continue
@@ -394,18 +394,20 @@ def selftest(a):
 
     tmp = Path(a.tmp)
     shutil.rmtree(tmp, ignore_errors=True)
-    (tmp / "surfaces").mkdir(parents=True)
-    (tmp / "pockets" / "fpocket").mkdir(parents=True)
-    (tmp / "plip").mkdir(parents=True)
-    (tmp / "runs" / "r1").mkdir(parents=True)
+    (tmp / "data" / "surfaces").mkdir(parents=True)
+    (tmp / "data" / "pockets" / "fpocket").mkdir(parents=True)
+    (tmp / "data" / "plip").mkdir(parents=True)
+    (tmp / "out" / "runs" / "r1").mkdir(parents=True)
 
     print("[1] a planted tree: 3 receptors, 2 surfaces, 1 pocket file")
     ids = ["rec0", "rec1", "rec2"]
     for i in ids[:2]:
-        np.savez(tmp / "surfaces" / f"{i}.npz", xyz=np.zeros((4, 3), np.float32))
-    np.savez(tmp / "pockets" / "fpocket" / "rec0.npz", sphere_r=np.ones(2, np.float32))
-    (tmp / "pockets" / "fpocket" / "failed_0of1.tsv").write_text("rec9\tboom\n")
-    np.savez(tmp / "plip" / "sys0.npz", kind=np.zeros(1, np.int32))
+        np.savez(tmp / "data" / "surfaces" / f"{i}.npz",
+                 xyz=np.zeros((4, 3), np.float32))
+    np.savez(tmp / "data" / "pockets" / "fpocket" / "rec0.npz",
+             sphere_r=np.ones(2, np.float32))
+    (tmp / "data" / "pockets" / "fpocket" / "failed_0of1.tsv").write_text("rec9\tboom\n")
+    np.savez(tmp / "data" / "plip" / "sys0.npz", kind=np.zeros(1, np.int32))
     items = tmp / "items.tsv"
     items.write_text("system_id\tinput_id\tfp_row\n"
                      + "".join(f"sys{j}\t{i}\t{j}\n" for j, i in enumerate(ids)))
@@ -419,15 +421,15 @@ def selftest(a):
             heavy[1] -= 1          # a graph atom that is not a heavy atom
         np.savez(path, fp=np.zeros((n, 8), np.uint8), desc=np.zeros((n, 5), np.float32),
                  atom_ptr=ptr, n_heavy=heavy, failed=np.zeros(n, bool))
-    feats(tmp / "runs" / "r1" / "ligand_feats.npz", stale=True)
+    feats(tmp / "out" / "runs" / "r1" / "ligand_feats.npz", stale=True)
     feats(tmp / "clean_feats.npz", stale=False)
 
     json.dump([{"step": 0, "mrr": 0.02, "cos_diff": 0.99, "tau": 0.07},
                {"step": 125, "mrr": 0.11, "cos_diff": 0.82, "tau": 0.068},
                {"step": 250, "mrr": 0.09, "cos_diff": 0.80, "tau": 0.066,
                 "fallback_rate": 0.058}],
-              open(tmp / "runs" / "r1" / "history.json", "w"))
-    (tmp / "runs" / "r1" / "last.pt").write_bytes(b"x" * 10)
+              open(tmp / "out" / "runs" / "r1" / "history.json", "w"))
+    (tmp / "out" / "runs" / "r1" / "last.pt").write_bytes(b"x" * 10)
 
     args = SimpleNamespace(root=str(tmp), items=str(items), tsv="",
                            lig_feats=[str(tmp / "clean_feats.npz")])
@@ -435,22 +437,22 @@ def selftest(a):
 
     trees = {t["dir"]: t for t in inv["trees"]}
     check("counts files per tree and reports an absent one",
-          trees["surfaces"]["n"] == 2 and trees["plip"]["n"] == 1
+          trees["data/surfaces"]["n"] == 2 and trees["data/plip"]["n"] == 1
           and trees["structures"]["present"] is False,
-          f"surfaces {trees['surfaces']['n']}, plip {trees['plip']['n']}")
+          f"surfaces {trees['data/surfaces']['n']}, plip {trees['data/plip']['n']}")
     check("finds the pocket subdirectory and counts its failures",
-          trees["pockets/fpocket"]["n"] == 1
-          and trees["pockets/fpocket"]["failed"] == 1)
+          trees["data/pockets/fpocket"]["n"] == 1
+          and trees["data/pockets/fpocket"]["failed"] == 1)
 
     print("\n[2] coverage is per ARTEFACT key, and gaps are named")
     cov = {c["artefact"]: c for c in inv["coverage"]}
     check("surfaces: 2 of 3 input_ids, the missing one named",
-          cov["surfaces"]["want"] == 3 and cov["surfaces"]["have"] == 2
-          and cov["surfaces"]["missing_examples"] == ["rec2"],
-          str(cov["surfaces"]["missing_examples"]))
-    check("pockets: 1 of 3", cov["pockets/fpocket"]["have"] == 1)
+          cov["data/surfaces"]["want"] == 3 and cov["data/surfaces"]["have"] == 2
+          and cov["data/surfaces"]["missing_examples"] == ["rec2"],
+          str(cov["data/surfaces"]["missing_examples"]))
+    check("pockets: 1 of 3", cov["data/pockets/fpocket"]["have"] == 1)
     check("plip keys on system_id, not input_id",
-          cov["plip"]["key"] == "system_id" and cov["plip"]["have"] == 1)
+          cov["data/plip"]["key"] == "system_id" and cov["data/plip"]["have"] == 1)
     check("every gap raises a note", len(inv["notes"]) >= 3,
           f"{len(inv['notes'])} notes")
 
@@ -475,15 +477,15 @@ def selftest(a):
           r1["last.pt"] == 10 and r1["best.pt"] == 0)
 
     print("\n[5] a run whose history has no finite mrr does not crash")
-    (tmp / "runs" / "r2").mkdir()
+    (tmp / "out" / "runs" / "r2").mkdir()
     json.dump([{"step": 0, "mrr": float("nan")}],
-              open(tmp / "runs" / "r2" / "history.json", "w"))
+              open(tmp / "out" / "runs" / "r2" / "history.json", "w"))
     inv2 = collect(args)
     r2 = [r for r in inv2["runs"] if r["name"] == "r2"][0]
     check("a NaN-only history gives no best, and still counts the evaluation",
           "best_mrr" not in r2 and r2["evals"] == 1)
-    (tmp / "runs" / "r3").mkdir()
-    (tmp / "runs" / "r3" / "history.json").write_text("{ not json")
+    (tmp / "out" / "runs" / "r3").mkdir()
+    (tmp / "out" / "runs" / "r3" / "history.json").write_text("{ not json")
     r3 = [r for r in collect(args)["runs"] if r["name"] == "r3"][0]
     check("unreadable history is reported, not raised", "error" in r3)
 

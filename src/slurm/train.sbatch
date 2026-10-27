@@ -10,13 +10,13 @@
 # pocket BCE, and validation reports retrieval metrics every --eval_every.
 #
 # Needs, from the CPU venv, BEFORE submitting:
-#   python src/train.py prepare --index datasets/dataset_v1/index.parquet \
-#       --out runs/v1 --split train --exclude encoder_test/items.tsv
-#   python src/ligand_features.py --index datasets/dataset_v1/index.parquet \
-#       --out runs/v1
+#   python src/train.py prepare --index data/datasets/dataset_v1/index.parquet \
+#       --out out/runs/v1 --split train --exclude out/encoder_test/items.tsv
+#   python src/ligand_features.py --index data/datasets/dataset_v1/index.parquet \
+#       --out out/runs/v1
 # and, strongly recommended, a trained pocket head so the regions are usable
 # from step 0 (src/slurm/head_ckpt.sbatch writes it in 30 min):
-#   $WORK/encoder_test/head_pretrained_300.pt
+#   $WORK/out/encoder_test/head_pretrained_300.pt
 #
 # This job RESUMES ITSELF. --max_hours stops cleanly inside the walltime and
 # checkpoints; resubmitting the same job picks up $RUN/last.pt and carries on,
@@ -57,20 +57,20 @@
 # A resumed run keeps its checkpoint's split, so VAL_BALANCE only matters for
 # a NEW run directory; FREEZE must match the checkpoint or train.py refuses.
 #
-# The second round of runs (after runs/v1), one GPU job each. DATA points the
+# The second round of runs (after out/runs/v1), one GPU job each. DATA points the
 # new run directories at v1's items.tsv / ligand_feats.npz (DATA defaults to
 # RUN), and VAL_BALANCE=1 gives all three the same balanced validation set:
 #   SKIP_SMOKE=1 sbatch src/slurm/train.sbatch                       # finish v1
-#   D=$WORK/runs/v1
-#   DATA=$D RUN=$WORK/runs/frozen FREEZE=1 VAL_BALANCE=1 sbatch src/slurm/train.sbatch
-#   DATA=$D RUN=$WORK/runs/shells POOL_MODE=shells VAL_BALANCE=1 sbatch src/slurm/train.sbatch
-#   DATA=$D RUN=$WORK/runs/b32 BATCH=32 STEPS=5000 VAL_BALANCE=1 \
+#   D=$WORK/out/runs/v1
+#   DATA=$D RUN=$WORK/out/runs/frozen FREEZE=1 VAL_BALANCE=1 sbatch src/slurm/train.sbatch
+#   DATA=$D RUN=$WORK/out/runs/shells POOL_MODE=shells VAL_BALANCE=1 sbatch src/slurm/train.sbatch
+#   DATA=$D RUN=$WORK/out/runs/b32 BATCH=32 STEPS=5000 VAL_BALANCE=1 \
 #       TRAIN_ARGS="--eval_every 125 --save_every 125" sbatch src/slurm/train.sbatch
 set -e
 module load apptainer
 cd $WORK
-RUN=${RUN:-$WORK/runs/v1}
-SURFACES=${SURFACES:-$WORK/surfaces}
+RUN=${RUN:-$WORK/out/runs/v1}
+SURFACES=${SURFACES:-$WORK/data/surfaces}
 STEPS=${STEPS:-20000}
 BATCH=${BATCH:-8}
 ARM=${ARM:-gnn}
@@ -85,7 +85,7 @@ LR_SCHEDULE=${LR_SCHEDULE:-const}
 WARMUP=${WARMUP:-0}
 DATA=${DATA:-$RUN}            # where items.tsv / ligand_feats.npz live
 MAX_HOURS=${MAX_HOURS:-11.0}
-HEAD=${HEAD:-$WORK/encoder_test/head_pretrained_300.pt}
+HEAD=${HEAD:-$WORK/out/encoder_test/head_pretrained_300.pt}
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"
 RUNPY="$EXEC python $WORK/src/train.py"
 

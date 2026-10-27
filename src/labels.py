@@ -57,10 +57,10 @@ where they can change without redoing it.
                     table for extended sites.
 
 Example:
-    python labels.py --manifest meta/manifest.parquet --feats feats/plinder \\
-        --systems systems/ --receptors meta/receptors.txt --out labels/ --check
-    python labels.py --manifest meta/manifest.parquet --feats feats/plinder \\
-        --systems systems/ --receptors meta/receptors.txt --out labels/
+    python labels.py --manifest data/meta/manifest.parquet --feats feats/plinder \\
+        --systems systems/ --receptors data/meta/receptors.txt --out labels/ --check
+    python labels.py --manifest data/meta/manifest.parquet --feats feats/plinder \\
+        --systems systems/ --receptors data/meta/receptors.txt --out labels/
 """
 
 import argparse
@@ -241,7 +241,7 @@ def main():
     ap.add_argument("--feats", required=True, help="directory of extract.py .npz files")
     ap.add_argument("--systems", required=True,
                     help="root holding <system_id>/system.cif and <system_id>/ligand_files/")
-    ap.add_argument("--receptors", required=True, help="meta/receptors.txt")
+    ap.add_argument("--receptors", required=True, help="data/meta/receptors.txt")
     ap.add_argument("--out", required=True)
     ap.add_argument("--cutoff", type=float, default=4.0)
     ap.add_argument("--check", action="store_true",

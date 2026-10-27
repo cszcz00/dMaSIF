@@ -11,7 +11,7 @@
 # Before: bash src/slurm/setup_plip.sh   (login node, once)
 # After, CPU venv (numpy only), the sanity check on cached surfaces:
 #   python src/plip_labels.py check --items $RUN/items.tsv --plip $PLIP \
-#       --surface_cache $WORK/surfaces --n 500
+#       --surface_cache $WORK/data/surfaces --n 500
 #
 # Per row: the receptor's protein atoms (as the surface sees them) + the row's
 # ligand from its SDF, merged, PLIP run on it. ~1-2 s per row (0.8 s for a
@@ -25,8 +25,8 @@
 set -e
 module load apptainer
 cd $WORK
-RUN=${RUN:-$WORK/runs/v1}
-PLIP=${PLIP:-$WORK/plip}
+RUN=${RUN:-$WORK/out/runs/v1}
+PLIP=${PLIP:-$WORK/data/plip}
 DIR=${PLIP_PKGS:-$WORK/envs/plip_pkgs}
 N=${SLURM_ARRAY_TASK_COUNT:-1}
 I=${SLURM_ARRAY_TASK_ID:-0}

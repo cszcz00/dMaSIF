@@ -15,8 +15,8 @@
 # RUN THE EVALS FIRST - they are minutes on the test queue and they decide
 # whether decoys stay at all. Blind (topk / drug) is the only number
 # comparable across configurations and the only one a screen would see:
-#   CKPTS="$WORK/runs/v3c_1500/best.pt $WORK/runs/v3f_pairs_bn_decoys/best.pt \
-#   $WORK/runs/v3c_site_pairs_bn/best.pt" \
+#   CKPTS="$WORK/out/runs/v3c_1500/best.pt $WORK/out/runs/v3f_pairs_bn_decoys/best.pt \
+#   $WORK/out/runs/v3c_site_pairs_bn/best.pt" \
 #   EVAL_ARGS="--use_ckpt_split --pocket_select topk --pocket_rank drug" \
 #       sbatch src/slurm/eval.sbatch
 # C@1,500 blind was 0.088 (= b32 at matched data). Read: v3f above it means
@@ -26,7 +26,7 @@
 # scored blind - that is the number that says whether the v3 stack beats b32.
 #
 # Then the two runs here, each ONE change from C:
-#   v3h  runs/v3h_decoys_ks0_lam03   C + 7 decoys, --k_neg 0, --lam_site 0.3.
+#   v3h  out/runs/v3h_decoys_ks0_lam03   C + 7 decoys, --k_neg 0, --lam_site 0.3.
 #        Two questions at once, deliberately: is v3f's mrr loss the lam_site
 #        WEIGHT (0.3 should recover most of it while keeping the site gain),
 #        and does dropping the 8 redundant k_neg patches restore the speed
@@ -34,7 +34,7 @@
 #        comes back to ~0.11 with site still ~0.75, this is the decoy
 #        configuration to keep. If mrr stays ~0.09, the decoys themselves
 #        cost it and the trade is real.
-#   v3i  runs/v3i_kneg0              C with --k_neg 0 and nothing else. The
+#   v3i  out/runs/v3i_kneg0              C with --k_neg 0 and nothing else. The
 #        throughput baseline: pooling drops 9 regions -> 1, so expect ~2.5
 #        s/step against C's 4.2 - a 1.7x on every future run, which matters
 #        because the ceiling is data, not steps. The risk is the BatchNorm:
@@ -46,10 +46,10 @@
 # which says WHAT the model retrieves rather than how well (hub collapse, the
 # size-only baseline, chemotype rank; src/retrieval_report.py):
 #   for SEL in site topk; do
-#     python src/retrieval_report.py dump --ckpt $WORK/runs/v3c_site_pairs_bn/best.pt \
-#       --items $WORK/runs/v1/items.tsv --lig_feats $WORK/runs/v1/ligand_feats.npz \
-#       --surface_cache $WORK/surfaces --pocket_select $SEL --pocket_rank drug \
-#       --n_train 400 --n_val 400 --out $WORK/reports/v3c5000_$SEL.npz
+#     python src/retrieval_report.py dump --ckpt $WORK/out/runs/v3c_site_pairs_bn/best.pt \
+#       --items $WORK/out/runs/v1/items.tsv --lig_feats $WORK/out/runs/v1/ligand_feats.npz \
+#       --surface_cache $WORK/data/surfaces --pocket_select $SEL --pocket_rank drug \
+#       --n_train 400 --n_val 400 --out $WORK/out/reports/v3c5000_$SEL.npz
 #   done
 #
 # Usage (from $WORK, login node):  bash src/slurm/v3_diag4.sh
@@ -59,7 +59,7 @@ cd $WORK
 submit() {   # job name, run name, then VAR=value overrides
     local job=$1 name=$2; shift 2
     env SKIP_SMOKE=1 STEPS=1500 CHEMO=0 BANK= EXTRA_LIG= LR_SCHEDULE=const WARMUP=0 \
-        POOL_MODE=pairs ANCHOR_NORM=batch RUN=$WORK/runs/$name "$@" \
+        POOL_MODE=pairs ANCHOR_NORM=batch RUN=$WORK/out/runs/$name "$@" \
         sbatch --job-name=$job --output=logs/${job}_%j.log \
         $WORK/src/slurm/train_v3.sbatch
 }

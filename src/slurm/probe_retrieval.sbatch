@@ -11,11 +11,11 @@
 #   2. probe  train each ligand arm on those anchors (CPU is enough)
 #
 # Needs, from the CPU venv, BEFORE submitting:
-#   python src/probe_retrieval.py prepare --index datasets/dataset_v1/index.parquet \
-#       --exclude encoder_test/items.tsv --n 1500 --out probe/
-#   python src/ligand_features.py --index datasets/dataset_v1/index.parquet --out probe/
+#   python src/probe_retrieval.py prepare --index data/datasets/dataset_v1/index.parquet \
+#       --exclude out/encoder_test/items.tsv --n 1500 --out probe/
+#   python src/ligand_features.py --index data/datasets/dataset_v1/index.parquet --out probe/
 # and a checkpoint from a run with --save_ckpt:
-#   $WORK/encoder_test/head_pretrained_300.pt
+#   $WORK/out/encoder_test/head_pretrained_300.pt
 #
 # Overrides: CKPT, LIMIT (items to dump; unset = all), STEPS, ARMS,
 #   REGION_ARGS (selector, default the region sweep's leader: balls R 8 shift 2),
@@ -25,8 +25,8 @@
 set -e
 module load apptainer
 cd $WORK
-OUT=$WORK/probe
-CKPT=${CKPT:-$WORK/encoder_test/head_pretrained_300.pt}
+OUT=$WORK/out/probe
+CKPT=${CKPT:-$WORK/out/encoder_test/head_pretrained_300.pt}
 STEPS=${STEPS:-2000}
 ARMS=${ARMS:-fp,fp_linear,desc,fp_desc,gnn}
 REGION_ARGS=${REGION_ARGS:-"--region_method ball --ball_radius 8 --ball_shift 2"}

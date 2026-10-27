@@ -68,14 +68,14 @@ holds the same files.
 Example:
     # container, GPU (~2 min for 400 + 400 receptors)
     python src/retrieval_report.py dump \\
-        --ckpt runs/v3c_site_pairs_bn/best.pt \\
-        --items runs/v1/items.tsv --lig_feats runs/v1/ligand_feats.npz \\
-        --surface_cache surfaces --pocket_select topk --pocket_rank drug \\
-        --n_train 400 --out reports/v3c5000_blind.npz
+        --ckpt out/runs/v3c_site_pairs_bn/best.pt \\
+        --items out/runs/v1/items.tsv --lig_feats out/runs/v1/ligand_feats.npz \\
+        --surface_cache data/surfaces --pocket_select topk --pocket_rank drug \\
+        --n_train 400 --out out/reports/v3c5000_blind.npz
     # CPU venv
-    python src/retrieval_report.py report --dump reports/v3c5000_blind.npz \\
-        --items runs/v1/items.tsv --lig_feats runs/v1/ligand_feats.npz \\
-        --out reports/v3c5000_blind
+    python src/retrieval_report.py report --dump out/reports/v3c5000_blind.npz \\
+        --items out/runs/v1/items.tsv --lig_feats out/runs/v1/ligand_feats.npz \\
+        --out out/reports/v3c5000_blind
 
 Dump both --pocket_select site and topk from the same checkpoint: the first is
 what training optimised, the second what a screen would see, and the two

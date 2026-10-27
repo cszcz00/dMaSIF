@@ -187,7 +187,7 @@ sitting beside the real ones.
   three `mkdir(parents=True)`, so nothing needs creating by hand. This also
   ends the confusing collision between the `train_selftest/` scratch directory
   and the new `src/train_selftest.py`.
-- `.gitignore` gains `logs/`, `tmp/`, `reports/` and the two `job_console*/`
+- `.gitignore` gains `logs/`, `tmp/`, `out/reports/` and the two `job_console*/`
   directories.
 
 **`src/slurm/setup_dirs.sh` must be run once on the login node before the next
@@ -199,7 +199,7 @@ also prints the one-liner that sweeps the existing loose logs into `logs/`.
 
 `$WORK` has ~16 top-level directories and the code is four of them. The user's
 instinct is right, and so is the distinction they drew: `structures/` and
-`systems/` are upstream PLINDER content, while `surfaces/`, `pockets/` and
+`systems/` are upstream PLINDER content, while `surfaces/`, `data/pockets/` and
 `plip/` are things we computed. One correction to the premise: neither
 `structures/` nor `systems/` is "all of PLINDER" - both hold only the
 receptors and systems in OUR manifest. The genuinely PLINDER-wide copy is
@@ -212,10 +212,10 @@ rebuild costs.**
 | artefact | keyed by | survives a dataset rebuild? |
 |---|---|---|
 | `structures/`, `systems/` | receptor_key / system_id | yes, and re-fetchable for free |
-| `surfaces/`, `pockets/<finder>/` | `input_id` | **yes** - 19,293 files each, the expensive ones |
+| `surfaces/`, `data/pockets/<finder>/` | `input_id` | **yes** - 19,293 files each, the expensive ones |
 | `plip/` | `system_id` | yes, for rows that survive |
-| `meta/`, `datasets/` | the dataset | no, rebuilt |
-| ligand features (`runs/<n>/ligand_feats.npz`) | `fp_row` | **no** - `build_dataset` RE-INDEXES fp_row per dataset |
+| `data/meta/`, `data/datasets/` | the dataset | no, rebuilt |
+| ligand features (`out/runs/<n>/ligand_feats.npz`) | `fp_row` | **no** - `build_dataset` RE-INDEXES fp_row per dataset |
 
 So the layout should make it obvious that a dataset_v2 rebuild does NOT touch
 surfaces or pockets, and DOES invalidate ligand features. Proposed:
@@ -225,15 +225,15 @@ $WORK/
   src/ configs/ docs/ dMaSIF/            code, unchanged
   data/
     upstream/   structures/  systems/    re-fetchable; free to delete under disk pressure
-    derived/    surfaces/  pockets/  plip/
-    index/      meta/  datasets/
-  runs/  reports/                        experiment outputs, not data
+    derived/    surfaces/  data/pockets/  plip/
+    index/      data/meta/  data/datasets/
+  out/runs/  out/reports/                        experiment outputs, not data
   tools/  envs/  keops_cache/            build and cache junk
 ```
 
-`encoder_test/`, `apo_test/` and `probe/` are also experiment outputs and
+`out/encoder_test/`, `out/apo_test/` and `probe/` are also experiment outputs and
 could go under an `out/`; left out of this proposal because the user did not
-ask and `runs/` alone is referenced 34 times in job scripts.
+ask and `out/runs/` alone is referenced 34 times in job scripts.
 
 **The blocker, and why this splits in two.** `input_path` is not computed at
 load time - it is a PERSISTED column holding a relative path
@@ -242,14 +242,14 @@ probe_retrieval) and `index.parquet` (build_dataset), and resolved against the
 cwd. **Moving `structures/` therefore invalidates every existing `items.tsv`
 and `index.parquet`.** `systems/` is reached through `sdf_paths`, the same way.
 
-The derived directories have no such problem: `surfaces/`, `pockets/` and
+The derived directories have no such problem: `surfaces/`, `data/pockets/` and
 `plip/` appear only in job-script defaults and CLI flags, never inside a data
 file.
 
 So:
 
 - **Now, cheap and safe: move the derived three.** `surfaces/` (7 references),
-  `pockets/` (3), `plip/` (1), plus the `meta/` and `datasets/` defaults in the
+  `data/pockets/` (3), `plip/` (1), plus the `data/meta/` and `data/datasets/` defaults in the
   Python CLIs. Roughly a dozen default lines and a `git mv` on the HPC; nothing
   persisted changes.
 - **With `dataset_v2`: move `upstream/`.** That rebuild regenerates

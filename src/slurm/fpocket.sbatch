@@ -20,15 +20,15 @@
 #
 # Then, CPU venv (numpy only), how good the pockets are as regions:
 #   python src/external_pockets.py score --items $RUN/items.tsv \
-#       --surface_cache $WORK/surfaces --pockets $POCKETS --n 1000 \
+#       --surface_cache $WORK/data/surfaces --pockets $POCKETS --n 1000 \
 #       --out $POCKETS/score.tsv --per_item $POCKETS/score_items.tsv
 #
 # Overrides: RUN, POCKETS, FPOCKET (binary), FPOCKET_ARGS (extra flags), LIMIT.
 set -e
 module load apptainer
 cd $WORK
-RUN=${RUN:-$WORK/runs/v1}
-POCKETS=${POCKETS:-$WORK/pockets/fpocket}
+RUN=${RUN:-$WORK/out/runs/v1}
+POCKETS=${POCKETS:-$WORK/data/pockets/fpocket}
 FPOCKET=${FPOCKET:-$WORK/tools/fpocket-src/bin/fpocket}
 N=${SLURM_ARRAY_TASK_COUNT:-1}
 I=${SLURM_ARRAY_TASK_ID:-0}

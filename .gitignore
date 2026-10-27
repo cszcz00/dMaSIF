@@ -1,19 +1,13 @@
 # --- Data and outputs (live on the HPC only) ---
 structures/
 systems/
-feats/
+
+# Data and outputs, grouped 2026-10-27 (see data/README.md)
+/data/
+/out/
 
 keops_cache/
-meta/
 meta_*/
-/datasets/
-/encoder_test/
-/apo_test/
-/probe/
-/probe_selftest/
-/runs/
-/surfaces/
-/train_selftest/
 /logs/
 /tmp/
 /reports/

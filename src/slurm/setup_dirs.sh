@@ -17,7 +17,7 @@ done
 echo
 echo "logs/    every sbatch's --output (was: ~70 .log files loose in \$WORK)"
 echo "tmp/     selftest scratch (train, probe, inventory)"
-echo "reports/ retrieval_report.py dumps and TSVs"
+echo "out/reports/ retrieval_report.py dumps and TSVs"
 echo
 echo "Old logs still at the root can be swept in now that nothing writes there:"
 echo "  mkdir -p logs && mv *.log logs/ 2>/dev/null; ls logs | wc -l"

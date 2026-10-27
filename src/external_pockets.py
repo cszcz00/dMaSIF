@@ -75,15 +75,15 @@ fpocket's own 1ATP sample through parse_fpocket as an end-to-end check.
 Example:
     # container, CPU is enough (no KeOps, no GPU); src/slurm/fpocket.sbatch
     # runs this as a 16-task array
-    python src/external_pockets.py run --items runs/v1/items.tsv \\
-        --out pockets/fpocket --fpocket $WORK/tools/fpocket-src/bin/fpocket \\
+    python src/external_pockets.py run --items out/runs/v1/items.tsv \\
+        --out data/pockets/fpocket --fpocket $WORK/tools/fpocket-src/bin/fpocket \\
         --shard 0/16
     # CPU venv
-    python src/external_pockets.py score --items runs/v1/items.tsv \\
-        --surface_cache surfaces --pockets pockets/fpocket --n 500 \\
-        --out pockets/fpocket_score.tsv
+    python src/external_pockets.py score --items out/runs/v1/items.tsv \\
+        --surface_cache data/surfaces --pockets data/pockets/fpocket --n 500 \\
+        --out data/pockets/fpocket_score.tsv
     # training: src/slurm/train_fpocket.sbatch, i.e. train.sbatch plus
-    #   --region_source external --pockets pockets/fpocket
+    #   --region_source external --pockets data/pockets/fpocket
 
 Depends on: numpy; extract, ids (run only); test_encoder.read_sdf_heavy and
             train_data.read_items (score only, both torch-free).

@@ -66,7 +66,7 @@ negatives, which with a bank of thousands are the likeliest false negatives;
 the current value is in every evaluation line and in history.json.
 
 Stages:
-    prepare    CPU venv. index.parquet -> runs/<name>/items.tsv.
+    prepare    CPU venv. index.parquet -> out/runs/<name>/items.tsv.
     cache      container, GPU. Prefill the surface cache. Optional - training
                fills it lazily - but shardable across array tasks, and the
                first epoch is otherwise dominated by surface sampling.
@@ -81,16 +81,16 @@ Stages:
 
 Example:
     # CPU venv
-    python src/train.py prepare --index datasets/dataset_v1/index.parquet \\
-        --out runs/v1 --split train
-    python src/ligand_features.py --index datasets/dataset_v1/index.parquet \\
-        --out runs/v1
+    python src/train.py prepare --index data/datasets/dataset_v1/index.parquet \\
+        --out out/runs/v1 --split train
+    python src/ligand_features.py --index data/datasets/dataset_v1/index.parquet \\
+        --out out/runs/v1
     # container (see src/slurm/train.sbatch)
-    python src/train.py train --items runs/v1/items.tsv \\
-        --lig_feats runs/v1/ligand_feats.npz --out runs/v1 \\
-        --head_ckpt encoder_test/head_pretrained_300.pt \\
+    python src/train.py train --items out/runs/v1/items.tsv \\
+        --lig_feats out/runs/v1/ligand_feats.npz --out out/runs/v1 \\
+        --head_ckpt out/encoder_test/head_pretrained_300.pt \\
         --region_method ball --ball_radius 8 --ball_shift 2 \\
-        --surface_cache surfaces/ --steps 20000 --max_hours 11
+        --surface_cache data/surfaces/ --steps 20000 --max_hours 11
 
 Depends on: numpy, torch; train_data, probe_retrieval, surface_encoder,
             ligand_encoder, anchors, test_encoder, ids; external_pockets
@@ -873,8 +873,8 @@ def subsample_val(rows, groups, n, seed, balance=False):
     """`n` of these validation rows.
 
     Without `balance`, uniform over ROWS - the original draw, kept bit-for-bit
-    so runs/v1 reproduces. Its flaw: the val pool is a few big targets and many
-    small ones, so a row-uniform 400 from runs/v1's ~2,070-row, ~283-group pool
+    so out/runs/v1 reproduces. Its flaw: the val pool is a few big targets and many
+    small ones, so a row-uniform 400 from out/runs/v1's ~2,070-row, ~283-group pool
     covered only 112 groups and the metric was dominated by a handful of
     targets, while training samples uniformly over TARGETS.
 

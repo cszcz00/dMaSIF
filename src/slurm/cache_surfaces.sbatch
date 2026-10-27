@@ -25,8 +25,8 @@
 set -e
 module load apptainer
 cd $WORK
-RUN=${RUN:-$WORK/runs/v1}
-SURFACES=${SURFACES:-$WORK/surfaces}
+RUN=${RUN:-$WORK/out/runs/v1}
+SURFACES=${SURFACES:-$WORK/data/surfaces}
 N=${SLURM_ARRAY_TASK_COUNT:-1}
 I=${SLURM_ARRAY_TASK_ID:-0}
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"

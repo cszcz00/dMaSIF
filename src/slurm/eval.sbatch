@@ -8,7 +8,7 @@
 #SBATCH --output=logs/eval_%j.log
 # Validation metrics from saved checkpoints (`train.py eval`); nothing trains.
 #
-# Written to put runs/v1 on the SAME validation set as the second round of
+# Written to put out/runs/v1 on the SAME validation set as the second round of
 # runs. v1 validated on a row-uniform 400 that covered 112 of its ~283 val
 # groups; the new runs use VAL_BALANCE=1, a round-robin over groups. --recarve
 # rebuilds v1's full group-disjoint val pool from its own val_frac /
@@ -18,15 +18,15 @@
 # own log printed.
 #
 # Overrides: CKPTS (space-separated; default v1's best.pt and last.pt), DATA
-#   (items.tsv / ligand_feats.npz; runs/v1), SURFACES, EVAL_ARGS (verbatim;
+#   (items.tsv / ligand_feats.npz; out/runs/v1), SURFACES, EVAL_ARGS (verbatim;
 #   default "--recarve --val_max 400 --val_balance").
 # `train.py eval` had never run before this job; if it fails, that is why.
 set -e
 module load apptainer
 cd $WORK
-DATA=${DATA:-$WORK/runs/v1}
-SURFACES=${SURFACES:-$WORK/surfaces}
-CKPTS=${CKPTS:-"$WORK/runs/v1/best.pt $WORK/runs/v1/last.pt"}
+DATA=${DATA:-$WORK/out/runs/v1}
+SURFACES=${SURFACES:-$WORK/data/surfaces}
+CKPTS=${CKPTS:-"$WORK/out/runs/v1/best.pt $WORK/out/runs/v1/last.pt"}
 EVAL_ARGS=${EVAL_ARGS:-"--recarve --val_max 400 --val_balance"}
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"
 

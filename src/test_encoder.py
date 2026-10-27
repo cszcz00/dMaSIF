@@ -19,11 +19,11 @@ labels stay attached to the points they were computed on.
 
 Example:
     # CPU venv
-    python src/test_encoder.py prepare --index datasets/dataset_v1/index.parquet \\
-        --n 48 --out encoder_test/
+    python src/test_encoder.py prepare --index data/datasets/dataset_v1/index.parquet \\
+        --n 48 --out out/encoder_test/
     # GPU container (see src/slurm/encoder_test.sbatch)
-    python src/test_encoder.py smoke   --items encoder_test/items.tsv --n 8
-    python src/test_encoder.py overfit --items encoder_test/items.tsv --n 32 --holdout 16
+    python src/test_encoder.py smoke   --items out/encoder_test/items.tsv --n 8
+    python src/test_encoder.py overfit --items out/encoder_test/items.tsv --n 32 --holdout 16
 """
 
 import argparse

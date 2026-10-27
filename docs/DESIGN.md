@@ -77,9 +77,9 @@ Stages: `prepare` (CPU venv) -> `cache` (GPU, array-shardable, optional) ->
 How to run it:
 ```
 # CPU venv
-python src/train.py prepare --index datasets/dataset_v1/index.parquet \
-    --out runs/v1 --split train --exclude encoder_test/items.tsv
-python src/ligand_features.py --index datasets/dataset_v1/index.parquet --out runs/v1
+python src/train.py prepare --index data/datasets/dataset_v1/index.parquet \
+    --out out/runs/v1 --split train --exclude out/encoder_test/items.tsv
+python src/ligand_features.py --index data/datasets/dataset_v1/index.parquet --out out/runs/v1
 # login node, container, no GPU: ~2-5 min
 apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox \
     python src/train.py selftest
@@ -206,7 +206,7 @@ Pieces:
 - `src/external_pockets.py`
   - `run` (container, CPU): fpocket on exactly the atoms the surface is built
     from (`load_protein_atoms`, same chain filter, no H), written to a temp
-    PDB -> `pockets/fpocket/<input_id>.npz`. It stores **alpha spheres**
+    PDB -> `data/pockets/fpocket/<input_id>.npz`. It stores **alpha spheres**
     (centre, radius, pocket id) plus per-pocket score / druggability / volume,
     NOT surface indices, so one file serves any resampling of the surface.
   - mapping: a surface point is in pocket k if it lies within `r_s + margin`
@@ -261,15 +261,15 @@ bash src/slurm/build_fpocket.sh                     # login node, once; self-che
 EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
 $EX src/train.py selftest                           # group [9] is new
 python src/external_pockets.py selftest             # CPU venv
-sbatch src/slurm/fpocket.sbatch                     # 16 CPU tasks -> pockets/fpocket/
-python src/external_pockets.py score --items runs/v1/items.tsv \
-    --surface_cache surfaces --pockets pockets/fpocket --n 1000 \
-    --out pockets/fpocket/score.tsv --per_item pockets/fpocket/score_items.tsv
+sbatch src/slurm/fpocket.sbatch                     # 16 CPU tasks -> data/pockets/fpocket/
+python src/external_pockets.py score --items out/runs/v1/items.tsv \
+    --surface_cache data/surfaces --pockets data/pockets/fpocket --n 1000 \
+    --out data/pockets/fpocket/score.tsv --per_item data/pockets/fpocket/score_items.tsv
 sbatch src/slurm/train_fpocket.sbatch               # b32-matched; set POCKET_SHAPE / POCKET_MARGIN from score
 ```
 Read `score` against ball_R8 (held-out hit 0.84-0.86, dccA 0.77, iou 0.53,
 size ~290): if fpocket's hit / dccA are not at least that, the training run is
-not worth its GPU. Compare `runs/fpocket` with `runs/b32` (0.127 MRR at
+not worth its GPU. Compare `out/runs/fpocket` with `out/runs/b32` (0.127 MRR at
 76k-92k proteins seen, same val set, same batch) at matched proteins seen.
 Variants are in `train_fpocket.sbatch`'s header (ball shape, drug rank,
 external_map, `LAM_POCKET=0`). `train.sbatch` gained `REGION_ARGS`, passed to
@@ -323,8 +323,8 @@ Run order:
 ```
 bash src/slurm/setup_plip.sh
 sbatch src/slurm/plip.sbatch
-python src/plip_labels.py check --items runs/v1/items.tsv --plip plip \
-    --surface_cache surfaces --n 500
+python src/plip_labels.py check --items out/runs/v1/items.tsv --plip data/plip \
+    --surface_cache data/surfaces --n 500
 ```
 
 ## Open design decisions (needed for training)
@@ -395,7 +395,7 @@ probe and the full loop cannot drift apart. What remains open is below them.
 
 ## End-to-end pipeline check (`src/train_check.sh`) - LOGIN NODE, no queue
 
-One command, seven stages, nothing touching `runs/` or `surfaces/`:
+One command, seven stages, nothing touching `out/runs/` or `surfaces/`:
 
 ```
 bash src/train_check.sh                                    # ~15-30 min
@@ -504,7 +504,7 @@ before the real run.
 
 | file | what |
 |---|---|
-| `build_manifest.py` | PLINDER annotation table -> `meta/manifest.parquet` |
+| `build_manifest.py` | PLINDER annotation table -> `data/meta/manifest.parquet` |
 | `fetch_structures.py` | download receptor / system files the manifest needs |
 | `build_dataset.py`, `receptor_inputs.py`, `configs/datasets/*.yaml` | spec-driven dataset builds with provenance |
 | `ids.py` | ID parsing, ligand chain / SDF lookup, surface tags |

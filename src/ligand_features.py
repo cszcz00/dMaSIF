@@ -11,7 +11,7 @@ the same molecules (see probe_retrieval.py):
 
     fp      ECFP4, 2048 bits, uint8. The same settings as
             build_manifest.ligand_fingerprints, recomputed here so a dataset's
-            features do not depend on meta/ staying put.
+            features do not depend on data/meta/ staying put.
     desc    RDKit physchem descriptors (DESCRIPTORS below), float32. Size,
             polar surface area, flexibility and shape - the properties a
             surface patch's shape and chemistry can plausibly be complementary
@@ -48,10 +48,10 @@ Output, in --out:
         schema       json        feature names and widths
 
 Example:
-    python src/ligand_features.py --index datasets/dataset_v1/index.parquet \\
-        --out datasets/dataset_v1/ --check
-    python src/ligand_features.py --index datasets/dataset_v1/index.parquet \\
-        --out datasets/dataset_v1/
+    python src/ligand_features.py --index data/datasets/dataset_v1/index.parquet \\
+        --out data/datasets/dataset_v1/ --check
+    python src/ligand_features.py --index data/datasets/dataset_v1/index.parquet \\
+        --out data/datasets/dataset_v1/
 
 Depends on: rdkit, numpy, pandas (--index only).
 Imported by: ligand_encoder.py (schema only), probe_retrieval.py.
@@ -359,7 +359,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--index", help="datasets/<name>/index.parquet; ligands in fp_row order")
+    src.add_argument("--index", help="data/datasets/<name>/index.parquet; ligands in fp_row order")
     src.add_argument("--smiles", help="text file of SMILES, one per line")
     ap.add_argument("--out", required=True, help="directory for ligand_feats.npz")
     ap.add_argument("--name", default="ligand_feats.npz")

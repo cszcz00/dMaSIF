@@ -1,7 +1,7 @@
 """PLIP interaction labels: which protein atoms each training ligand actually contacts, and how.
 
 Why. Pair pooling's site-type head starts near-uniform, so its eight types carry
-no chemistry until the contrastive loss teaches them some, and in runs/v3 that
+no chemistry until the contrastive loss teaches them some, and in out/runs/v3 that
 never happened (docs/STATUS.md). The crystal complexes already say which protein
 atoms H-bond, salt-bridge, pi-stack or pack against the ligand. PLIP (the
 Protein-Ligand Interaction Profiler, Salentin et al. 2015 / Adasme et al. 2021)
@@ -56,8 +56,8 @@ its SDF, not from coordinates alone).
 Example:
     bash src/slurm/setup_plip.sh            # once: venv over the container
     sbatch src/slurm/plip.sbatch            # 16 CPU tasks -> plip/
-    python src/plip_labels.py check --items runs/v1/items.tsv \\
-        --plip plip --surface_cache surfaces --n 500
+    python src/plip_labels.py check --items out/runs/v1/items.tsv \\
+        --plip data/plip --surface_cache data/surfaces --n 500
 
 Depends on: numpy; extract, ids, external_pockets.write_pdb, openbabel, plip
             (run / demo only); test_encoder.read_sdf_heavy (check only).

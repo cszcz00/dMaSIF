@@ -22,13 +22,13 @@ batch negative masking need neither clusters/ nor scores/. Only pairwise
 similarity VALUES need scores/, and this script no longer requires it.
 
 Example:
-    python build_manifest.py --plinder $PLINDER_DIR --out meta/ --inspect
-    python build_manifest.py --plinder $PLINDER_DIR --out meta/ --counts
-    python build_manifest.py --plinder $PLINDER_DIR --out meta/
+    python build_manifest.py --plinder $PLINDER_DIR --out data/meta/ --inspect
+    python build_manifest.py --plinder $PLINDER_DIR --out data/meta/ --counts
+    python build_manifest.py --plinder $PLINDER_DIR --out data/meta/
     python build_manifest.py --plinder $PLINDER_DIR --out meta_strict/ --strict
 
 Trimming later, e.g. back to the strict set:
-    df = pd.read_parquet("meta/manifest.parquet"); df = df[df.strict_rep]
+    df = pd.read_parquet("data/meta/manifest.parquet"); df = df[df.strict_rep]
 """
 
 import argparse

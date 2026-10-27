@@ -6,8 +6,8 @@ R2 endpoint is plain HTTP with predictable paths, so we can fetch just the
 systems/{two_char_code}.zip archives our receptors fall into, pull the members
 we need out of each, and drop the archive.
 
-Reads meta/receptors.txt (receptor_key, chains, two_char_code, system_id) and,
-with --systems_out, meta/manifest.parquet for the full list of systems. Writes:
+Reads data/meta/receptors.txt (receptor_key, chains, two_char_code, system_id) and,
+with --systems_out, data/meta/manifest.parquet for the full list of systems. Writes:
 
     <out>/<receptor_key>.cif        one receptor per file (protein only, no
                                     ligand) - the input to extract.py
@@ -30,9 +30,9 @@ where every listed boolean column is true, e.g. `--where strict_rep` for the
 strict subset, or `--where pass_mw pass_interactions` for a middle tier.
 
 Example:
-    python fetch_structures.py --receptors meta/receptors.txt --check
-    python fetch_structures.py --receptors meta/receptors.txt --out structures/ \\
-        --manifest meta/manifest.parquet --systems_out systems/ --limit 5
+    python fetch_structures.py --receptors data/meta/receptors.txt --check
+    python fetch_structures.py --receptors data/meta/receptors.txt --out structures/ \\
+        --manifest data/meta/manifest.parquet --systems_out systems/ --limit 5
 """
 
 import argparse
@@ -238,9 +238,9 @@ def write_extract_inputs(by_zip, out):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--receptors", required=True, help="meta/receptors.txt")
+    ap.add_argument("--receptors", required=True, help="data/meta/receptors.txt")
     ap.add_argument("--out", default="structures")
-    ap.add_argument("--manifest", help="meta/manifest.parquet; required by --systems_out and --where")
+    ap.add_argument("--manifest", help="data/meta/manifest.parquet; required by --systems_out and --where")
     ap.add_argument("--systems_out",
                     help="also extract system.cif + ligand_files/ for EVERY system in the "
                          "manifest, one folder per system_id; needed for pocket labelling")

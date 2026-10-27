@@ -20,7 +20,7 @@
 # this run is not worth its GPU, and the score table also says which
 # POCKET_SHAPE / POCKET_MARGIN to use.
 #
-# Batch, val set and data match runs/b32 (the best head-region run: 0.127 MRR
+# Batch, val set and data match out/runs/b32 (the best head-region run: 0.127 MRR
 # at 76k-92k proteins seen on the balanced val set), so the two are directly
 # comparable at MATCHED PROTEINS SEEN.
 #
@@ -30,18 +30,18 @@
 # counts them ("without a file" / "with no usable pocket").
 #
 # Variants, one GPU each:
-#   POCKET_SHAPE=ball RUN=$WORK/runs/fp_ball sbatch src/slurm/train_fpocket.sbatch
-#   POCKET_RANK=drug  RUN=$WORK/runs/fp_drug sbatch src/slurm/train_fpocket.sbatch
-#   REGION_SOURCE=external_map RUN=$WORK/runs/fp_map sbatch src/slurm/train_fpocket.sbatch
-#   LAM_POCKET=0 RUN=$WORK/runs/fp_nohead sbatch src/slurm/train_fpocket.sbatch
+#   POCKET_SHAPE=ball RUN=$WORK/out/runs/fp_ball sbatch src/slurm/train_fpocket.sbatch
+#   POCKET_RANK=drug  RUN=$WORK/out/runs/fp_drug sbatch src/slurm/train_fpocket.sbatch
+#   REGION_SOURCE=external_map RUN=$WORK/out/runs/fp_map sbatch src/slurm/train_fpocket.sbatch
+#   LAM_POCKET=0 RUN=$WORK/out/runs/fp_nohead sbatch src/slurm/train_fpocket.sbatch
 #       (the head no longer places regions; this asks whether its BCE still
 #       helps as an auxiliary loss on the shared conv)
 # Overrides here: POCKETS, REGION_SOURCE, POCKET_SHAPE, POCKET_RANK,
 #   POCKET_MARGIN, plus everything train.sbatch takes.
-POCKETS=${POCKETS:-$WORK/pockets/fpocket}
+POCKETS=${POCKETS:-$WORK/data/pockets/fpocket}
 [ -d "$POCKETS" ] || { echo "no $POCKETS; sbatch src/slurm/fpocket.sbatch first"; exit 1; }
-export RUN=${RUN:-$WORK/runs/fpocket}
-export DATA=${DATA:-$WORK/runs/v1}
+export RUN=${RUN:-$WORK/out/runs/fpocket}
+export DATA=${DATA:-$WORK/out/runs/v1}
 export BATCH=${BATCH:-32}
 export STEPS=${STEPS:-5000}
 export VAL_BALANCE=${VAL_BALANCE-1}

@@ -54,13 +54,13 @@ Tanimoto >= --tanimoto.
 
 Example:
     # 1. CPU venv: pick receptors the checkpoint has not seen, and featurise
-    python src/probe_retrieval.py prepare --index datasets/dataset_v1/index.parquet \\
-        --exclude encoder_test/items.tsv --n 1500 --out probe/
-    python src/ligand_features.py --index datasets/dataset_v1/index.parquet \\
+    python src/probe_retrieval.py prepare --index data/datasets/dataset_v1/index.parquet \\
+        --exclude out/encoder_test/items.tsv --n 1500 --out probe/
+    python src/ligand_features.py --index data/datasets/dataset_v1/index.parquet \\
         --out probe/
     # 2. container, GPU: freeze the anchors (see src/slurm/probe_retrieval.sbatch)
     python src/probe_retrieval.py dump --items probe/items.tsv \\
-        --ckpt encoder_test/head_pretrained_300.pt --region_method ball \\
+        --ckpt out/encoder_test/head_pretrained_300.pt --region_method ball \\
         --ball_radius 8 --ball_shift 2 --out probe/anchors.pt
     # 3. anywhere with torch: compare the arms
     python src/probe_retrieval.py probe --anchors probe/anchors.pt \\

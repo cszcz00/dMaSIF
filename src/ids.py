@@ -125,7 +125,7 @@ def receptor_key(system_id):
 
 
 def read_receptors(path):
-    """meta/receptors.txt -> {receptor_key: surface tag}."""
+    """data/meta/receptors.txt -> {receptor_key: surface tag}."""
     from pathlib import Path
 
     out = {}

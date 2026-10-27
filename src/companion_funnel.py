@@ -59,8 +59,8 @@ both sides. Stripping is what makes holo / apo / predicted comparable.
 
 Example:
     # CPU venv, both stages
-    python src/companion_funnel.py funnel --manifest meta/manifest.parquet
-    python src/companion_funnel.py distance --manifest meta/manifest.parquet \\
+    python src/companion_funnel.py funnel --manifest data/meta/manifest.parquet
+    python src/companion_funnel.py distance --manifest data/meta/manifest.parquet \\
         --systems systems --n 400
 
 Depends on: pandas, numpy (funnel); extract.load_protein_atoms and
@@ -241,12 +241,12 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("funnel", help="manifest only: how much data the query costs")
-    p.add_argument("--manifest", default="meta/manifest.parquet")
+    p.add_argument("--manifest", default="data/meta/manifest.parquet")
     p.add_argument("--group_col", default="pli_unique_qcov__95__strong__component",
                    help="column counted as a target group")
 
     p = sub.add_parser("distance", help="how far companions sit from the ligand")
-    p.add_argument("--manifest", default="meta/manifest.parquet")
+    p.add_argument("--manifest", default="data/meta/manifest.parquet")
     p.add_argument("--systems", default="systems",
                    help="PLINDER systems directory (<system_id>/ligand_files/)")
     p.add_argument("--n", type=int, default=400, help="systems to sample")

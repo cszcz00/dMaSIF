@@ -1,8 +1,8 @@
-"""Read-only report on the PLINDER data on disk: meta/, structures/, systems/.
+"""Read-only report on the PLINDER data on disk: data/meta/, structures/, systems/.
 
 Answers "what do we actually have" without assuming the pipeline finished:
 
-    meta/        manifest columns, types, nulls, flag counts, splits;
+    data/meta/        manifest columns, types, nulls, flag counts, splits;
                  fingerprint matrix; receptors.txt vs the manifest
     structures/  how many receptor files, leftovers from interrupted runs,
                  coverage of the manifest (all rows and strict_rep);

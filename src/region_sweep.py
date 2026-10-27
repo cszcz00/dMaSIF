@@ -53,8 +53,8 @@ Then, per method, the best setting by each --select metric, and for each:
                   pocket size, to see whether misses are small or large pockets
 
 Example (container, or any env with torch + numpy):
-    python src/region_sweep.py --maps encoder_test/maps.pt \\
-        --out encoder_test/region_sweep.tsv --per_item encoder_test/region_items.tsv
+    python src/region_sweep.py --maps out/encoder_test/maps.pt \\
+        --out out/encoder_test/region_sweep.tsv --per_item out/encoder_test/region_items.tsv
 """
 
 import argparse

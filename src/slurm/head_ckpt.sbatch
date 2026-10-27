@@ -32,8 +32,8 @@ module load apptainer
 cd $WORK
 N_TRAIN=${N_TRAIN:-32}
 STEPS=${STEPS:-300}
-ITEMS=${ITEMS:-$WORK/encoder_test/items.tsv}
-CKPT=$WORK/encoder_test/head_pretrained_${STEPS}.pt
+ITEMS=${ITEMS:-$WORK/out/encoder_test/items.tsv}
+CKPT=$WORK/out/encoder_test/head_pretrained_${STEPS}.pt
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"
 
 echo "node $(hostname): $(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader)"

@@ -16,7 +16,7 @@ Companion documents, split out of this file on 2026-10-27:
 **`C` is the configuration: fpocket's pocket at the row's ligand
 (`--pocket_select site`), pair pooling (`--pool_mode pairs`), BatchNorm on the
 pooled vector (`--anchor_norm batch`), batch 32, constant lr, no chemo, no
-bank.** `runs/v3c_site_pairs_bn`. Five things are settled:
+bank.** `out/runs/v3c_site_pairs_bn`. Five things are settled:
 
 1. **C plateaus at ~0.18 known-site MRR** by step ~3,600 of 5,000, while train
    nce keeps falling. The ceiling is MEMORISATION (~69 visits per target
@@ -28,7 +28,7 @@ bank.** `runs/v3c_site_pairs_bn`. Five things are settled:
    been measured and is the most important open number.
 3. **The memory bank + extra ligands is what killed v3, and this is now
    proven twice over.** `v3e` reproduces it exactly (loss pinned at its random
-   value, cosdiff 0.87 -> 0.986 in 125 steps), and `runs/v2` - recovered
+   value, cosdiff 0.87 -> 0.986 in 125 steps), and `out/runs/v2` - recovered
    2026-10-27, having been run and never recorded - dies the same way from a
    completely different encoder: head regions, mean pooling, no BatchNorm, a
    descriptor branch, a cosine schedule. Every bank-free run learns. Dropped.
@@ -117,14 +117,14 @@ Then, in any order:
 1. **Second round of runs (code in place, not yet run).** Four GPU jobs plus
    one short eval, commands in `src/slurm/train.sbatch`'s header:
    - finish v1: `SKIP_SMOKE=1 sbatch src/slurm/train.sbatch` (15,642 -> 20,000)
-   - `runs/frozen`, `FREEZE=1`: `--freeze_encoder` freezes the surface encoder
+   - `out/runs/frozen`, `FREEZE=1`: `--freeze_encoder` freezes the surface encoder
      below the projection (conv, inputs, pocket head, so the regions are fixed
      too); projection, ligand and temperature train. The probe's setting inside
      this loop, on this split: **the control that says whether training the
      protein side buys the MRR.**
-   - `runs/shells`, `POOL_MODE=shells`: 48-dim pooled vector that keeps
+   - `out/runs/shells`, `POOL_MODE=shells`: 48-dim pooled vector that keeps
      arrangement inside a region. Head loads 117/118 (projection width).
-   - `runs/b32`, `BATCH=32 STEPS=5000`, eval/save every 125: 4x the
+   - `out/runs/b32`, `BATCH=32 STEPS=5000`, eval/save every 125: 4x the
      negatives; ~3,900 steps is v1's 125k proteins seen. Memory at batch 32
      is unmeasured; an OOM would fail at the first step.
    - all three new runs use `VAL_BALANCE=1` (`--val_balance`: the 400 val rows
@@ -220,11 +220,11 @@ Run it on C at 5,000 steps, both selects, before tweaking anything.
 `src/slurm/report.sbatch` is the GPU half (both selects, ~30 min test queue)
 and prints the CPU commands to follow it:
 ```
-sbatch src/slurm/report.sbatch                 # -> reports/<run>_{site,topk}.npz
+sbatch src/slurm/report.sbatch                 # -> out/reports/<run>_{site,topk}.npz
 # then, CPU venv (numpy only; load_ligand_arrays avoids ligand_encoder's torch)
-python src/retrieval_report.py report --dump reports/v3c_site_pairs_bn_topk.npz \
-    --items runs/v1/items.tsv --lig_feats runs/v1/ligand_feats.npz \
-    --out reports/v3c_topk
+python src/retrieval_report.py report --dump out/reports/v3c_site_pairs_bn_topk.npz \
+    --items out/runs/v1/items.tsv --lig_feats out/runs/v1/ligand_feats.npz \
+    --out out/reports/v3c_topk
 ```
 
 ## Data inventory (`src/inventory.py`) - WRITTEN, selftest PASSES, never run on real data
@@ -232,7 +232,7 @@ python src/retrieval_report.py report --dump reports/v3c_site_pairs_bn_topk.npz 
 What is on disk, is it complete, is any of it stale. Read-only (parquet, .npz
 headers, history.json), so it is safe while jobs train, and numpy/pandas only -
 no torch, so it runs in the CPU venv. `python src/inventory.py report --items
-runs/v1/items.tsv`. Three things `du` and `ls` cannot answer:
+out/runs/v1/items.tsv`. Three things `du` and `ls` cannot answer:
 - **coverage**: a surface / pocket / PLIP file per row of an items.tsv, keyed
   correctly per artefact (surfaces and pockets by `input_id`, PLIP by
   `system_id`), with the missing ones named. A missing surface costs sampling
@@ -243,7 +243,7 @@ runs/v1/items.tsv`. Three things `du` and `ls` cannot answer:
   so `n_heavy` disagrees with `diff(atom_ptr)`. Any mismatch means rebuild.
   START HERE records `probe/` and `train_check/` as affected; this says which
   files on disk actually are.
-- **runs**: every `runs/<name>/` summarised from history.json alone -
+- **runs**: every `out/runs/<name>/` summarised from history.json alone -
   evaluations, last step, best val MRR and where, last cosdiff / tau / fb,
   which checkpoints exist. The index of what each directory holds, which
   otherwise lives only in this file's prose.
