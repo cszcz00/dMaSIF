@@ -725,7 +725,32 @@ ahead (0.115); known-site + mean pooling does NOT beat the head's top-8 max.
 Round 2, `bash src/slurm/v3_diag2.sh`, each one change from C: `v3d` + chemo,
 `v3e` + bank 2048 / 1024 extra ligands (judge by mrr / cosdiff, its nce is over
 ~2,000 candidates), `v3c+` C resumed 1,500 -> 5,000 steps (where it
-plateaus). Results: `v3c+` DONE (below); `v3d` / `v3e` still PENDING.
+plateaus). Results: `v3c+` and `v3d` DONE (below); `v3e` still PENDING.
+
+**`v3d` = C + chemo (2026-10-27, 1,500 steps): CHEMO IS NOT THE CULPRIT, AND
+CHEMO DOES NOT HELP AT SCALE.** Window means against C on the same 400 rows:
+
+| run | mrr 500-875 | mrr 1000-1500 | top10 1000-1500 | best | nce @1500 | cosdiff |
+|---|---|---|---|---|---|---|
+| C (pairs + BN) | 0.083 | **0.114** | 0.22 | 0.127 | 2.29 | 0.87 -> 0.82 |
+| v3d (+ chemo) | 0.084 | 0.102 | 0.21 | 0.116 | 2.27 | 0.83 -> 0.81 |
+
+Read: (1) v3d TRAINS, tracking C step for step (identical at 500-875,
+0.012 below at 1000-1500, which is inside the +-0.015 noise). So chemo did
+not flatten v3 either, and **the only suspects left are the bank + extra
+ligands (`v3e`) and the cosine schedule.** (2) This is also the at-scale
+chemo re-test that "Next steps" item 5 asked for: 28 channels against 16 on
+18,639 rows / 2,315 groups buys NOTHING, and is a touch worse on mrr and
+top10. Taken with the 32-protein ablation, chemo is now negative twice, at
+both scales. Keep `cfg.chemo` off. Caveat: 1,500 steps is the LEARNING phase
+(C plateaus ~3,600), so whether chemo changes the plateau is untested - and
+not worth a GPU day on a channel set that shows nothing while the curve is
+still steep. (3) `--chemo` with `--head_ckpt` is now proven on a GPU: the log
+shows the three input tensors inflated 16 -> 28 ("pretrained function
+preserved at init") and 115/118 head tensors loaded, the 3 skipped being the
+projection (312 pooled dims against the head's 16). Before `dbb7c7a` those
+inflated tensors would have been left RANDOM under a pretrained conv. (4) tau
+flat at 0.070-0.071 the whole run, as for every other bank-free run.
 
 **`v3c+` (C resumed 1,500 -> 5,000 steps, 2026-10-27): C PLATEAUS AT ~0.18
 KNOWN-SITE MRR, and the limit is now MEMORISATION, not optimisation.**
