@@ -745,7 +745,7 @@ def evaluate(model, store, labels, table, rows, ligands, a, device):
                                 "eff_dims")}
         met.update(n=int(keep.sum()), auroc=got["auroc"], ap=got["ap"],
                    fallback_rate=got["fallback_rate"],
-                   tau=1.0 / float(model.scale()))
+                   tau=1.0 / float(model.scale().detach()))
         return met
     kn = keep.cpu().numpy()
     rows, anchors, usable = rows[kn], anchors[keep], usable[keep]
@@ -782,7 +782,7 @@ def evaluate(model, store, labels, table, rows, ligands, a, device):
     # The temperature the scores were taken at: 1 / the clamped logit scale,
     # so a run sitting at --tau_min reads exactly tau_min.
     met.update(auroc=got["auroc"], ap=got["ap"],
-               fallback_rate=got["fallback_rate"], tau=1.0 / float(model.scale()))
+               fallback_rate=got["fallback_rate"], tau=1.0 / float(model.scale().detach()))
     return met
 
 

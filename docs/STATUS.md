@@ -788,6 +788,41 @@ for p in sys.argv[1:]:
 Baselines and the blind comparison (C's decoy `site` rate, then C vs v3f
 with topk / drug) are in the script's header.
 
+**C's two baseline evals (2026-10-27, `runs/v3c_1500/best.pt`, which is step
+1,125 - C's best val MRR inside its first 1,500 steps, 0.127, a noise peak
+over the 0.114 window mean). Same 400 balanced val rows both times:**
+
+| eval | mrr | top1 | top10 | site | fb | cosdiff |
+|---|---|---|---|---|---|---|
+| known site + 7 decoys | 0.127 | 0.063 | 0.240 | **0.605** | 0.058 | 0.822 |
+| **blind (topk, rank drug)** | **0.088** | 0.040 | 0.163 | 0.543 | **0.230** | 0.796 |
+
+Read: (1) **The decoy metric works and C is already well above chance on it
+without ever training on decoys**: site 0.605 against ~1/8 = 0.125 for a coin
+flip over 7 decoys, site_cov 1.00 (every val row got at least one decoy). That
+is the bar v3f has to clear. (2) The known-site eval reproduces C's own
+0.127 EXACTLY, which is the check that decoys stay out of the ranking - they
+are label 0 and never `usable`, so MRR cannot see them. (3) **Blind costs ~31%
+of MRR (0.127 -> 0.088) and quadruples the fallback rate (0.058 -> 0.230)**:
+the top 8 fpocket pockets by druggability simply do not contain the site for
+~23% of rows, as `score` predicted (hit 0.78). (4) **The headline: blind, C
+at ~1,125 steps MATCHES b32 and does not beat it** - 0.088 against b32's
+0.087 at 1,250 steps, same batch 32, so matched data. C's known-site lead over
+b32 (0.115 vs 0.087 at 1,250) was the known SITE, not a better
+representation. (5) So the open question is whether the PLATEAUED C wins:
+known-site it went 0.127 -> 0.184 (+45%) by step 4,875, and nothing has
+scored that checkpoint blind yet. That eval is the cheap, decisive number:
+```
+CKPTS="$WORK/runs/v3c_site_pairs_bn/best.pt" \
+EVAL_ARGS="--use_ckpt_split --pocket_select topk --pocket_rank drug" \
+    sbatch src/slurm/eval.sbatch
+```
+Note b32's own plateau is also unknown (it stopped at 2,875 of 5,000 steps,
+best 0.142 at 2,500), so a plateau-vs-plateau comparison needs b32 finished
+too. (6) `site` 0.543 in the blind eval is the ORIGINAL selector-style metric
+(argmax over the scored anchors), not the decoy rate - the two are not
+comparable, and site_rate picks by `--pocket_select`.
+
 Final temperatures (2026-10-27, that readout; all started at 0.07, cap 0.01):
 
 | run | step | tau |
