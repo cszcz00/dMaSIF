@@ -26,10 +26,15 @@ bank.** `runs/v3c_site_pairs_bn`. Five things are settled:
    data.** Its known-site lead was the known SITE, not a better
    representation. The blind number for the PLATEAUED checkpoint has never
    been measured and is the most important open number.
-3. **The memory bank + extra ligands is what killed v3.** `v3e` reproduces it
-   exactly: contrastive loss pinned at its random value, cosdiff 0.87 -> 0.986
-   inside 125 steps. Dropped. It is NOT a temperature effect - `v3g` proved
-   that, so `--tau_min` stays at its 0.01 default as a cheap guard.
+3. **The memory bank + extra ligands is what killed v3, and this is now
+   proven twice over.** `v3e` reproduces it exactly (loss pinned at its random
+   value, cosdiff 0.87 -> 0.986 in 125 steps), and `runs/v2` - recovered
+   2026-10-27, having been run and never recorded - dies the same way from a
+   completely different encoder: head regions, mean pooling, no BatchNorm, a
+   descriptor branch, a cosine schedule. Every bank-free run learns. Dropped.
+   NOT a temperature effect (`v3g`), and NOT the BatchNorm train/eval mismatch
+   either, since v2 ran `anchor_norm none`. The surviving suspect is the
+   detached bank's one-sided repulsion on the ligand encoder; see RESULTS.
 4. **Chemo is neutral at scale** (`v3d`), negative twice now. `cfg.chemo`
    stays off.
 5. **Site decoys work at their own job and cost the main one** (`v3f`):

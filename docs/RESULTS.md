@@ -337,7 +337,7 @@ What it says:
   val was dominated by a few big, easy targets. Every earlier val number in
   this file was flattered by that.
 
-## v2 (`src/slurm/archive/train_v2.sbatch`) - WRITTEN, NOT YET RUN
+## v2 (`src/slurm/archive/train_v2.sbatch`) - RUN, DEAD AT CHANCE
 
 Four levers, all flags defaulting OFF so every earlier run reproduces, and all
 switched on by `train_v2.sbatch` (a preset over `train.sbatch`; archived
@@ -368,6 +368,52 @@ switched on by `train_v2.sbatch` (a preset over `train.sbatch`; archived
 4. **Schedule.** `--lr_schedule cosine --warmup W --min_lr_frac`; `lr_at` is a
    function of the step alone, so resumes need no state. v2: cosine over 6000,
    warmup 200.
+
+**RESULT (`runs/v2`, log `train_v2_141204.log`, recovered 2026-10-27 - it had
+been run all along and never recorded): DEAD AT CHANCE, and it is the second
+independent proof that THE BANK is what kills training.** 4,884 of 6,000 steps
+(hit `--max_hours`), ~7.5 s/step, GPU peak 13.7 GB.
+
+| | step 0 | across the run | best |
+|---|---|---|---|
+| mrr (chance 0.017) | 0.019 | 0.014-0.020, mean 0.017 | **0.0199** |
+| cosdiff | 0.971 | 0.94-1.000, no trend | - |
+| nce (chance 7.301) | - | 5.77-6.71, typically ~6.4 | - |
+| AUROC / AP | 0.919 / 0.464 | ~0.918 / ~0.47, flat | - |
+| fb | 0.182 | 0.17-0.20, flat | - |
+
+Why this matters more than v3e did. v2 shares NOTHING with v3e's encoder
+except the bank: it pools the HEAD's own ball_R8 regions (8 usable anchors,
+scored by max) rather than one fpocket site pocket, uses `mean` pooling over
+16+32 descriptor dims rather than 312 pair dims, has `anchor_norm NONE`, and
+adds a descriptor branch and a cosine schedule. Both die at chance with
+cosdiff pinned near 1.0, while every bank-free run (v1, b32, frozen, shells,
+A, B, C, v3d, v3f) learns. **The bank kills training independently of the
+pooling, the region source, the normalisation and the schedule.**
+
+It also KILLS ONE OF THE TWO SUSPECTS in the v3e entry above. The
+`pool_norm` train/eval mismatch cannot explain v2, because `anchor_norm none`
+makes `pool_norm` an Identity - there is no BatchNorm to disagree with itself.
+What survives is the other suspect: **the bank's anchors are detached, so on
+the ligand -> protein side 2,048 of 2,080 candidates push only the LIGAND
+encoder, away from 2,048 fixed points sampled from the whole protein
+manifold, while the protein side still sees 31 negatives.**
+
+One difference worth keeping. v3e's nce sat EXACTLY at its 7.301 chance;
+v2's falls to ~6.4, about 0.9 nats below. So v2 learned something, and the
+cheapest such thing is to tell STALE bank vectors from live batch ones (the
+conv moves between the push and the use), which would let it discount ~2,048
+candidates without any chemistry - and would show up exactly as it does here:
+train loss falling while val MRR never leaves chance. Plausible, not proven.
+
+A second reading: **the pocket head barely trains either** (AUROC 0.919 ->
+0.918, AP flat, `pock` flat at 0.6-0.7), where v3e's head improved normally.
+So in v2 the contrastive term is not merely useless, it appears to be
+actively fighting the auxiliary BCE through the shared conv.
+
+Not tested anywhere, and the one v2 lever that never got a fair trial: the
+**descriptor branch** (`--desc_dims 32`). It rode along with the bank that
+broke everything. `DESC_DIMS=32` on `train_v3.sbatch` would isolate it.
 
 Bar: runs/b32's 0.127 MRR at 76k-92k proteins seen on the balanced val set;
 appreciable = ~0.20. Leave-one-out ablations are in the sbatch header.

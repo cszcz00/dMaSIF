@@ -506,7 +506,7 @@ def selftest(a):
             m = val()
             mrrs.append(m["mrr"])
             fbs.append(m["fb"])
-            print(f"    step {step:4d}: loss {loss.item():7.4f}  MRR {m['mrr']:.3f}  "
+            print(f"    step {step:4d}: loss {loss.detach().item():7.4f}  MRR {m['mrr']:.3f}  "
                   f"top1 {m['top1']:.3f}  fallback {m['fb']:.2f}", flush=True)
 
     best_mrr = max(mrrs) if mrrs else 0.0
