@@ -228,6 +228,31 @@ and PyMOL output are checked on a planted dump (11 checks).
 
 ## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, `dataset_v2.yaml`) - FUNNEL DONE: dataset_v2 = 7,897 train groups (3.3x), ready to build
 
+**Build + train order (user, 2026-10-29: cap 50, fixed validation).**
+```
+git pull
+bash src/slurm/build_v2.sh          # prep (CPU) -> surfaces (GPU) / fpocket / PLIP arrays
+# when all four are done: re-score the v1 checkpoints on the FIXED set
+CKPTS="$WORK/out/runs/v3c_site_pairs_bn/best.pt" \
+EVAL_ARGS="--val_set $WORK/out/valset_v1v2 --pocket_select site" sbatch src/slurm/eval.sbatch
+# then C's configuration on dataset_v2, validated on the same rows
+SKIP_SMOKE=0 STEPS=10000 CHEMO=0 BANK= EXTRA_LIG= LR_SCHEDULE=const WARMUP=0 \
+POOL_MODE=pairs ANCHOR_NORM=batch RUN=$WORK/out/runs/v4_C_dataset_v2 \
+DATA=$WORK/out/runs/dataset_v2 \
+TRAIN_ARGS="--eval_every 125 --save_every 125 --val_set $WORK/out/valset_v1v2" \
+sbatch src/slurm/train_v3.sbatch
+```
+`src/valset.py` (selftest PASSES, numpy only): the fixed validation set is
+dataset_v1's carved val TARGETS (re-derived exactly as every v1 run carved
+them: same rows dropped for failed ligands, split_by_group at val_frac 0.1,
+split_seed 0), 400 group-balanced rows that exist in BOTH datasets with the
+same ligand; a v2 run trains on everything outside those targets.
+`train.py train / eval --val_set DIR` use it (eval refuses a set that
+overlaps the checkpoint's train rows). The v1 numbers so far were on a
+different (per-run carved) set, so C is re-scored on the fixed one before
+comparing. `train.py` changes are static-checked only: the first eval /
+train with --val_set is their test.
+
 Third run (RESULTS): 8,398 train groups (from 2,379; visits 67 -> 19) with
 the scan gates, but nucleotide analogues (ANP, GNP, ACP), NAG, maltose and
 GLU were uncapped hubs and DMU a detergent. Now: a 50-row cap on every

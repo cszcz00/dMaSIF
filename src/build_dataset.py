@@ -274,7 +274,7 @@ def main():
     ap.add_argument("spec", help="configs/datasets/<name>.yaml")
     ap.add_argument("--root", default=os.environ.get("WORK", "."),
                     help="project root holding data/meta/, structures/, data/datasets/ (default $WORK)")
-    ap.add_argument("--out", help="output directory (default <root>/datasets/<name>)")
+    ap.add_argument("--out", help="output directory (default <root>/data/datasets/<name>)")
     ap.add_argument("--dry_run", action="store_true", help="print attrition and counts; write nothing")
     ap.add_argument("--check_files", action="store_true",
                     help="add input_exists / system_exists columns by checking the disk")
@@ -283,7 +283,7 @@ def main():
 
     spec = load_spec(a.spec)
     root = Path(a.root)
-    out = Path(a.out) if a.out else root / "datasets" / spec["name"]
+    out = Path(a.out) if a.out else root / "data" / "datasets" / spec["name"]
     if out.exists() and not a.overwrite and not a.dry_run:
         raise SystemExit(f"{out} exists; pass --overwrite to rebuild it")
 

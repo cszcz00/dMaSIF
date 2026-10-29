@@ -965,7 +965,21 @@ def train(a):
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
 
     # split, sampler, state
-    if a.val_split:
+    if getattr(a, "val_set", "") and a.val_split:
+        raise SystemExit("--val_set and --val_split are alternatives")
+    if getattr(a, "val_set", ""):
+        # One fixed validation set shared across datasets (src/valset.py):
+        # validation = its rows, training = every row outside its held-out
+        # target groups. Not subsampled: the set IS the comparison.
+        from valset import apply as apply_val_set
+        train_rows, val_rows, missing = apply_val_set(table.rows, a.val_set)
+        if missing:
+            raise SystemExit(f"--val_set {a.val_set}: {len(missing)} of its rows are "
+                             f"not in {a.items} (e.g. {missing[:3]}); make the set "
+                             "from this items.tsv (valset.py make --items_b)")
+        print(f"validation = the fixed set {a.val_set} ({len(val_rows)} rows); "
+              "training excludes its held-out target groups")
+    elif a.val_split:
         is_val = np.asarray([r["split"] in a.val_split.split(",") for r in table.rows])
         train_rows, val_rows = np.nonzero(~is_val)[0], np.nonzero(is_val)[0]
         if len(val_rows) < 2:
@@ -979,7 +993,7 @@ def train(a):
     else:
         train_rows, val_rows = split_by_group(table.group, a.val_frac, a.split_seed)
         print("validation carved out group-disjointly from the prepared rows")
-    if a.val_max and len(val_rows) > a.val_max:
+    if a.val_max and len(val_rows) > a.val_max and not getattr(a, "val_set", ""):
         val_rows = subsample_val(val_rows, table.group, a.val_max, a.split_seed,
                                  a.val_balance)
         print(f"validation subsampled to {a.val_max} rows (--val_max"
@@ -1252,9 +1266,23 @@ def evaluate_only(a):
                          keep_hydrogens=saved.keep_hydrogens,
                          pockets=pocket_source(a, model.encoder.cfg))
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
-    if a.use_ckpt_split and a.recarve:
-        raise SystemExit("--use_ckpt_split and --recarve are alternatives")
-    if a.recarve:
+    if sum(bool(x) for x in (a.use_ckpt_split, a.recarve, getattr(a, "val_set", ""))) > 1:
+        raise SystemExit("--use_ckpt_split, --recarve and --val_set are alternatives")
+    if getattr(a, "val_set", ""):
+        # The fixed cross-dataset set (src/valset.py): the same rows whatever
+        # dataset the checkpoint trained on, which is what makes a v1 and a v2
+        # checkpoint comparable. Not subsampled.
+        from valset import apply as apply_val_set
+        _, rows, missing = apply_val_set(table.rows, a.val_set)
+        if missing:
+            raise SystemExit(f"--val_set: {len(missing)} rows not in {a.items}")
+        leak = np.intersect1d(rows, np.asarray(ckpt["train_rows"]))
+        if len(leak):
+            raise SystemExit(f"--val_set: {len(leak)} of its rows were TRAIN rows of "
+                             "this checkpoint; is --items the table it trained on?")
+        a.val_max = 0
+        print(f"--val_set {a.val_set}: {len(rows)} rows")
+    elif a.recarve:
         # The checkpoint stores only its SUBSAMPLED val rows; the full pool is
         # recomputed from the split it was carved with, which split_by_group
         # makes deterministic in (groups, val_frac, split_seed).
@@ -1565,6 +1593,10 @@ def main():
     p.add_argument("--val_balance", action="store_true",
                    help="draw the --val_max rows round-robin over target groups "
                         "instead of uniformly over rows (see subsample_val)")
+    p.add_argument("--val_set", default="",
+                   help="a src/valset.py directory: validate on its fixed rows and "
+                        "train on everything outside its held-out targets; the "
+                        "same rows across datasets, so runs compare")
     p.add_argument("--freeze_encoder", action="store_true",
                    help="control: freeze the surface encoder below the "
                         "projection, so only projection + ligand train")
@@ -1586,6 +1618,9 @@ def main():
     p.add_argument("--recarve", action="store_true",
                    help="evaluate the checkpoint's FULL group-disjoint val "
                         "pool, recomputed from its val_frac / split_seed")
+    p.add_argument("--val_set", default="",
+                   help="evaluate on a src/valset.py fixed set (any dataset's "
+                        "checkpoint, the same rows)")
     p.add_argument("--val_max", type=int, default=0,
                    help="then subsample to this many rows (0 = all)")
     p.add_argument("--val_balance", action="store_true",
