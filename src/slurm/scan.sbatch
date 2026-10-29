@@ -3,8 +3,8 @@
 #SBATCH --qos=standard
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
-#SBATCH --time=01:00:00
-#SBATCH --array=0-63
+#SBATCH --time=02:00:00
+#SBATCH --array=0-7
 #SBATCH --output=logs/scan_%A_%a.log
 # Structure scan over the WHOLE manifest -> $OUT/part_<i>of<n>.parquet
 # (src/structure_scan.py run): per row, ligand burial, pocket completeness /
@@ -14,10 +14,13 @@
 # ~224k receptor files + ~307k system files, each parsed once. Shards are
 # disjoint (every n-th receptor of a fixed sorted order) and a shard whose
 # part file exists is skipped, so resubmitting the array only redoes failed
-# or timed-out tasks. Time per receptor is printed every 500; at 64 tasks the
-# shard is ~3.5k receptors.
-# Measured on the 50-receptor test: ~0.12 s per receptor, so a shard is
-# ~7-10 min and 1 h leaves a wide margin. QOS: `sacctmgr show assoc
+# or timed-out tasks. Time per receptor is printed every 500; at 8 tasks the
+# shard is ~28k receptors.
+# Measured on the 50-receptor test: ~0.12 s per receptor, ~7.5 CPU-hours
+# for the manifest, so ~1 h per shard at 8 and 2 h leaves a margin. 8, not
+# 64: both the priority and standard QOS cap submitted jobs per user below
+# 64. More shards if the cap allows: `sbatch --array=0-15 --time=01:00:00`.
+# Never mix shard counts in one $OUT (merge refuses); clear it first. QOS: `sacctmgr show assoc
 # user=$USER format=account,qos%40` lists the ones you may use; override
 # at submit with `sbatch --qos=<name> ...`.
 #
