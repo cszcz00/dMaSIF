@@ -26,6 +26,8 @@ cd $WORK
 CKPT=${CKPT:-$WORK/out/runs/v3c_site_pairs_bn/best.pt}
 DATA=${DATA:-$WORK/out/runs/v1}
 SURFACES=${SURFACES:-$WORK/data/surfaces}
+# Always passed: pre-refactor checkpoints stored $WORK/pockets/fpocket.
+POCKETS=${POCKETS:-$WORK/data/pockets/fpocket}
 OUT=${OUT:-$WORK/out/reports}
 SELECTS=${SELECTS:-"site topk"}
 N_TRAIN=${N_TRAIN:-400}
@@ -44,7 +46,7 @@ for SEL in $SELECTS; do
     echo "=== dump --pocket_select $SEL ==="
     $EXEC python $WORK/src/retrieval_report.py dump --ckpt $CKPT \
         --items $DATA/items.tsv --lig_feats $DATA/ligand_feats.npz \
-        --surface_cache $SURFACES --pocket_select $SEL --pocket_rank drug \
+        --surface_cache $SURFACES --pockets $POCKETS --pocket_select $SEL --pocket_rank drug \
         --n_train $N_TRAIN --n_val $N_VAL \
         --out $OUT/${TAG}_${SEL}.npz ${DUMP_ARGS:-}
 done
