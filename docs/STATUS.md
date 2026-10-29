@@ -226,7 +226,7 @@ build_batch / anchor_block exactly as retrieval_report.py does, and every
 attribute anchor_block reads is supplied by the parser. The report, viewer
 and PyMOL output are checked on a planted dump (11 checks).
 
-## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, `dataset_v2.yaml`) - FUNNEL DONE: dataset_v2 = 7,897 train groups (3.3x), ready to build
+## Dataset expansion - dataset_v2 BUILT (2026-10-30): 7,895 train groups, 100% surfaces / pockets / PLIP, fixed val set in out/valset_v1v2. NEXT: re-score C on the fixed set, then C on dataset_v2 (commands below)
 
 **Build + train order (user, 2026-10-29: cap 50, fixed validation).**
 ```

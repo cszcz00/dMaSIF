@@ -1064,3 +1064,23 @@ Also fixed: `build_dataset.select` would have crashed logging a cap with no
   ADP 50 / 50, NAG-NAG 50 / 49); THP keeps 50 rows on 4 targets.
 - Largest groups: Mpro P0DTD1 880, carbonic anhydrase II P00918 591, BACE1
   332, thrombin 316, CDK2 311 - balanced sampling handles these.
+
+## dataset_v2 BUILT (2026-10-30, `build_v2.sh`: jobs 152931-4, all COMPLETED)
+
+- `data/datasets/dataset_v2/index.parquet`: 35,407 interactions (train
+  34,316 / val 356 / test 735), 34,808 receptor inputs, 20,555 ligands -
+  exactly the funnel's final ladder.
+- `out/runs/dataset_v2/items.tsv` (train split, v1's `--exclude`): 34,265
+  rows, 33,669 surfaces, **7,895 target groups** (median 1 row, largest 880),
+  19,980 distinct ligands; 0 rows lost to a missing SDF; 1 ligand failed
+  featurisation.
+- **Fixed validation set** `out/valset_v1v2/`: v1's carved pool re-derived
+  as 2,072 rows / 283 groups and 18,639 v1 train rows - EXACTLY what the
+  v1-based runs logged, so the carve is reproduced. 1,192 rows / 240 groups
+  of it also exist in v2 with the same ligand; the set is 400 rows over 240
+  groups. Under it, v2 trains on 31,861 rows over 7,644 groups.
+- Coverage (`inventory.py`): surfaces 33,669 / 33,669, fpocket 33,668
+  (1 failure: 6z7n__1__1.N_1.O_1.P, which trains on the fallback ball),
+  PLIP 34,264 / 34,265 (the same receptor). Disk: surfaces 13.6 GB, pockets
+  0.7 GB. Runtimes: prep 4 min; surfaces ~20 min per 4-way shard; fpocket
+  ~5.6 h per shard; PLIP ~35 min per shard.
