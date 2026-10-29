@@ -1,0 +1,53 @@
+# DRAFT - do not build until `src/dataset_funnel.py report` has been run and
+# its numbers recorded in docs/RESULTS.md. The relaxations below are its
+# default --ladder; change both together.
+#
+# dataset_v1 + more distinct targets, the lever the v3c+ memorisation ceiling
+# points at (~69 visits per target group). Relative to dataset_v1:
+#   - pass_no_altlocs dropped (extract.py keeps one altloc per atom anyway)
+#   - resolution 2.5 -> 3.0 A
+#   - pocket_resolved: up to 5 unresolved pocket heavy atoms (side-chain tips),
+#     not 0. A missing pocket RESIDUE (pass_no_missing_pocket) stays strict.
+#   - dedup recomputed on the relaxed set, preferring the strict_rep row, so
+#     every dataset_v1 cluster keeps the row it had: surfaces, fpocket files
+#     and PLIP labels stay valid and runs stay comparable
+#   - then one row per (PDB entry, ligand): the symmetry-copy fix
+#     (TRP: 507 rows from 57 entries in v1). This one REMOVES v1 rows.
+# n_ligand_chains == 1 stays until `companion_funnel.py distance` says how
+# close the companions sit.
+description: >
+  dataset_v1's filters with altlocs dropped, resolution <= 3.0 A and up to 5
+  unresolved pocket heavy atoms; dedup on interaction cluster + ligand
+  preferring strict_rep, then per (entry, ligand); one ligand chain; PLINDER
+  receptor as input.
+
+manifest: data/meta/manifest.parquet
+fingerprints: data/meta/ligand_fps.npy
+
+selection:
+  splits: [train, val, test]
+  # every build_manifest filter except the three relaxed ones (HARD filters
+  # were applied when the manifest was built)
+  require: [pass_not_cofactor, pass_not_oligo, pass_not_covalent, pass_mw,
+            pass_positions, pass_interactions, pass_single_ligand,
+            pass_pocket_size, pass_crystal_contacts, pass_no_missing_pocket,
+            pass_all_chains]
+  exclude: []
+  # x != x is the NaN test that works under both query engines; a null count
+  # passes, as it does in build_manifest's pass_pocket_resolved.
+  # (Folded scalar: keep every line at the same indent, or YAML keeps the
+  # newlines and pandas rejects a multi-line query.)
+  query: >-
+    n_ligand_chains == 1
+    and entry_resolution <= 3.0
+    and (system_pocket_validation_num_unresolved_heavy_atoms <= 5
+    or system_pocket_validation_num_unresolved_heavy_atoms
+    != system_pocket_validation_num_unresolved_heavy_atoms)
+  dedup:
+    - [pli_unique_qcov__95__strong__component, ligand_ccd_code]
+    - [entry, ligand_ccd_code]
+  dedup_sort: ["-strict_rep", entry_resolution, system_id]
+
+receptor_input:
+  policy: plinder_receptor
+  params: {}

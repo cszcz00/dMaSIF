@@ -63,8 +63,9 @@ Example:
     python src/companion_funnel.py distance --manifest data/meta/manifest.parquet \\
         --systems systems --n 400
 
-Depends on: pandas, numpy (funnel); extract.load_protein_atoms and
-            test_encoder.read_sdf_heavy (distance). No torch.
+Depends on: pandas, numpy (funnel); test_encoder.read_sdf_heavy and
+            ids.ligand_chain (distance); build_dataset.add_derived for
+            n_ligand_chains, dataset_funnel.groups_of for target groups. No torch.
 """
 
 import argparse
@@ -83,7 +84,15 @@ KIND_FLAGS = ("ligand_is_ion", "ligand_is_cofactor", "ligand_is_artifact",
 
 
 def _strict(df):
-    """The strict_rep rows, i.e. what dataset_v1 starts from."""
+    """The strict_rep rows, i.e. what dataset_v1 starts from.
+
+    n_ligand_chains is not a manifest column: build_dataset.add_derived reads
+    it off the system_id, and so must this, or dataset_v1's query is unknown.
+    """
+    from build_dataset import add_derived
+
+    if "n_ligand_chains" not in df.columns:
+        df = add_derived(df)
     if "strict_rep" not in df.columns:
         raise SystemExit("manifest has no strict_rep column; build it with "
                          "src/build_manifest.py (loose mode is fine)")
@@ -103,10 +112,6 @@ def funnel(a):
 
     df = pd.read_parquet(a.manifest)
     s = _strict(df)
-    if "n_ligand_chains" not in s.columns:
-        raise SystemExit("manifest has no n_ligand_chains column; "
-                         "dataset_v1.yaml's query needs it, so this is a "
-                         "different manifest build")
     print(f"{a.manifest}: {len(df):,} rows, {len(s):,} strict_rep\n")
 
     n = s["n_ligand_chains"].fillna(0).astype(int)
@@ -119,8 +124,12 @@ def funnel(a):
 
     def census(d, label):
         rec = d["system_id"].map(lambda x: "__".join(str(x).split("__")[:3]))
-        grp = (d[a.group_col] if a.group_col in d.columns
-               else pd.Series(["?"] * len(d), index=d.index))
+        if a.group_col == "target":
+            from dataset_funnel import groups_of
+            grp = groups_of(d)
+        else:
+            grp = (d[a.group_col] if a.group_col in d.columns
+                   else pd.Series(["?"] * len(d), index=d.index))
         print(f"  {label:<22s} {len(d):>7,} rows  "
               f"{rec.nunique():>7,} receptors  {grp.nunique():>7,} groups")
 
@@ -154,7 +163,9 @@ def funnel(a):
 def distance(a):
     import pandas as pd
 
-    from extract import load_protein_atoms            # noqa: F401  (import check)
+    # Not extract.load_protein_atoms: extract imports torch at module level,
+    # and this stage runs in the CPU venv.
+    from ids import ligand_chain
     from test_encoder import read_sdf_heavy
 
     df = pd.read_parquet(a.manifest)
@@ -183,12 +194,13 @@ def distance(a):
             continue
         # The proper ligand is the row's own chain; everything else is a
         # companion. PLINDER names each file after its ligand chain.
-        own = str(r.get("ligand_instance_chain", "")) or None
+        # (The manifest has no ligand_instance_chain column; ligand_id names it.)
+        own = next(iter(ligand_chain(r.get("ligand_id"))), None)
         try:
             mine, others = None, []
             for f in sdfs:
                 xyz = read_sdf_heavy(f)
-                if own and f.stem.startswith(own):
+                if own and f.stem == own:
                     mine = xyz
                 else:
                     others.append(xyz)
@@ -242,8 +254,9 @@ def main():
 
     p = sub.add_parser("funnel", help="manifest only: how much data the query costs")
     p.add_argument("--manifest", default="data/meta/manifest.parquet")
-    p.add_argument("--group_col", default="pli_unique_qcov__95__strong__component",
-                   help="column counted as a target group")
+    p.add_argument("--group_col", default="target",
+                   help="column counted as a target group; 'target' is the "
+                        "training sampler's group (UniProt, else the 95%% component)")
 
     p = sub.add_parser("distance", help="how far companions sit from the ligand")
     p.add_argument("--manifest", default="data/meta/manifest.parquet")

@@ -97,12 +97,15 @@ Then, in any order:
 2. **The retrieval inspection**, `sbatch src/slurm/report.sbatch` then the CPU
    half it prints. WHAT the model retrieves rather than how well - hub
    collapse, the size-only baseline, chemotype rank. See below.
-3. **The dataset question**, `src/companion_funnel.py` (below). This is the
-   lever finding 1 points at, so it is the highest-value non-GPU work.
-4. **`dataset_v2`**, once the funnel numbers are in: the relaxed
-   `n_ligand_chains` query, per-`pdb_id` dedup for the symmetry copies, and a
-   properly sized val/test (PLINDER's own are 891 / 1,120 against our 94 /
-   305). One rebuild, not three.
+3. **Dataset expansion - NOW FIRST** (user, 2026-10-29: before the channel
+   analysis). `src/dataset_funnel.py report` (CPU venv, seconds) says which
+   filter costs how many NEW TARGET GROUPS, then `companion_funnel.py
+   funnel` / `distance` for the `n_ligand_chains` question; then build the
+   DRAFT `configs/datasets/dataset_v2.yaml`. See "Dataset expansion" below.
+4. **`dataset_v2`**: one rebuild carrying the relaxed filters, the per-entry
+   dedup for the symmetry copies, and (if `distance` allows) the relaxed
+   `n_ligand_chains`. Larger val/test come with it for free, since PLINDER's
+   val/test rows are filtered by the same rules.
 5. **PLIP labels into training**: built and checked, never wired. The
    intended use is supervising pair pooling's site types; see DESIGN.
 6. Older and still unrun: a **probe rerun** for the anchor-spread diagnostic
@@ -176,6 +179,79 @@ Then, in any order:
    selector-independent and `region_sweep.py` scores every selector offline on
    them), but misleading to read. `train.py` and `probe_retrieval.py` both
    take the flags.
+
+## Dataset expansion (`src/dataset_funnel.py`, draft `dataset_v2.yaml`) - WRITTEN, selftest PASSES, never run on real data
+
+Why: `v3c+` put the ceiling at memorisation (~69 visits per target group at
+5,000 x 32), so the lever is more distinct TARGET GROUPS (UniProt, the
+sampler's unit), not rows. dataset_v1 keeps 21,209 of the manifest's 341,945
+rows and nobody has measured which filter is responsible. The manifest is
+loose (only HARD filters applied) and `structures/` was fetched for all of
+it (223,972 receptors), so **any relaxation needs no new downloads**: only
+surface sampling, fpocket and PLIP for the new receptors, all of which skip
+work already done.
+
+`dataset_funnel.py report` counts, against a baseline that is dataset_v1's
+selection: per single-criterion variant (each filter dropped, plus loosened
+thresholds for resolution, altlocs, unresolved pocket atoms, missing
+residues, crystal contacts, MW, interactions, pocket size, ligand chains)
+the train rows, train groups, **NEW groups**, rows in them, new receptor
+inputs, PLINDER val/test rows and visits per group; then a cumulative
+`--ladder` and the largest groups at its end. Dedup prefers `strict_rep`
+rows, so every variant is a SUPERSET of dataset_v1: existing surfaces,
+pocket files and PLIP labels stay valid. `--per_entry` adds the (PDB entry,
+ligand) dedup for symmetry copies, which removes rows.
+
+Supporting changes:
+- `build_dataset.py`: `dedup` may be a list of keys applied in turn, new
+  `dedup_sort` (leading `-` = descending; default `system_id`, i.e. the old
+  behaviour), derived column `entry`. dataset_v1's spec reproduces exactly.
+- `companion_funnel.py` could not have run: `n_ligand_chains` is derived by
+  `build_dataset.add_derived`, not stored in the manifest, so `funnel` exited
+  at once; `distance` imported `extract` (torch at module level) in the CPU
+  venv, and looked for a `ligand_instance_chain` column that does not exist
+  (it now takes the chain from `ligand_id`). Its groups default to the
+  sampler's target groups.
+- `configs/datasets/dataset_v2.yaml`, DRAFT: the default ladder (altlocs
+  dropped, resolution <= 3.0 A, <= 5 unresolved pocket heavy atoms) + per-
+  entry dedup, `n_ligand_chains == 1` kept. Checked on a planted 3,000-row
+  manifest: `build_dataset.select` on this spec picks exactly the rows the
+  funnel's ladder does, and contains every dataset_v1 row.
+
+Caveat for `ligand_chains`: PLINDER builds a system from ligands that sit
+close together, so a second ligand chain in the SAME system is probably near
+the site by construction, and the "glycerol 30 A away" case may be rare.
+`distance` measures it; expect most of `ligand_chains=drop`'s gain to need
+the gate.
+Also: `funnel`'s companion-kind table reads companion ROWS from the
+manifest, and ions and artifacts are HARD filters dropped when the manifest
+was built, so it can only see cofactor / oligo / covalent companions. The
+ion and additive share has to come from `distance`'s SDFs.
+
+Run order (CPU venv unless marked):
+```
+python src/dataset_funnel.py selftest
+python src/dataset_funnel.py report --manifest data/meta/manifest.parquet --per_entry
+python src/companion_funnel.py funnel --manifest data/meta/manifest.parquet
+python src/companion_funnel.py distance --manifest data/meta/manifest.parquet --systems systems --n 400
+# paste all three into RESULTS.md, settle the ladder, edit dataset_v2.yaml to match, then:
+python src/build_dataset.py configs/datasets/dataset_v2.yaml --root $WORK --dry_run
+python src/build_dataset.py configs/datasets/dataset_v2.yaml --root $WORK --check_files
+python src/train.py prepare --index data/datasets/dataset_v2/index.parquet \
+    --out out/runs/dataset_v2 --split train
+python src/ligand_features.py --index data/datasets/dataset_v2/index.parquet --out out/runs/dataset_v2
+RUN=$WORK/out/runs/dataset_v2 sbatch src/slurm/cache_surfaces.sbatch   # GPU, new receptors only
+RUN=$WORK/out/runs/dataset_v2 sbatch src/slurm/fpocket.sbatch          # CPU, new receptors only
+RUN=$WORK/out/runs/dataset_v2 sbatch src/slurm/plip.sbatch             # CPU, new rows only
+```
+Ligand features MUST be rebuilt (`fp_row` is re-indexed per dataset). Not
+`out/runs/v2`: that name is the dead bank run.
+
+Open before training on it: **validation comparability.** `train.py` carves
+val by target group from whatever items it is given, so a dataset_v2 run
+validates on different rows from every run so far, and "did more data help"
+needs a FIXED val set (e.g. v1's carved val groups held out of dataset_v2's
+train). Not built yet.
 
 ## Retrieval inspection (`src/retrieval_report.py`) - WRITTEN, selftest PASSES, never run on real data
 

@@ -26,6 +26,8 @@ them in `query` like any manifest column:
     n_ligand_chains     ALL ligand chains in the system (field 4), including
                         ions and other non-proper ligands. Stricter than
                         pass_single_ligand, which counts proper ligands only.
+    entry               the PDB entry (field 1); dedup on [entry,
+                        ligand_ccd_code] folds symmetry copies of one ligand
 
 Selection runs in this order, each step logged with its row count:
     splits  ->  require  ->  exclude  ->  query  ->  dedup
@@ -64,7 +66,12 @@ DEFAULTS = {
         "require": [],    # boolean manifest columns that must be true
         "exclude": [],    # boolean manifest columns that must be false
         "query": None,    # pandas query string, e.g. "ligand_num_heavy_atoms <= 40"
-        "dedup": None,    # list of columns; keeps the first row by system_id
+        "dedup": None,    # list of columns, or a list of such lists applied in turn
+        # Which row of a duplicate set survives: columns sorted ascending, a
+        # leading "-" for descending. ["-strict_rep", "entry_resolution"]
+        # keeps the strict pipeline's representative whenever it is in the
+        # set, so a relaxed dataset contains every row of the strict one.
+        "dedup_sort": ["system_id"],
     },
     "receptor_input": {"policy": "plinder_receptor", "params": {}},
 }
@@ -100,6 +107,7 @@ def add_derived(df):
     fields = df["system_id"].str.split("__")
     df["n_receptor_chains"] = fields.str[2].str.split("_").str.len().astype("int16")
     df["n_ligand_chains"] = fields.str[3].str.split("_").str.len().astype("int16")
+    df["entry"] = fields.str[0]
     return df
 
 
@@ -130,11 +138,17 @@ def select(df, sel):
     if sel["query"]:
         df = step(f"query {sel['query']}", df.query(sel["query"]))
     if sel["dedup"]:
-        missing = [c for c in sel["dedup"] if c not in df.columns]
+        keys = sel["dedup"]
+        keys = keys if isinstance(keys[0], (list, tuple)) else [keys]
+        order = list(sel["dedup_sort"] or ["system_id"])
+        cols = [c.lstrip("-") for c in order]
+        missing = [c for c in [*cols, *(k for ks in keys for k in ks)] if c not in df.columns]
         if missing:
-            raise SystemExit(f"selection.dedup: no column {missing}")
-        df = step(f"dedup {sel['dedup']}",
-                  df.sort_values("system_id").drop_duplicates(sel["dedup"], keep="first"))
+            raise SystemExit(f"selection.dedup / dedup_sort: no column {missing}")
+        df = df.sort_values(cols, ascending=[not c.startswith("-") for c in order],
+                            kind="mergesort", na_position="last")
+        for k in keys:
+            df = step(f"dedup {list(k)}", df.drop_duplicates(list(k), keep="first"))
     return df.copy(), log
 
 
