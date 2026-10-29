@@ -14,6 +14,8 @@
 #   N_HTML (12), REPORT_ARGS (verbatim, e.g. "--smooth 1.5 --grid 0.5" or
 #   "--viewer points" or "--crop 0" for the whole surface).
 set -e
+# Unbuffered: a batch log otherwise stays empty until Python exits.
+export PYTHONUNBUFFERED=1
 source $HOME/venvs/plinder/bin/activate
 cd $WORK
 DUMPS=${DUMPS:-$(ls $WORK/out/viz/*.npz)}

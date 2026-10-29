@@ -32,6 +32,8 @@
 #
 # Overrides: OUT, MANIFEST, LIMIT.
 set -e
+# Unbuffered: a batch log otherwise stays empty until Python exits.
+export PYTHONUNBUFFERED=1
 source $HOME/venvs/plinder/bin/activate
 cd $WORK
 OUT=${OUT:-$WORK/data/meta/scan}

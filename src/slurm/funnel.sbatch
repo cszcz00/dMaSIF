@@ -18,6 +18,8 @@
 #
 # Overrides: LADDER (dataset_funnel --ladder), SKIP_INSPECT=1, SKIP_COMPANION=1.
 set -e
+# Unbuffered: a batch log otherwise stays empty until Python exits.
+export PYTHONUNBUFFERED=1
 source $HOME/venvs/plinder/bin/activate
 cd $WORK
 MANIFEST=$WORK/data/meta/manifest.parquet
