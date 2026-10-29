@@ -226,7 +226,7 @@ build_batch / anchor_block exactly as retrieval_report.py does, and every
 attribute anchor_block reads is supplied by the parser. The report, viewer
 and PyMOL output are checked on a planted dump (11 checks).
 
-## Dataset expansion - dataset_v2 BUILT (2026-10-30): 7,895 train groups, 100% surfaces / pockets / PLIP, fixed val set in out/valset_v1v2. NEXT: re-score C on the fixed set, then C on dataset_v2 (commands below)
+## Dataset expansion - dataset_v2 BUILT (2026-10-30): 7,895 train groups, 100% surfaces / pockets / PLIP, fixed val set in out/valset_v1v2. C re-scored on the fixed set: **MRR 0.151** (top10 0.268; RESULTS). NEXT: C on dataset_v2 (`v4_C_dataset_v2`, command below), compared against 0.151
 
 **Build + train order (user, 2026-10-29: cap 50, fixed validation).**
 ```

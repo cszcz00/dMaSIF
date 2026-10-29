@@ -1084,3 +1084,21 @@ Also fixed: `build_dataset.select` would have crashed logging a cap with no
   PLIP 34,264 / 34,265 (the same receptor). Disk: surfaces 13.6 GB, pockets
   0.7 GB. Runtimes: prep 4 min; surfaces ~20 min per 4-way shard; fpocket
   ~5.6 h per shard; PLIP ~35 min per shard.
+
+## C re-scored on the fixed validation set (2026-10-30, `eval.sbatch --val_set`)
+
+The baseline every dataset_v2 run is compared against. C = v3c_site_pairs_bn
+best.pt (step 4,375), `--pocket_select site`, the 400 fixed rows of
+`out/valset_v1v2` (240 target groups, ~398 candidate ligands per row,
+chance MRR 0.0165):
+
+| mrr | top1 | top5 | top10 | median rank | p2l mrr | AUROC / AP | fallback | cos_diff |
+|---|---|---|---|---|---|---|---|---|
+| **0.151** | 0.085 | 0.198 | 0.268 | 36 | 0.155 | 0.940 / 0.522 | 0.04 | 0.773 |
+
+Below C's in-training best (0.185), as expected: best.pt was picked as the
+maximum of 42 noisy evaluations (+-0.015 each) on its OWN val rows, and the
+fixed set is a different 400-row draw (240 of the 283 pool groups). 0.151
+is the number to beat, compared as a mean over several evaluations, not a
+peak. Also the first run of `train.py eval --val_set`: found all 400 rows,
+no overlap with C's training rows.
