@@ -18,14 +18,19 @@
 # own log printed.
 #
 # Overrides: CKPTS (space-separated; default v1's best.pt and last.pt), DATA
-#   (items.tsv / ligand_feats.npz; out/runs/v1), SURFACES, EVAL_ARGS (verbatim;
-#   default "--recarve --val_max 400 --val_balance").
+#   (items.tsv / ligand_feats.npz; out/runs/v1), SURFACES, POCKETS
+#   (data/pockets/fpocket), EVAL_ARGS (verbatim; default "--recarve --val_max
+#   400 --val_balance").
+# --pockets is always passed: checkpoints from before the data/ refactor
+# stored $WORK/pockets/fpocket, which no longer exists. A checkpoint with
+# predicted regions ignores it (train.pocket_source warns).
 # `train.py eval` had never run before this job; if it fails, that is why.
 set -e
 module load apptainer
 cd $WORK
 DATA=${DATA:-$WORK/out/runs/v1}
 SURFACES=${SURFACES:-$WORK/data/surfaces}
+POCKETS=${POCKETS:-$WORK/data/pockets/fpocket}
 CKPTS=${CKPTS:-"$WORK/out/runs/v1/best.pt $WORK/out/runs/v1/last.pt"}
 EVAL_ARGS=${EVAL_ARGS:-"--recarve --val_max 400 --val_balance"}
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"
@@ -35,5 +40,5 @@ for CKPT in $CKPTS; do
     echo "=== $CKPT ==="
     $EXEC python $WORK/src/train.py eval --ckpt $CKPT \
         --items $DATA/items.tsv --lig_feats $DATA/ligand_feats.npz \
-        --surface_cache $SURFACES $EVAL_ARGS
+        --surface_cache $SURFACES --pockets $POCKETS $EVAL_ARGS
 done
