@@ -199,12 +199,30 @@ QUALITY_TERMS = ("validation", "rscc", "rsr", "b_factor", "bfactor", "occupancy"
                  "cofactor", "oligo", "covalent", "fragment", "is_")
 
 
+def _sample(v):
+    """A short description of a non-null column: median if numeric, else the
+    commonest values. Covers pyarrow strings and list-valued cells, which are
+    neither object nor numeric dtype."""
+    if not len(v):
+        return "-"
+    if pd.api.types.is_bool_dtype(v):
+        return v.value_counts().head(3).to_dict()
+    if pd.api.types.is_numeric_dtype(v):
+        return f"p50 {v.median():.3g}"
+    try:
+        return v.value_counts().head(3).to_dict()
+    except TypeError:                      # unhashable cells, e.g. lists
+        return v.head(3).astype(str).tolist()
+
+
 def inspect_columns(plinder):
     """Quality-related columns of the annotation table: dtype, null share, sample."""
     import pyarrow.parquet as pq
 
     ann_p, _, _ = paths(plinder)
-    names = pq.ParquetFile(ann_p).schema.names
+    # schema_arrow: top-level column names. The parquet schema's .names are
+    # LEAF paths, so a list column would appear as "<col>.list.element".
+    names = pq.ParquetFile(ann_p).schema_arrow.names
     pick = sorted(c for c in names if any(t in c.lower() for t in QUALITY_TERMS))
     print(f"{len(pick)} of {len(names)} columns match {QUALITY_TERMS}")
     df = pd.read_parquet(ann_p, columns=pick)
@@ -212,10 +230,7 @@ def inspect_columns(plinder):
     print(f"\n{'column':70s} {'dtype':>10s} {'null':>6s}  sample   (* = in the manifest)")
     for c in pick:
         v = df[c]
-        sample = v.dropna()
-        sample = (sample.value_counts().head(3).to_dict()
-                  if sample.dtype == object or sample.dtype == bool
-                  else (f"p50 {sample.median():.3g}" if len(sample) else "-"))
+        sample = _sample(v.dropna())
         print(f"{('* ' if c in used else '  ') + c:70s} {str(v.dtype):>10s} "
               f"{v.isna().mean():6.1%}  {str(sample)[:60]}")
 
