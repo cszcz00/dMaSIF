@@ -896,3 +896,75 @@ Read:
 Next: rerun with the fixed tool and the new default ladder (no_altlocs,
 resolution<=3.5, mw150-900, not_covalent, not_oligo, not_cofactor), which
 reports distinct ligands (`ligs`) too, since cofactors bring few chemotypes.
+
+## Channel visualisation + PLIP diagnostic, first run (2026-10-29, `viz.sbatch`)
+
+`channel_viz.py` on C (best.pt, step 4,375), v3d (1,500) and v3f (1,500),
+the same 64 group-balanced val proteins (667,625 surface points), every row
+with PLIP labels. Steps are NOT matched: v3d / v3f against C is suggestive
+only. Full tables in `out/viz/report/report.txt`.
+
+**1. The site types did not collapse.** The v3 hypothesis "near-uniform
+type head, 36 identical pair histograms" is ruled out for the trained runs:
+
+| run | effective types / 8 | mean abs r | per-point entropy (max 2.08) | site salience |
+|---|---|---|---|---|
+| C | 5.89 | 0.30 | 1.46 | 0.34 |
+| v3d | 6.67 | 0.41 | 1.86 | 0.30 |
+| v3f | 7.47 | 0.35 | 1.91 | 0.33 |
+
+But v3f's (and nearly v3d's) per-point mixtures are close to uniform: usage
+is spread over all 8, yet each point is soft. C is the most specialised
+(t1 alone 38% of site mass). The report's verdict now flags this ("SOFT
+per point", entropy > 0.85 of max).
+
+**2. What the types encode: a polar / apolar axis plus shape, not interaction
+classes.** C, AUROC per PLIP class inside the site:
+
+| C type | donor | acceptor | cation | anion | aromatic | hydrophobic | top correlate |
+|---|---|---|---|---|---|---|---|
+| type_1 | 0.68 | 0.68 | 0.66 | 0.82 | 0.37 | 0.35 | comp_donor +0.24 |
+| type_3 | 0.61 | 0.63 | 0.68 | 0.82 | 0.29 | 0.25 | comp_hydrophobic -0.39 |
+| type_0 | 0.40 | 0.40 | 0.25 | 0.23 | 0.65 | 0.75 | comp_hydrophobic +0.46 |
+| type_5 | 0.41 | 0.40 | 0.26 | 0.20 | 0.65 | 0.76 | comp_hydrophobic +0.40 |
+| type_4 | | | | | | | curv_H1 -0.57 (shape) |
+| type_6 | | | | | | | curv_H5 +0.39 (shape) |
+
+Two polar types, two apolar types, two shape types: about TWO chemical
+dimensions duplicated. **No type separates donor from acceptor** (equal
+AUROC in every type of every run), and cation vs anion only weakly. v3d,
+whose type head also READ the 12 chemotype channels, is no sharper (type_3
+0.62 / 0.64 / 0.61 / 0.84): **the contrastive objective, not the input,
+is what keeps the types coarse.**
+
+**3. The AtomNet input channels are the same axis.** atomnet_0/2/4 polar
+(anion 0.80-0.86, hydrophobic ~0.23), atomnet_1 apolar (hydrophobic 0.78),
+in C, v3d and v3f alike. The element one-hot (C/H/O/N/S/Se) cannot tell a
+donor N from an acceptor O, and nothing downstream recovers it. Fine-tuning
+against the published weights moved channels toward SHAPE, not finer
+chemistry: pre_atomnet_3 (elem_C +0.61, hydrophobic) became atomnet_3
+(curv_H1 -0.51) in C; v3d's atomnet_3/4/5 all became curvature.
+
+**4. The interpretable reference is far sharper.** chemotype composition:
+anion 0.996, aromatic 0.90, cation 0.87, hydrophobic 0.76; proximity:
+donor 0.72, acceptor 0.72 (and the reverse class ~0.57). Partly circular
+for the charged classes (PLIP's salt-bridge centres and chemotype's charged
+groups come from the same residue atoms), but it is the separation the
+learned channels lack, and roughly what type supervision could reach.
+
+**5. Salience is learned concavity, not "which points the ligand uses".**
+C salience: PLIP-any AUROC 0.55 inside the site (v3d 0.49, v3f 0.58);
+strongest correlate curv_H2 -0.53. The POCKET HEAD ranks interacting points
+better (0.65) than salience does.
+
+**6. Curvature sign.** Mean curvature at 2-5 A is LOW on pocket points
+(AUROC 0.17-0.23): in this convention concave is negative. 10 A is too
+broad to see pockets (0.47).
+
+Read for PLIP supervision (DESIGN, PLIP labels): the case is made. The
+types are not collapsed, so supervision is not a rescue; it is the only
+lever shown here that could give them class identity, and v3d shows more
+input chemistry alone does not. Donor vs acceptor needs inputs that carry
+it (chemotype's proximity channels do, 0.72; the element one-hot does not),
+so the supervised run should keep `--chemo` on. Salience supervision has
+the clearest headroom (0.55 against 0.65 for the pocket head).

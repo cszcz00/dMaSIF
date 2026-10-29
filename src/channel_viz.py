@@ -454,8 +454,15 @@ def format_report(meta, res):
               f"type masses {t['mean_abs_corr']:.2f}; per-point type entropy "
               f"{t['point_entropy']:.2f} (max {t['max_entropy']:.2f}); mean salience in "
               f"the site {t['site_salience']:.2f}"]
+        # Usage and correlation alone miss a head that is near-uniform at every
+        # point: all 8 types then get used and vary independently, yet each
+        # point is a soft mixture and the pair block is ~one histogram. The
+        # first real run (v3f: entropy 1.91 of 2.08) is why this is checked.
+        soft = t["point_entropy"] > 0.85 * t["max_entropy"]
         verdict = ("COLLAPSED" if t["effective"] < 2 or t["mean_abs_corr"] > 0.9
-                   else "partly redundant" if t["mean_abs_corr"] > 0.6 else "differentiated")
+                   else "partly redundant" if t["mean_abs_corr"] > 0.6
+                   else "differentiated in usage but SOFT per point" if soft
+                   else "differentiated")
         L.append(f"  -> {verdict}")
     L += ["", "naming: strongest pooled correlates of each learned channel",
           f"  {'channel':16s} {'1st':34s} {'2nd':34s} {'3rd':34s}"]

@@ -180,7 +180,14 @@ Then, in any order:
    them), but misleading to read. `train.py` and `probe_retrieval.py` both
    take the flags.
 
-## Channel visualisation + PLIP diagnostic (`src/channel_viz.py`) - WRITTEN, selftest PASSES, never run
+## Channel visualisation + PLIP diagnostic (`src/channel_viz.py`) - FIRST RUN DONE (RESULTS 2026-10-29)
+
+Result in one line: the site types did NOT collapse but encode a polar /
+apolar axis + shape, never donor vs acceptor; v3d shows more input
+chemistry alone does not sharpen them; salience is learned concavity (PLIP
+AUROC 0.55). The case for PLIP supervision (types + salience, with
+`--chemo` on) is made; see RESULTS.
+
 
 What the per-point channels look like and mean, never inspected so far: the
 16 inputs (10 curvatures, fixed; 6 AtomNet channels, LEARNED and fine-tuned,
