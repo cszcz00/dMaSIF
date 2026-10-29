@@ -1,33 +1,31 @@
-# DRAFT - do not build until the second funnel run (src/slurm/funnel.sbatch)
-# is recorded in docs/RESULTS.md. This is dataset_funnel.py's default
-# --ladder; change both together. The scan-based gates (companions, buried
-# fragments, resolution past 3.5 A) join here once structure_scan.parquet
-# exists: add it under `join:` and the gate to `query`.
+# DRAFT - build only after the third funnel run (RESULTS) confirms the
+# numbers. Mirrors dataset_funnel.py's LADDER_SCAN; change both together.
 #
-# dataset_v1 + more distinct targets (the v3c+ memorisation ceiling). Relative
-# to dataset_v1:
+# dataset_v1 + more distinct targets (the v3c+ memorisation ceiling).
+# Relative to dataset_v1:
 #   - altlocs filter dropped (extract.py keeps one conformer anyway)
-#   - resolution 2.5 -> 3.5 A
-#   - ligand MW 200-800 -> 150-900
-#   - covalent ligands admitted (the pocket is real; the ligand graph lacks
-#     only the bond to the protein, as in a screening library)
-#   - oligomers admitted up to 60 heavy atoms (short peptides, small sugars)
-#   - cofactors admitted as targets, at most 50 TRAIN rows per cofactor
-#     ligand, spread one per target before any target gets a second
-#   - dedup recomputed on the relaxed set preferring the strict_rep row, so
-#     dataset_v1's clusters keep their rows; then one row per (PDB entry,
-#     ligand, UniProt) for symmetry copies (removes ~half of v1's rows)
-# n_ligand_chains == 1 stays until the scan's companion gate replaces it.
+#   - resolution <= 3.5 A, or <= 4.5 A with a complete pocket (<= 2 missing
+#     heavy atoms) that is not unusually mobile (pocket B ratio <= 1.5)
+#   - MW 200-900; 120-200 Da fragments only when buried (burial45 >= 0.9)
+#   - covalent ligands, EXCEPT glycosylation (covalent and sugar-only)
+#   - oligomers up to 60 heavy atoms (short peptides, small sugars)
+#   - companion ligand chains up to 6 heavy atoms (ions, sulfate, glycerol);
+#     every companion sits within ~4 A of the ligand, so size is the gate
+#   - cofactors as targets
+#   - detergents excluded (build_dataset.DETERGENTS)
+#   - at most 50 TRAIN rows per ligand (CCD code), spread one per target
+#     first: caps cofactors and the unflagged hubs (ANP, GNP, NAG, ...)
+#   - dedup recomputed preferring the strict_rep row, then one row per
+#     (PDB entry, ligand, UniProt) for symmetry copies
 description: >
-  dataset_v1's filters with altlocs dropped, resolution <= 3.5 A, MW 150-900,
-  covalent ligands, oligomers up to 60 heavy atoms, and cofactor targets
-  capped at 50 train rows per ligand; dedup on interaction cluster + ligand
-  preferring strict_rep, then per (entry, ligand, UniProt); one ligand chain;
-  PLINDER receptor as input.
+  dataset_v1 relaxed by the structure scan's gates (resolution, buried
+  fragments, companion size) plus covalent, small-oligomer and cofactor
+  ligands; glycosylation and detergents excluded; at most 50 train rows per
+  ligand; dedup preferring strict_rep, then per (entry, ligand, UniProt).
 
 manifest: data/meta/manifest.parquet
 fingerprints: data/meta/ligand_fps.npy
-join: []
+join: [data/meta/structure_scan.parquet]
 
 selection:
   splits: [train, val, test]
@@ -36,14 +34,18 @@ selection:
   require: [pass_positions, pass_interactions, pass_single_ligand,
             pass_pocket_size, pass_crystal_contacts, pass_no_missing_pocket,
             pass_all_chains, pass_pocket_resolved]
-  exclude: []
+  exclude: [ligand_is_detergent]
   # Folded scalar: keep every line at the same indent, or YAML keeps the
-  # newlines and pandas rejects a multi-line query.
+  # newlines and pandas rejects a multi-line query. x != x is a NaN test.
   query: >-
-    n_ligand_chains == 1
-    and entry_resolution <= 3.5
-    and ligand_molecular_weight >= 150 and ligand_molecular_weight <= 900
+    (entry_resolution <= 3.5
+    or (entry_resolution <= 4.5 and pocket_missing <= 2 and pocket_b_ratio <= 1.5))
+    and ((ligand_molecular_weight >= 200 and ligand_molecular_weight <= 900)
+    or (ligand_molecular_weight >= 120 and ligand_molecular_weight < 200
+    and burial45 >= 0.9))
+    and not (ligand_is_covalent == True and ligand_is_glycan)
     and (ligand_is_oligo != True or ligand_num_heavy_atoms <= 60)
+    and (n_ligand_chains == 1 or comp_maxha_8 <= 6)
   dedup:
     - [pli_unique_qcov__95__strong__component, ligand_ccd_code]
     # UniProt in the key: the same ligand on two different proteins of one
@@ -51,8 +53,7 @@ selection:
     - [entry, ligand_ccd_code, system_pocket_UniProt]
   dedup_sort: ["-strict_rep", entry_resolution, system_id]
   cap:
-    - {where: "ligand_is_cofactor == True", by: ligand_ccd_code, max: 50,
-       spread: system_pocket_UniProt, splits: [train]}
+    - {by: ligand_ccd_code, max: 50, spread: system_pocket_UniProt, splits: [train]}
 
 receptor_input:
   policy: plinder_receptor

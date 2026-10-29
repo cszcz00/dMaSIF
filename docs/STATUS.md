@@ -226,13 +226,14 @@ build_batch / anchor_block exactly as retrieval_report.py does, and every
 attribute anchor_block reads is supplied by the parser. The report, viewer
 and PyMOL output are checked on a planted dump (11 checks).
 
-## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, draft `dataset_v2.yaml`) - scan DONE, second funnel run DONE, third run PENDING
+## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, `dataset_v2.yaml`) - third funnel run DONE, fourth (all-ligand cap + detergents) PENDING
 
-Second run (RESULTS): scan covers 99.9% of the manifest; companions always
-sit within ~4 A, so companions gate by SIZE only; the ladder reached 7,435
-train groups but its covalent + oligo steps admitted N-glycans (NAG ...).
-Glycosylation is now excluded; rerun with
-`SKIP_INSPECT=1 sbatch src/slurm/funnel.sbatch` before writing dataset_v2.
+Third run (RESULTS): 8,398 train groups (from 2,379; visits 67 -> 19) with
+the scan gates, but nucleotide analogues (ANP, GNP, ACP), NAG, maltose and
+GLU were uncapped hubs and DMU a detergent. Now: a 50-row cap on every
+ligand and a detergent list. `dataset_v2.yaml` mirrors LADDER_SCAN row for
+row and is ready to build once the fourth run confirms the numbers:
+`SKIP_INSPECT=1 SKIP_COMPANION=1 sbatch src/slurm/funnel.sbatch`.
 
 Decisions (user, 2026-10-29): add covalent ligands and SMALL oligomers;
 cofactors as targets WITH A CAP per ligand; companions by STRIP-AND-GATE

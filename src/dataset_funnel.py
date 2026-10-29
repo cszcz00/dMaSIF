@@ -107,6 +107,7 @@ def v1_criteria():
     # glycosylation. A no-op on dataset_v1, which excludes covalent ligands.
     crit["not_glycosylation"] = lambda d: ~(d["ligand_is_covalent"].fillna(False).astype(bool)
                                             & d["ligand_is_glycan"])
+    crit["not_detergent"] = lambda d: ~d["ligand_is_detergent"]
     return crit
 
 
@@ -166,13 +167,21 @@ LOOSER["resolution"].append(
 # a dataset spec writes the same dict under selection.cap.
 COFACTOR_CAP = {"where": "ligand_is_cofactor == True", "by": "ligand_ccd_code",
                 "spread": "system_pocket_UniProt", "splits": ["train"]}
+# The same cap on EVERY ligand: no ligand is the positive for more than N train
+# rows. The third run's hubs were mostly NOT flagged cofactors - ANP (439 rows /
+# 266 targets), GNP, ACP, AGS (non-hydrolysable nucleotides, admitted with
+# their Mg2+), NAG, GLC-GLC, GLU - so a cofactor-only cap misses them.
+LIGAND_CAP = {"by": "ligand_ccd_code", "spread": "system_pocket_UniProt",
+              "splits": ["train"]}
 CAPS = (25, 50, 100)
 
 
 def parse_change(tok, crit):
-    """'name=drop' | 'name<=3.0' | 'not_cofactor=cap50' token
-    -> (name, label, predicate or None for "drop", cofactor cap or None)."""
+    """'name=drop' | 'name<=3.0' | 'not_cofactor=cap50' | 'all_ligands=cap50'
+    -> (name, label, predicate or None for "drop", cap or None)."""
     tok = tok.strip()
+    if tok.startswith("all_ligands=cap"):
+        return "all_ligands", tok.split("=")[1], None, int(tok[len("all_ligands=cap"):])
     if tok.startswith("not_cofactor=cap"):
         return "not_cofactor", tok.split("=")[1], None, int(tok[len("not_cofactor=cap"):])
     if tok.endswith("=drop"):
@@ -233,16 +242,21 @@ def dedup(d, key, per_entry=False):
     return out.drop(columns=["_rep", "_res"])
 
 
-def select(df, crit, per_entry=False, cap=None):
+def select(df, crit, per_entry=False, cap=None, lig_cap=None):
     """Rows passing every criterion in `crit` (name -> predicate), deduplicated,
-    then the cofactor cap (`cap` rows per cofactor ligand) if given."""
+    then the cofactor cap (`cap` rows per cofactor ligand) and the cap on every
+    ligand (`lig_cap`), each if given."""
     from build_dataset import cap_rows
 
     m = np.ones(len(df), bool)
     for fn in crit.values():
         m &= fn(df).fillna(False).to_numpy(bool)
     out = dedup(df[m], DEDUP_KEY, per_entry)
-    return cap_rows(out, max=cap, **COFACTOR_CAP) if cap else out
+    if cap:
+        out = cap_rows(out, max=cap, **COFACTOR_CAP)
+    if lig_cap:
+        out = cap_rows(out, max=lig_cap, **LIGAND_CAP)
+    return out
 
 
 def _true(d):
@@ -287,10 +301,13 @@ def line(name, s):
 # past 3.5 A only with a complete pocket, fragments only when buried, and
 # companions up to an additive's size (every companion sits within ~4 A of
 # the ligand, so size is the only gate that means anything).
+# The cap goes last, on EVERY ligand (it subsumes the cofactor cap), so its
+# step shows what capping the hubs costs in targets.
 LADDER = ("no_altlocs=drop,resolution<=3.5,mw150-900,not_covalent=drop,"
-          "not_oligo<=HA60,not_cofactor=cap50")
+          "not_oligo<=HA60,not_cofactor=drop,all_ligands=cap50")
 LADDER_SCAN = ("no_altlocs=drop,resolution<=4.5q,mwburied,not_covalent=drop,"
-               "not_oligo<=HA60,ligand_chainsgate_small8,not_cofactor=cap50")
+               "not_oligo<=HA60,ligand_chainsgate_small8,not_cofactor=drop,"
+               "all_ligands=cap50")
 
 
 def report(a):
@@ -364,6 +381,9 @@ def report(a):
             variants.append((f"not_cofactor=cap{k}", {**crit, "not_cofactor": _true}, k))
     rows = [(name, stats(select(df, c, a.per_entry, cap), base))
             for name, c, cap in variants]
+    # the all-ligand cap on its own: how much of the BASELINE is hub ligands
+    rows += [(f"all_ligands=cap{k}", stats(select(df, crit, a.per_entry, lig_cap=k), base))
+             for k in CAPS]
     rows.sort(key=lambda t: -t[1]["+groups"])
     print("single-criterion variants, sorted by NEW train target groups:")
     print(HEAD)
@@ -379,14 +399,17 @@ def report(a):
         if a.per_entry:
             print(line("dataset_v1 rules", v1_line))
         print(line("baseline", bs))
-        cur, cap = dict(crit), None
+        cur, cap, lig_cap = dict(crit), None, None
         last = None
         for tok in a.ladder.split(","):
             name, lab, fn, k = parse_change(tok, crit)
-            cur[name] = fn or _true
-            cap = k if name == "not_cofactor" else cap
+            if name == "all_ligands":
+                lig_cap = k
+            else:
+                cur[name] = fn or _true
+                cap = k if name == "not_cofactor" else cap
             prev = last if last is not None else base
-            last = select(df, cur, a.per_entry, cap)
+            last = select(df, cur, a.per_entry, cap, lig_cap)
             print(line("+ " + tok.strip(), stats(last, base)))
             print("    " + added_ligands(prev, last))
         s = stats(last, base)
@@ -567,6 +590,17 @@ def selftest():
         {**row("3mal__1__1.A__1.B", "G3", "g3", "GLC-GLC")},
         {**row("4cov__1__1.A__1.B", "G4", "g4", "XYZ"), "ligand_is_covalent": True}]))
     got = set(select(sug, {**crit, "not_covalent": _true})["ligand_ccd_code"])
+    hub = prepare_frame(pd.DataFrame(
+        [row(f"{i}anp__1__1.A__1.B", f"K{i % 5}", f"a{i}", "ANP") for i in range(8)]
+        + [row("9det__1__1.A__1.B", "D9", "d9", "DMU"), row("8drg__1__1.A__1.B", "D8", "d8", "XYZ")]))
+    hc = select(hub, crit, lig_cap=5)
+    ka = hc[hc["ligand_ccd_code"] == "ANP"]
+    check("all-ligand cap: a non-cofactor hub (ANP) is capped, one row per target first; "
+          "the detergent is out, a drug-like ligand stays",
+          len(ka) == 5 and ka["group"].nunique() == 5
+          and "DMU" not in set(hc["ligand_ccd_code"]) and "XYZ" in set(hc["ligand_ccd_code"])
+          and parse_change("all_ligands=cap50", crit)[::3] == ("all_ligands", 50),
+          f"ANP {len(ka)} rows / {ka['group'].nunique()} groups")
     check("covalent sugars (glycosylation) stay out when covalent ligands are admitted; "
           "a non-covalent sugar and a covalent drug-like ligand come in",
           got == {"GLC-GLC", "XYZ"}, f"{sorted(got)}")

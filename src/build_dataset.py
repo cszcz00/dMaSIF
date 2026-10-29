@@ -28,6 +28,9 @@ them in `query` like any manifest column:
                         pass_single_ligand, which counts proper ligands only.
     entry               the PDB entry (field 1); dedup on [entry,
                         ligand_ccd_code] folds symmetry copies of one ligand
+    ligand_is_detergent the ligand (or a component of it) is a common
+                        crystallisation detergent / lipid-cubic-phase lipid
+                        (DETERGENTS); PLINDER's artifact flag misses some
     ligand_is_glycan    every component of ligand_ccd_code ("NAG-NAG-BMA")
                         is a common monosaccharide (SUGARS). Covalent AND
                         glycan is N/O-glycosylation - a modification of the
@@ -81,7 +84,7 @@ DEFAULTS = {
         # set, so a relaxed dataset contains every row of the strict one.
         "dedup_sort": ["system_id"],
         # Per-value row caps applied after dedup, each a dict:
-        #   where   query selecting the rows the cap applies to
+        #   where   query selecting the rows the cap applies to (omit: all)
         #   by      column whose values are capped (e.g. ligand_ccd_code)
         #   max     rows kept per value
         #   spread  column to spread the kept rows over: one row per spread
@@ -127,6 +130,18 @@ SUGARS = frozenset("""NAG NDG BMA MAN FUC FUL GAL GLA GLC BGC SIA SLB NGA A2G XY
     GCU BDP FRU RAM KDO NGC MAG GCS IDS SGN GAD BGN LAT""".split())
 
 
+# Crystallisation detergents and LCP lipids. The second funnel run admitted
+# DMU (decyl maltoside, 161 rows / 32 targets), which PLINDER's artifact flag
+# does not mark. Lipids that are genuine ligands (cholesterol in a GPCR) are
+# deliberately NOT here.
+DETERGENTS = frozenset("""DMU LMT UMQ BOG BNG HTG LDA C8E CE1 CXE SDS DDQ OLC OLA
+    OLB MPG LMN 2CV DAO TWT""".split())
+
+
+def is_detergent(ccd):
+    return isinstance(ccd, str) and any(p in DETERGENTS for p in ccd.split("-"))
+
+
 def is_glycan(ccd):
     parts = str(ccd).split("-") if isinstance(ccd, str) and ccd else []
     return bool(parts) and all(p in SUGARS for p in parts)
@@ -140,6 +155,7 @@ def add_derived(df):
     df["entry"] = fields.str[0]
     if "ligand_ccd_code" in df.columns:
         df["ligand_is_glycan"] = df["ligand_ccd_code"].map(is_glycan).astype(bool)
+        df["ligand_is_detergent"] = df["ligand_ccd_code"].map(is_detergent).astype(bool)
     return df
 
 
@@ -198,16 +214,18 @@ def select(df, sel):
         for k in keys:
             df = step(f"dedup {list(k)}", df.drop_duplicates(list(k), keep="first"))
     for c in sel["cap"] or []:
-        df = step(f"cap {c['by']} <= {c['max']} where {c['where']}", cap_rows(df, **c))
+        where = f" where {c['where']}" if c.get("where") else ""
+        df = step(f"cap {c['by']} <= {c['max']}{where}", cap_rows(df, **c))
     return df.copy(), log
 
 
-def cap_rows(df, where, by, max, spread=None, splits=None):
+def cap_rows(df, by, max, where=None, spread=None, splits=None):
     """At most `max` rows per value of `by` among the rows matching `where`
-    (and `splits`); the others pass untouched. Rows already in their order
+    (all rows when None) and `splits`; the others pass untouched. Rows already in their order
     (dedup_sort) are taken one per `spread` value at a time, so the kept rows
     cover as many distinct spread values as the cap allows. Deterministic."""
-    m = df.eval(where, engine="python").fillna(False).to_numpy(bool).copy()
+    m = (np.ones(len(df), bool) if not where
+         else df.eval(where, engine="python").fillna(False).to_numpy(bool).copy())
     if splits:
         m &= df["split"].isin(splits).to_numpy(bool)
     sub = df[m]

@@ -1013,3 +1013,35 @@ the ligands it adds and their class shares; the per-entry line breaks down
 the groups it removes; with --scan the default ladder uses the measured
 gates (resolution<=4.5q, mw=buried, ligand_chains gate_small8). Rerun
 pending.
+
+## Funnel, third run (2026-10-29: glycosylation excluded, scan ladder)
+
+- **Glycosylation was most of the covalent gain.** not_covalent=drop now
+  +133 groups (was +441); its ladder step adds real covalent ligands
+  (BLA biliverdin, RET retinal, LBV, DFP, ...). `not_glycosylation` fails
+  71,787 manifest rows.
+- **Per-entry dedup's 226 lost groups are ALL `pli:` groups** (rows without a
+  UniProt): symmetry copies counted as separate interaction components, not
+  real targets. Confirms the dedup.
+- Ladder (scan gates, cofactor cap 50): baseline 2,379 -> **8,398 train
+  groups** (+6,025), visits 67 -> 19.1, val / test 73 / 305 -> 356 / 740,
+  +25,163 receptor inputs (~7.8 GB). Steps (new groups, cumulative): altlocs
+  210, resolution<=4.5q 1,028, mw=buried 2,251, covalent 2,467, oligo<=HA60
+  3,663, companions gate_small8 4,898, cofactors cap50 6,025.
+- **Still contaminated by hubs the cofactor cap does not see**: the most
+  frequent train ligands at the end are ANP (439 rows / 266 groups), GNP
+  (347 / 105), NAG (346 / 216, non-covalent), GLC-GLC (323 / 86), GLU
+  (245 / 83), ACP (217 / 178), DMU (162 / 32, a detergent). ANP / GNP / ACP /
+  AGS are non-hydrolysable nucleotide analogues, admitted with their Mg2+ by
+  the companion gate and not flagged as cofactors by PLINDER.
+- mw=buried brings small buried ligands, mostly real: GLU / ASP / ARG
+  (amino-acid binding proteins, glutamate receptors), BGC / GAL / GLC
+  (lectins). P00918 (carbonic anhydrase II) grows to 591 rows.
+
+Fixed after this run: a cap on EVERY ligand (`all_ligands=capN`, at most N
+train rows per CCD code, one per target first; subsumes the cofactor cap)
+and a detergent exclusion (`build_dataset.DETERGENTS`: DMU, LMT, BOG, ...,
+LCP lipids; not cholesterol). `dataset_v2.yaml` now mirrors LADDER_SCAN
+exactly (checked row for row on a planted manifest), including the cap.
+Also fixed: `build_dataset.select` would have crashed logging a cap with no
+`where`.
