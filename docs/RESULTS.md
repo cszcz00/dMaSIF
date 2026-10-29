@@ -968,3 +968,48 @@ input chemistry alone does not. Donor vs acceptor needs inputs that carry
 it (chemotype's proximity channels do, 0.72; the element one-hot does not),
 so the supervised run should keep `--chemo` on. Salience supervision has
 the clearest headroom (0.55 against 0.65 for the pocket head).
+
+## Structure scan + funnel, second run (2026-10-29, `funnel.sbatch`, SKIP_INSPECT)
+
+**Scan:** 341,690 of 341,945 manifest rows ok (255 `ValueError`, most likely
+receptors with no protein atoms). Medians: burial45 0.94, pocket_missing 0
+(p95 2), pocket B ratio 0.92 (p95 1.40), pocket altlocs 0 at p95. 32.9% of
+rows have a companion within 8 A; of those, 25.6% ion-sized (1 heavy atom),
+41.5% <= 6. **Companions are always in the site**: comp_min_dist p95 3.75 A,
+and `companion_funnel distance` puts 400 / 400 sampled companions under 4 A
+(PLINDER groups nearby ligands into one system). Gating companions by
+DISTANCE is therefore meaningless; only SIZE separates an ion's dimple from
+a cofactor's cavity.
+
+**Per-entry dedup** (key now incl. UniProt): v1 train rows 20,810 -> 11,155
+(half of v1 is symmetry copies), train groups 2,605 -> 2,379.
+
+**Single relaxations, NEW train groups (vs the per-entry baseline):**
+not_cofactor=drop +1,927, resolution=drop +1,411, mw=drop +1,256,
+not_cofactor=cap100 +1,244, mw100-1000 +1,097, mw=buried +946,
+resolution<=4.5q +822 (<=4.0 +812: pockets are nearly always complete, so
+the quality gate removes little), not_cofactor=cap50 +793, not_oligo +765,
+resolution<=3.5 +757, ligand_chains=drop +717, gate_small8 +673, mw150-900
++651, gate_ion8 +536, not_covalent +441, no_altlocs +210.
+
+Cofactor census: 4,539 cofactor-target train rows over 91 ligands and 2,223
+groups; HEM alone 1,116 rows / 330 groups, then FAD 539, SAH 382, NAD 371,
+NAP 305; the top 13 are 81% of rows. Cap 25 / 50 / 100 keep 839 / 1,251 /
+1,918 rows.
+
+**The default ladder reached 7,435 train groups (visits 67 -> 21.5), but
+its last steps were CONTAMINATED.** The most frequent train ligands at the
+end were NAG (1,748 rows / 738 groups), NAG-NAG (1,090 / 471), NAG-NAG-BMA,
+NAG-NAG-FUC, NAG-NAG-BMA-MAN: N-glycans on asparagine, admitted by
+not_covalent=drop + not_oligo. Glycosylation is a modification of the
+protein, not a pocket ligand. Non-covalent sugars (GLC-GLC maltose 309 / 82,
+GLC-FRU sucrose) are real binders and stay. DMU (decyl maltoside, a
+detergent) also passed PLINDER's artifact flag (161 rows / 32 groups).
+
+Fixed after this run: `build_dataset.add_derived` marks `ligand_is_glycan`
+(every CCD component a common monosaccharide) and the funnel always applies
+`not_glycosylation` = not (covalent and glycan); each ladder step now prints
+the ligands it adds and their class shares; the per-entry line breaks down
+the groups it removes; with --scan the default ladder uses the measured
+gates (resolution<=4.5q, mw=buried, ligand_chains gate_small8). Rerun
+pending.

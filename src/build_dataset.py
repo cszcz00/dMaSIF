@@ -28,6 +28,10 @@ them in `query` like any manifest column:
                         pass_single_ligand, which counts proper ligands only.
     entry               the PDB entry (field 1); dedup on [entry,
                         ligand_ccd_code] folds symmetry copies of one ligand
+    ligand_is_glycan    every component of ligand_ccd_code ("NAG-NAG-BMA")
+                        is a common monosaccharide (SUGARS). Covalent AND
+                        glycan is N/O-glycosylation - a modification of the
+                        protein, not a ligand that binds a pocket
 
 Selection runs in this order, each step logged with its row count:
     splits  ->  require  ->  exclude  ->  query  ->  dedup
@@ -115,12 +119,27 @@ def load_spec(path):
 # ----------------------------------------------------------------------------
 # Selection
 # ----------------------------------------------------------------------------
+# Common monosaccharide CCD codes (glycan building blocks). The first funnel
+# run with covalent + oligomer ligands admitted had NAG (1,748 rows / 738
+# targets), NAG-NAG, NAG-NAG-BMA, NAG-NAG-FUC as its most frequent ligands:
+# N-glycans on asparagine, not pocket ligands.
+SUGARS = frozenset("""NAG NDG BMA MAN FUC FUL GAL GLA GLC BGC SIA SLB NGA A2G XYS XYP
+    GCU BDP FRU RAM KDO NGC MAG GCS IDS SGN GAD BGN LAT""".split())
+
+
+def is_glycan(ccd):
+    parts = str(ccd).split("-") if isinstance(ccd, str) and ccd else []
+    return bool(parts) and all(p in SUGARS for p in parts)
+
+
 def add_derived(df):
-    """Columns read off the system_id; see the module docstring."""
+    """Columns read off the system_id and ligand code; see the module docstring."""
     fields = df["system_id"].str.split("__")
     df["n_receptor_chains"] = fields.str[2].str.split("_").str.len().astype("int16")
     df["n_ligand_chains"] = fields.str[3].str.split("_").str.len().astype("int16")
     df["entry"] = fields.str[0]
+    if "ligand_ccd_code" in df.columns:
+        df["ligand_is_glycan"] = df["ligand_ccd_code"].map(is_glycan).astype(bool)
     return df
 
 

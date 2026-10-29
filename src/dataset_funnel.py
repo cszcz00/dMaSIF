@@ -103,6 +103,10 @@ def v1_criteria():
 
     crit = {name: fn for name, _, fn in FILTERS if name not in HARD}
     crit["ligand_chains"] = lambda d: d["n_ligand_chains"] == 1
+    # Never relaxed by the default ladder: a covalent sugar-only ligand is
+    # glycosylation. A no-op on dataset_v1, which excludes covalent ligands.
+    crit["not_glycosylation"] = lambda d: ~(d["ligand_is_covalent"].fillna(False).astype(bool)
+                                            & d["ligand_is_glycan"])
     return crit
 
 
@@ -278,8 +282,22 @@ def line(name, s):
 
 
 # ---------------------------------------------------------------------------
+# Ordered from least to most change to what a training example IS: quality,
+# then ligand classes. The scan ladder swaps in the measured gates: resolution
+# past 3.5 A only with a complete pocket, fragments only when buried, and
+# companions up to an additive's size (every companion sits within ~4 A of
+# the ligand, so size is the only gate that means anything).
+LADDER = ("no_altlocs=drop,resolution<=3.5,mw150-900,not_covalent=drop,"
+          "not_oligo<=HA60,not_cofactor=cap50")
+LADDER_SCAN = ("no_altlocs=drop,resolution<=4.5q,mwburied,not_covalent=drop,"
+               "not_oligo<=HA60,ligand_chainsgate_small8,not_cofactor=cap50")
+
+
 def report(a):
     import pandas as pd
+
+    if a.ladder is None:
+        a.ladder = LADDER_SCAN if a.scan else LADDER
 
     from build_dataset import join_tables
 
@@ -313,7 +331,16 @@ def report(a):
         print(f"per-entry dedup on {ENTRY_KEY}: train rows {v1_line['rows']:,} -> "
               f"{bs['rows']:,}, train groups {v1_line['groups']:,} -> {bs['groups']:,}. "
               "Every line below is per-entry deduplicated and counted against "
-              "this smaller baseline.\n")
+              "this smaller baseline.")
+        tr0 = select(df, crit)
+        lost = set(tr0.loc[tr0["split"] == "train", "group"]) - set(
+            base.loc[base["split"] == "train", "group"])
+        kinds = {}
+        for g in lost:
+            kinds[g.split(":")[0]] = kinds.get(g.split(":")[0], 0) + 1
+        print(f"  the {len(lost):,} train groups it removes, by kind: {kinds} "
+              "(pli: groups are rows without a UniProt, one per interaction "
+              "component, so symmetry copies of one entry can count as several)\n")
 
     # Attrition, in build_manifest's order, so the biggest single losses are visible.
     print("strict attrition on the manifest's train/val/test rows:")
@@ -358,8 +385,10 @@ def report(a):
             name, lab, fn, k = parse_change(tok, crit)
             cur[name] = fn or _true
             cap = k if name == "not_cofactor" else cap
+            prev = last if last is not None else base
             last = select(df, cur, a.per_entry, cap)
             print(line("+ " + tok.strip(), stats(last, base)))
+            print("    " + added_ligands(prev, last))
         s = stats(last, base)
         gb = s["+inputs"] * (SURFACE_MB + POCKET_MB) / 1024
         print(f"\nfinal step: +{s['+inputs']:,} receptor inputs to sample + fpocket "
@@ -379,6 +408,23 @@ def report(a):
             last.to_parquet(out) if out.suffix == ".parquet" else last[
                 ["system_id", "split", "group", "input_id"]].to_csv(out, sep="\t", index=False)
             print(f"\nwrote the final selection to {out}")
+
+
+FLAG_COLS = (("covalent", "ligand_is_covalent"), ("oligo", "ligand_is_oligo"),
+             ("cofactor", "ligand_is_cofactor"), ("glycan", "ligand_is_glycan"))
+
+
+def added_ligands(prev, cur, k=6):
+    """What a ladder step adds: its most frequent new train ligands and the
+    share of added rows carrying each ligand-class flag."""
+    tr = cur[(cur["split"] == "train") & ~cur.index.isin(prev.index)]
+    if not len(tr):
+        return "adds no train rows"
+    top = tr["ligand_ccd_code"].value_counts().head(k)
+    flags = ", ".join(f"{n} {tr[c].fillna(False).astype(bool).mean():.0%}"
+                      for n, c in FLAG_COLS if c in tr.columns)
+    return (f"adds {len(tr):,} train rows: " + ", ".join(f"{c} {v}" for c, v in top.items())
+            + f"  [{flags}]")
 
 
 def cofactor_census(df, crit, per_entry):
@@ -515,6 +561,15 @@ def selftest():
     n40 = len(select(oligo, {**crit, "not_oligo": LOOSER["not_oligo"][0][1]}))
     n60 = len(select(oligo, {**crit, "not_oligo": LOOSER["not_oligo"][1][1]}))
     check("small-oligomer variants admit by heavy atoms", (n40, n60) == (1, 2))
+    sug = prepare_frame(pd.DataFrame([
+        {**row("1gly__1__1.A__1.B", "G1", "g1", "NAG-NAG"), "ligand_is_covalent": True},
+        {**row("2gly__1__1.A__1.B", "G2", "g2", "NAG"), "ligand_is_covalent": True},
+        {**row("3mal__1__1.A__1.B", "G3", "g3", "GLC-GLC")},
+        {**row("4cov__1__1.A__1.B", "G4", "g4", "XYZ"), "ligand_is_covalent": True}]))
+    got = set(select(sug, {**crit, "not_covalent": _true})["ligand_ccd_code"])
+    check("covalent sugars (glycosylation) stay out when covalent ligands are admitted; "
+          "a non-covalent sugar and a covalent drug-like ligand come in",
+          got == {"GLC-GLC", "XYZ"}, f"{sorted(got)}")
 
     print("\nPASS" if not fails else f"\nFAIL: {fails}")
     raise SystemExit(1 if fails else 0)
@@ -529,9 +584,9 @@ def main():
     # Ordered from least to most change to what a training example IS: quality
     # filters first, then ligand classes the first run showed to be the
     # biggest sources of new targets (not_cofactor +1,888 groups, mw +1,246).
-    p.add_argument("--ladder", default="no_altlocs=drop,resolution<=3.5,mw150-900,"
-                   "not_covalent=drop,not_oligo<=HA60,not_cofactor=cap50",
-                   help="comma-separated cumulative changes, e.g. "
+    p.add_argument("--ladder", default=None,
+                   help="default: LADDER, or LADDER_SCAN when --scan is given. "
+                        "Comma-separated cumulative changes, e.g. "
                         "'no_altlocs=drop,resolution<=3.0'; '' to skip")
     p.add_argument("--scan", help="structure_scan.py merge output, joined on "
                    "(system_id, ligand_id); enables the gate / buried / q variants")

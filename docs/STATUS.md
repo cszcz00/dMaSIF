@@ -223,7 +223,13 @@ build_batch / anchor_block exactly as retrieval_report.py does, and every
 attribute anchor_block reads is supplied by the parser. The report, viewer
 and PyMOL output are checked on a planted dump (11 checks).
 
-## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, draft `dataset_v2.yaml`) - first funnel run DONE, second run + scan PENDING
+## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, draft `dataset_v2.yaml`) - scan DONE, second funnel run DONE, third run PENDING
+
+Second run (RESULTS): scan covers 99.9% of the manifest; companions always
+sit within ~4 A, so companions gate by SIZE only; the ladder reached 7,435
+train groups but its covalent + oligo steps admitted N-glycans (NAG ...).
+Glycosylation is now excluded; rerun with
+`SKIP_INSPECT=1 sbatch src/slurm/funnel.sbatch` before writing dataset_v2.
 
 Decisions (user, 2026-10-29): add covalent ligands and SMALL oligomers;
 cofactors as targets WITH A CAP per ligand; companions by STRIP-AND-GATE
