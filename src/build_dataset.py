@@ -61,6 +61,10 @@ DEFAULTS = {
     "description": "",
     "manifest": "data/meta/manifest.parquet",
     "fingerprints": "data/meta/ligand_fps.npy",
+    # Extra per-row tables (parquet) left-joined onto the manifest on
+    # (system_id, ligand_id) before selection, so a query can use their
+    # columns; e.g. data/meta/structure_scan.parquet from structure_scan.py.
+    "join": [],
     "selection": {
         "splits": ["train", "val", "test"],
         "require": [],    # boolean manifest columns that must be true
@@ -72,6 +76,15 @@ DEFAULTS = {
         # keeps the strict pipeline's representative whenever it is in the
         # set, so a relaxed dataset contains every row of the strict one.
         "dedup_sort": ["system_id"],
+        # Per-value row caps applied after dedup, each a dict:
+        #   where   query selecting the rows the cap applies to
+        #   by      column whose values are capped (e.g. ligand_ccd_code)
+        #   max     rows kept per value
+        #   spread  column to spread the kept rows over: one row per spread
+        #           value before any value gets a second, so a cap keeps as
+        #           many distinct targets as it can
+        #   splits  splits the cap applies to (default all)
+        "cap": [],
     },
     "receptor_input": {"policy": "plinder_receptor", "params": {}},
 }
@@ -108,6 +121,22 @@ def add_derived(df):
     df["n_receptor_chains"] = fields.str[2].str.split("_").str.len().astype("int16")
     df["n_ligand_chains"] = fields.str[3].str.split("_").str.len().astype("int16")
     df["entry"] = fields.str[0]
+    return df
+
+
+def join_tables(df, paths, root=Path(".")):
+    """Left-join each extra table on (system_id, ligand_id); see DEFAULTS["join"]."""
+    for p in paths or []:
+        extra = pd.read_parquet(Path(root) / p)
+        key = ["system_id", "ligand_id"]
+        clash = (set(extra.columns) & set(df.columns)) - set(key)
+        if clash:
+            raise SystemExit(f"join {p}: columns already in the manifest: {sorted(clash)}")
+        if extra.duplicated(key).any():
+            raise SystemExit(f"join {p}: duplicate (system_id, ligand_id) rows")
+        idx = df.index
+        df = df.merge(extra, on=key, how="left", validate="many_to_one")
+        df.index = idx
     return df
 
 
@@ -149,7 +178,29 @@ def select(df, sel):
                             kind="mergesort", na_position="last")
         for k in keys:
             df = step(f"dedup {list(k)}", df.drop_duplicates(list(k), keep="first"))
+    for c in sel["cap"] or []:
+        df = step(f"cap {c['by']} <= {c['max']} where {c['where']}", cap_rows(df, **c))
     return df.copy(), log
+
+
+def cap_rows(df, where, by, max, spread=None, splits=None):
+    """At most `max` rows per value of `by` among the rows matching `where`
+    (and `splits`); the others pass untouched. Rows already in their order
+    (dedup_sort) are taken one per `spread` value at a time, so the kept rows
+    cover as many distinct spread values as the cap allows. Deterministic."""
+    m = df.eval(where, engine="python").fillna(False).to_numpy(bool).copy()
+    if splits:
+        m &= df["split"].isin(splits).to_numpy(bool)
+    sub = df[m]
+    if not len(sub):
+        return df
+    keys = [by] + ([spread] if spread else [])
+    turn = sub.groupby(keys, dropna=False, sort=False).cumcount()
+    pos = np.arange(len(sub))
+    order = np.lexsort((pos, turn.to_numpy()))
+    ranked = sub.iloc[order]
+    kept = ranked[ranked.groupby(by, dropna=False, sort=False).cumcount() < max]
+    return df[~m | df.index.isin(kept.index)]
 
 
 # ----------------------------------------------------------------------------
@@ -201,7 +252,7 @@ def main():
 
     manifest_path = root / spec["manifest"]
     fps_path = root / spec["fingerprints"]
-    df = add_derived(pd.read_parquet(manifest_path))
+    df = join_tables(add_derived(pd.read_parquet(manifest_path)), spec["join"], root)
     df, log = select(df, spec["selection"])
     if not len(df):
         raise SystemExit("selection is empty")

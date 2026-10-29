@@ -180,14 +180,48 @@ Then, in any order:
    them), but misleading to read. `train.py` and `probe_retrieval.py` both
    take the flags.
 
-## Dataset expansion (`src/dataset_funnel.py`, draft `dataset_v2.yaml`) - FIRST RUN DONE (RESULTS 2026-10-29), rerun pending
+## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, draft `dataset_v2.yaml`) - first funnel run DONE, second run + scan PENDING
 
-First run: 24,327 train groups in the manifest against v1's 2,605. Biggest
-levers are ligand class and resolution (not_cofactor +1,888 groups, mw
-+1,246, resolution<=3.5 +743), not the quality filters the draft spec
-relaxed. Two funnel bugs fixed since (per-entry baseline, per-entry key now
-includes UniProt). Rerun with the new default ladder, then rewrite
-dataset_v2.yaml from it.
+Decisions (user, 2026-10-29): add covalent ligands and SMALL oligomers;
+cofactors as targets WITH A CAP per ligand; companions by STRIP-AND-GATE
+(keep extraction protein-only, admit a system by companion size x
+distance); the structure scan over the WHOLE manifest; everything through
+Slurm, nothing heavy on the login node.
+
+Run order, now (CPU venv, Slurm):
+```
+source ~/venvs/plinder/bin/activate && pip install gemmi      # once
+python src/structure_scan.py selftest                           # seconds, login node is fine
+OUT=$WORK/tmp/scan_test LIMIT=50 sbatch --array=0 src/slurm/scan.sbatch   # timing check
+sbatch src/slurm/funnel.sbatch            # inspect_columns + funnel (no scan yet) + companion funnel
+sbatch src/slurm/scan.sbatch              # 64 shards over the whole manifest
+sbatch --dependency=afterok:<scan job id> src/slurm/funnel.sbatch   # merge + funnel with --scan
+```
+New since the first run:
+- funnel: `not_oligo<=HA40/HA60` (oligomers up to N heavy atoms),
+  `not_cofactor=cap25/50/100` (cofactor targets, at most N train rows per
+  CCD code, kept one per target first so the cap keeps as many targets as
+  it can), a cofactor CCD census, the most frequent train ligands at the
+  end of the ladder, and with `--scan` the gates `ligand_chains=gate_ion8 /
+  gate_small8` (companions within 8 A no bigger than 1 / 6 heavy atoms),
+  `mw=buried` (120-200 Da only when burial45 >= 0.9) and
+  `resolution<=4.5q` (past 3.5 A only with <= 2 missing pocket atoms and
+  pocket B ratio <= 1.5). Default ladder: no_altlocs=drop, resolution<=3.5,
+  mw150-900, not_covalent=drop, not_oligo<=HA60, not_cofactor=cap50.
+- `structure_scan.py` (gemmi): per manifest row, ligand burial and
+  contacts, pocket completeness / B ratio / occupancy / altlocs on the
+  receptor file the surface is built from, and companion size x distance
+  from system.cif matched by position (no reliance on its chain naming).
+  `selftest` PASSES (planted receptor, ligand, Mg at 3 A, 6-atom group at
+  6 A, 12-atom group at 20 A, water); run -> merge -> join checked end to
+  end on planted files.
+- `build_dataset.py`: `join` (extra per-row tables on (system_id,
+  ligand_id)) and `selection.cap` (`cap_rows`, shared with the funnel).
+  `build_manifest.py --inspect_columns`: the annotation table's validation /
+  quality / ligand-class columns, for replacing proxies with PLINDER's own
+  local measures where they exist.
+- `dataset_v2.yaml` DRAFT now matches the new default ladder; checked row
+  for row against the funnel on a planted 6,000-row manifest.
 
 Why: `v3c+` put the ceiling at memorisation (~69 visits per target group at
 5,000 x 32), so the lever is more distinct TARGET GROUPS (UniProt, the
@@ -235,13 +269,10 @@ manifest, and ions and artifacts are HARD filters dropped when the manifest
 was built, so it can only see cofactor / oligo / covalent companions. The
 ion and additive share has to come from `distance`'s SDFs.
 
-Run order (CPU venv unless marked):
+Build order once the spec is settled (the funnel / scan steps are in the
+Slurm run order at the top of this section; the build steps are seconds to
+minutes of pandas and rdkit, but run them in an interactive or batch job too):
 ```
-python src/dataset_funnel.py selftest
-python src/dataset_funnel.py report --manifest data/meta/manifest.parquet --per_entry
-python src/companion_funnel.py funnel --manifest data/meta/manifest.parquet
-python src/companion_funnel.py distance --manifest data/meta/manifest.parquet --systems systems --n 400
-# paste all three into RESULTS.md, settle the ladder, edit dataset_v2.yaml to match, then:
 python src/build_dataset.py configs/datasets/dataset_v2.yaml --root $WORK --dry_run
 python src/build_dataset.py configs/datasets/dataset_v2.yaml --root $WORK --check_files
 python src/train.py prepare --index data/datasets/dataset_v2/index.parquet \

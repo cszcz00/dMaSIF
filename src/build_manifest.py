@@ -192,6 +192,34 @@ def inspect(plinder):
             print("\nsplit counts:\n", df["split"].value_counts())
 
 
+# Name fragments of the columns worth knowing about when replacing the coarse
+# filters (resolution, altlocs, cofactor) with local measures.
+QUALITY_TERMS = ("validation", "rscc", "rsr", "b_factor", "bfactor", "occupancy",
+                 "resolution", "altloc", "alt_count", "completeness", "clash",
+                 "cofactor", "oligo", "covalent", "fragment", "is_")
+
+
+def inspect_columns(plinder):
+    """Quality-related columns of the annotation table: dtype, null share, sample."""
+    import pyarrow.parquet as pq
+
+    ann_p, _, _ = paths(plinder)
+    names = pq.ParquetFile(ann_p).schema.names
+    pick = sorted(c for c in names if any(t in c.lower() for t in QUALITY_TERMS))
+    print(f"{len(pick)} of {len(names)} columns match {QUALITY_TERMS}")
+    df = pd.read_parquet(ann_p, columns=pick)
+    used = set(WANTED)
+    print(f"\n{'column':70s} {'dtype':>10s} {'null':>6s}  sample   (* = in the manifest)")
+    for c in pick:
+        v = df[c]
+        sample = v.dropna()
+        sample = (sample.value_counts().head(3).to_dict()
+                  if sample.dtype == object or sample.dtype == bool
+                  else (f"p50 {sample.median():.3g}" if len(sample) else "-"))
+        print(f"{('* ' if c in used else '  ') + c:70s} {str(v.dtype):>10s} "
+              f"{v.isna().mean():6.1%}  {str(sample)[:60]}")
+
+
 def load(plinder):
     """Annotation subset + split labels. Never reads all 745 columns."""
     import pyarrow.parquet as pq
@@ -375,6 +403,9 @@ def main():
     ap.add_argument("--plinder", required=True, help="PLINDER release/iteration directory")
     ap.add_argument("--out", required=True)
     ap.add_argument("--inspect", action="store_true", help="print schemas and exit")
+    ap.add_argument("--inspect_columns", action="store_true",
+                    help="list the annotation table's quality / validation / ligand-class "
+                         "columns with null share and a sample, and exit")
     ap.add_argument("--counts", action="store_true", help="filter attrition only; no writes")
     ap.add_argument("--dedup_cluster", default=DEDUP_CLUSTER)
     ap.add_argument("--no_dedup", action="store_true",
@@ -386,6 +417,9 @@ def main():
 
     if a.inspect:
         inspect(a.plinder)
+        return
+    if a.inspect_columns:
+        inspect_columns(a.plinder)
         return
 
     df = load(a.plinder)

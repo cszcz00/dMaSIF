@@ -129,24 +129,59 @@ LOOSER = {
     "interactions": [("2-80", lambda d: d["ligand_num_interactions"].between(2, 80))],
     "pocket_size": [("5-150", lambda d: d["system_proper_num_pocket_residues"].between(5, 150))],
     "ligand_chains": [("<=2", lambda d: d["n_ligand_chains"] <= 2),
-                      ("<=4", lambda d: d["n_ligand_chains"] <= 4)],
+                      ("<=4", lambda d: d["n_ligand_chains"] <= 4),
+                      # strip-and-gate, from structure_scan.py (--scan): admit a
+                      # system when no companion within 8 A of the ligand is
+                      # bigger than an ion (1 heavy atom) / a small additive
+                      # (6: sulfate, glycerol, acetate), so its void is a dimple
+                      ("gate_ion8", lambda d: (d["n_ligand_chains"] == 1)
+                       | (d["comp_maxha_8"] <= 1)),
+                      ("gate_small8", lambda d: (d["n_ligand_chains"] == 1)
+                       | (d["comp_maxha_8"] <= 6))],
+    # small oligomers (short peptides, di/tri-saccharides): an oligo ligand is
+    # admitted up to this many heavy atoms (~7.5 per peptide residue)
+    "not_oligo": [("<=HA40", lambda d: ~d["ligand_is_oligo"].fillna(False).astype(bool)
+                   | (d["ligand_num_heavy_atoms"] <= 40)),
+                  ("<=HA60", lambda d: ~d["ligand_is_oligo"].fillna(False).astype(bool)
+                   | (d["ligand_num_heavy_atoms"] <= 60))],
 }
+# Scan-based variants of existing criteria, evaluable only with --scan.
+LOOSER["mw"].append(
+    # fragments below 200 Da only when buried in a real pocket
+    ("buried", lambda d: d["ligand_molecular_weight"].between(200, 900)
+     | (d["ligand_molecular_weight"].between(120, 200) & (d["burial45"] >= 0.9))))
+LOOSER["resolution"].append(
+    # past 3.5 A only with a complete, not unusually mobile pocket
+    ("<=4.5q", lambda d: (d["entry_resolution"] <= 3.5)
+     | ((d["entry_resolution"] <= 4.5) & (d["pocket_missing"] <= 2)
+        & (d["pocket_b_ratio"] <= 1.5))))
+
+# The cofactor cap: cofactor-as-target rows admitted, at most N train rows per
+# ligand (CCD code), spread over as many targets as the cap allows. Shared
+# with build_dataset.cap_rows so the funnel and the build agree row for row;
+# a dataset spec writes the same dict under selection.cap.
+COFACTOR_CAP = {"where": "ligand_is_cofactor == True", "by": "ligand_ccd_code",
+                "spread": "system_pocket_UniProt", "splits": ["train"]}
+CAPS = (25, 50, 100)
 
 
 def parse_change(tok, crit):
-    """'name=drop' | 'name<=3.0' style token -> (name, label, predicate|None)."""
+    """'name=drop' | 'name<=3.0' | 'not_cofactor=cap50' token
+    -> (name, label, predicate or None for "drop", cofactor cap or None)."""
     tok = tok.strip()
+    if tok.startswith("not_cofactor=cap"):
+        return "not_cofactor", tok.split("=")[1], None, int(tok[len("not_cofactor=cap"):])
     if tok.endswith("=drop"):
         name = tok[:-5]
         if name not in crit:
             raise SystemExit(f"ladder: no criterion {name!r}; have {sorted(crit)}")
-        return name, "drop", None
+        return name, "drop", None, None
     for name, opts in LOOSER.items():
         if tok.startswith(name):
             label = tok[len(name):]
             for lab, fn in opts:
                 if lab == label:
-                    return name, lab, fn
+                    return name, lab, fn, None
             raise SystemExit(f"ladder: {name} has no variant {label!r}; "
                              f"have {[l for l, _ in opts]} or {name}=drop")
     raise SystemExit(f"ladder: cannot parse {tok!r} (want name=drop or e.g. resolution<=3.0)")
@@ -194,12 +229,21 @@ def dedup(d, key, per_entry=False):
     return out.drop(columns=["_rep", "_res"])
 
 
-def select(df, crit, per_entry=False):
-    """Rows passing every criterion in `crit` (name -> predicate), deduplicated."""
+def select(df, crit, per_entry=False, cap=None):
+    """Rows passing every criterion in `crit` (name -> predicate), deduplicated,
+    then the cofactor cap (`cap` rows per cofactor ligand) if given."""
+    from build_dataset import cap_rows
+
     m = np.ones(len(df), bool)
     for fn in crit.values():
         m &= fn(df).fillna(False).to_numpy(bool)
-    return dedup(df[m], DEDUP_KEY, per_entry)
+    out = dedup(df[m], DEDUP_KEY, per_entry)
+    return cap_rows(out, max=cap, **COFACTOR_CAP) if cap else out
+
+
+def _true(d):
+    import pandas as pd
+    return pd.Series(True, index=d.index)
 
 
 def stats(sel, base=None):
@@ -237,7 +281,14 @@ def line(name, s):
 def report(a):
     import pandas as pd
 
-    df = prepare_frame(pd.read_parquet(a.manifest))
+    from build_dataset import join_tables
+
+    df = pd.read_parquet(a.manifest)
+    if a.scan:
+        df = join_tables(df, [a.scan])
+        print(f"joined {a.scan}: {int(df['scan_status'].eq('ok').sum()):,} rows "
+              f"scanned ok of {len(df):,}")
+    df = prepare_frame(df)
     crit = v1_criteria()
     missing = [n for n, fn in crit.items() if not _works(fn, df)]
     for n in missing:
@@ -273,12 +324,19 @@ def report(a):
         m &= k
     print(f"  {'dedup':20s}                 left {len(base):>9,}\n")
 
+    cofactor_census(df, crit, a.per_entry)
+
     variants = []
     for n in crit:
-        variants.append((f"{n}=drop", {**crit, n: lambda d: pd.Series(True, index=d.index)}))
+        variants.append((f"{n}=drop", {**crit, n: _true}, None))
         for lab, fn in LOOSER.get(n, []):
-            variants.append((f"{n}{lab}", {**crit, n: fn}))
-    rows = [(name, stats(select(df, c, a.per_entry), base)) for name, c in variants]
+            if _works(fn, df):          # scan variants need --scan
+                variants.append((f"{n}{lab}", {**crit, n: fn}, None))
+    if "not_cofactor" in crit:
+        for k in CAPS:
+            variants.append((f"not_cofactor=cap{k}", {**crit, "not_cofactor": _true}, k))
+    rows = [(name, stats(select(df, c, a.per_entry, cap), base))
+            for name, c, cap in variants]
     rows.sort(key=lambda t: -t[1]["+groups"])
     print("single-criterion variants, sorted by NEW train target groups:")
     print(HEAD)
@@ -294,12 +352,13 @@ def report(a):
         if a.per_entry:
             print(line("dataset_v1 rules", v1_line))
         print(line("baseline", bs))
-        cur = dict(crit)
+        cur, cap = dict(crit), None
         last = None
         for tok in a.ladder.split(","):
-            name, lab, fn = parse_change(tok, crit)
-            cur[name] = fn or (lambda d: pd.Series(True, index=d.index))
-            last = select(df, cur, a.per_entry)
+            name, lab, fn, k = parse_change(tok, crit)
+            cur[name] = fn or _true
+            cap = k if name == "not_cofactor" else cap
+            last = select(df, cur, a.per_entry, cap)
             print(line("+ " + tok.strip(), stats(last, base)))
         s = stats(last, base)
         gb = s["+inputs"] * (SURFACE_MB + POCKET_MB) / 1024
@@ -309,6 +368,12 @@ def report(a):
         print("largest train groups at the final step (rows):")
         for g, c in s["top"].items():
             print(f"  {c:>6,}  {g}")
+        tr = last[last["split"] == "train"]
+        lig = tr.groupby("ligand_ccd_code").agg(rows=("system_id", "size"),
+                                               groups=("group", "nunique"))
+        print("most frequent train ligands at the final step (rows / groups):")
+        for c, r in lig.sort_values("rows", ascending=False).head(10).iterrows():
+            print(f"  {r['rows']:>6,} / {r['groups']:>5,}  {c}")
         if a.out:
             out = Path(a.out)
             last.to_parquet(out) if out.suffix == ".parquet" else last[
@@ -316,11 +381,36 @@ def report(a):
             print(f"\nwrote the final selection to {out}")
 
 
+def cofactor_census(df, crit, per_entry):
+    """What not_cofactor=drop would admit, by ligand: the case for a cap."""
+    if "not_cofactor" not in crit:
+        return
+    add = select(df, {**crit, "not_cofactor": _true}, per_entry)
+    add = add[(add["split"] == "train")
+              & add["ligand_is_cofactor"].fillna(False).astype(bool)]
+    if not len(add):
+        return
+    lig = (add.groupby("ligand_ccd_code")
+           .agg(rows=("system_id", "size"), groups=("group", "nunique"))
+           .sort_values("rows", ascending=False))
+    cum = lig["rows"].cumsum() / len(add)
+    print(f"cofactor census: not_cofactor=drop admits {len(add):,} cofactor-target "
+          f"train rows over {lig.shape[0]:,} distinct ligands and "
+          f"{add['group'].nunique():,} groups. Top ligands (rows / groups / "
+          "cumulative share of rows):")
+    for c, r in lig.head(25).iterrows():
+        print(f"  {r['rows']:>6,} / {r['groups']:>5,} / {cum[c]:5.1%}  {c}")
+    for k in CAPS:
+        kept = lig["rows"].clip(upper=k).sum()
+        print(f"  cap {k:>3d}: keeps {kept:,} of {len(add):,} rows")
+    print()
+
+
 def _works(fn, df):
     try:
         fn(df.head(5))
         return True
-    except KeyError:
+    except (KeyError, AttributeError):
         return False
 
 
@@ -398,9 +488,33 @@ def selftest():
           "and keeps the same ligand on a different protein",
           len(pe) == 3 and pe["strict_rep"].all() and set(pe["group"]) == {"up:P1", "up:P2", "up:P9"})
 
-    name, lab, fn = parse_change("resolution<=3.0", crit)
+    name, lab, fn, _ = parse_change("resolution<=3.0", crit)
     check("ladder tokens parse", (name, lab) == ("resolution", "<=3.0") and fn is not None
-          and parse_change("no_altlocs=drop", crit)[2] is None)
+          and parse_change("no_altlocs=drop", crit)[2] is None
+          and parse_change("not_cofactor=cap50", crit)[3] == 50
+          and parse_change("not_oligo<=HA60", crit)[1] == "<=HA60")
+
+    # cofactor cap: 6 ATP rows over 4 targets, cap 4 -> one per target first
+    atp = pd.DataFrame([row(f"{i}atp__1__1.A__1.B", f"K{i % 4}", f"k{i}", "ATP")
+                        for i in range(6)] + [row("9nad__1__1.A__1.B", "D1", "d1", "NAD")])
+    atp["ligand_is_cofactor"] = True
+    atp = prepare_frame(atp)
+    open_ = {**crit, "not_cofactor": _true}
+    full, capped = select(atp, open_), select(atp, open_, cap=4)
+    ka = capped[capped["ligand_ccd_code"] == "ATP"]
+    check("cofactor cap keeps <= cap rows per ligand, spread over distinct targets, "
+          "and leaves other ligands alone",
+          len(full) == 7 and len(ka) == 4 and ka["group"].nunique() == 4
+          and (capped["ligand_ccd_code"] == "NAD").sum() == 1,
+          f"{len(full)} -> {len(capped)}, ATP groups {ka['group'].nunique()}")
+    oligo = prepare_frame(pd.DataFrame([
+        {**row("1pep__1__1.A__1.B", "Q1", "q1", "PEP"), "ligand_is_oligo": True,
+         "ligand_num_heavy_atoms": 35},
+        {**row("2pep__1__1.A__1.B", "Q2", "q2", "BIG"), "ligand_is_oligo": True,
+         "ligand_num_heavy_atoms": 55}]))
+    n40 = len(select(oligo, {**crit, "not_oligo": LOOSER["not_oligo"][0][1]}))
+    n60 = len(select(oligo, {**crit, "not_oligo": LOOSER["not_oligo"][1][1]}))
+    check("small-oligomer variants admit by heavy atoms", (n40, n60) == (1, 2))
 
     print("\nPASS" if not fails else f"\nFAIL: {fails}")
     raise SystemExit(1 if fails else 0)
@@ -416,9 +530,11 @@ def main():
     # filters first, then ligand classes the first run showed to be the
     # biggest sources of new targets (not_cofactor +1,888 groups, mw +1,246).
     p.add_argument("--ladder", default="no_altlocs=drop,resolution<=3.5,mw150-900,"
-                   "not_covalent=drop,not_oligo=drop,not_cofactor=drop",
+                   "not_covalent=drop,not_oligo<=HA60,not_cofactor=cap50",
                    help="comma-separated cumulative changes, e.g. "
                         "'no_altlocs=drop,resolution<=3.0'; '' to skip")
+    p.add_argument("--scan", help="structure_scan.py merge output, joined on "
+                   "(system_id, ligand_id); enables the gate / buried / q variants")
     p.add_argument("--per_entry", action="store_true",
                    help="also dedup on (PDB entry, ligand): the symmetry-copy fix")
     p.add_argument("--out", help="write the final ladder selection (.parquet or .tsv)")

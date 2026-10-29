@@ -521,6 +521,7 @@ before the real run.
 | `anchors.py` | region selectors, negatives, pooling (`mean` / `mean_std` / `shells`) |
 | `external_pockets.py` | fpocket pockets as regions: `run` / `score` / `selftest`, `PocketSource` for `--region_source external`, the per-row site pocket (`--pocket_select site`) |
 | `plip_labels.py` | PLIP interaction labels per training row (`run` / `demo` / `check` / `selftest`) and `site_labels` onto a surface |
+| `structure_scan.py` | per manifest row: ligand burial, pocket completeness / mobility, companion size x distance (gemmi); `src/slurm/scan.sbatch`, `selftest` |
 | `dataset_funnel.py` | what each manifest filter costs in NEW target groups, and a cumulative relaxation ladder against dataset_v1; pandas only, `selftest` |
 | `pair_pool.py` | `PairPool`: learned site types x distance-bin pair pooling (`--pool_mode pairs`); `python src/pair_pool.py` self-tests |
 | `train_data.py` | items, surface store (disk + RAM LRU), pocket + other-site labels, the fallback region |

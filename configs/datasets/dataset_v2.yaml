@@ -1,54 +1,58 @@
-# DRAFT - do not build yet. The relaxations below were the FIRST funnel
-# ladder, which the first run (RESULTS, 2026-10-29) showed picks the weak
-# levers (+832 groups); rewrite this from the second run's ladder.
+# DRAFT - do not build until the second funnel run (src/slurm/funnel.sbatch)
+# is recorded in docs/RESULTS.md. This is dataset_funnel.py's default
+# --ladder; change both together. The scan-based gates (companions, buried
+# fragments, resolution past 3.5 A) join here once structure_scan.parquet
+# exists: add it under `join:` and the gate to `query`.
 #
-# dataset_v1 + more distinct targets, the lever the v3c+ memorisation ceiling
-# points at (~69 visits per target group). Relative to dataset_v1:
-#   - pass_no_altlocs dropped (extract.py keeps one altloc per atom anyway)
-#   - resolution 2.5 -> 3.0 A
-#   - pocket_resolved: up to 5 unresolved pocket heavy atoms (side-chain tips),
-#     not 0. A missing pocket RESIDUE (pass_no_missing_pocket) stays strict.
-#   - dedup recomputed on the relaxed set, preferring the strict_rep row, so
-#     every dataset_v1 cluster keeps the row it had: surfaces, fpocket files
-#     and PLIP labels stay valid and runs stay comparable
-#   - then one row per (PDB entry, ligand): the symmetry-copy fix
-#     (TRP: 507 rows from 57 entries in v1). This one REMOVES v1 rows.
-# n_ligand_chains == 1 stays until `companion_funnel.py distance` says how
-# close the companions sit.
+# dataset_v1 + more distinct targets (the v3c+ memorisation ceiling). Relative
+# to dataset_v1:
+#   - altlocs filter dropped (extract.py keeps one conformer anyway)
+#   - resolution 2.5 -> 3.5 A
+#   - ligand MW 200-800 -> 150-900
+#   - covalent ligands admitted (the pocket is real; the ligand graph lacks
+#     only the bond to the protein, as in a screening library)
+#   - oligomers admitted up to 60 heavy atoms (short peptides, small sugars)
+#   - cofactors admitted as targets, at most 50 TRAIN rows per cofactor
+#     ligand, spread one per target before any target gets a second
+#   - dedup recomputed on the relaxed set preferring the strict_rep row, so
+#     dataset_v1's clusters keep their rows; then one row per (PDB entry,
+#     ligand, UniProt) for symmetry copies (removes ~half of v1's rows)
+# n_ligand_chains == 1 stays until the scan's companion gate replaces it.
 description: >
-  dataset_v1's filters with altlocs dropped, resolution <= 3.0 A and up to 5
-  unresolved pocket heavy atoms; dedup on interaction cluster + ligand
-  preferring strict_rep, then per (entry, ligand); one ligand chain; PLINDER
-  receptor as input.
+  dataset_v1's filters with altlocs dropped, resolution <= 3.5 A, MW 150-900,
+  covalent ligands, oligomers up to 60 heavy atoms, and cofactor targets
+  capped at 50 train rows per ligand; dedup on interaction cluster + ligand
+  preferring strict_rep, then per (entry, ligand, UniProt); one ligand chain;
+  PLINDER receptor as input.
 
 manifest: data/meta/manifest.parquet
 fingerprints: data/meta/ligand_fps.npy
+join: []
 
 selection:
   splits: [train, val, test]
-  # every build_manifest filter except the three relaxed ones (HARD filters
-  # were applied when the manifest was built)
-  require: [pass_not_cofactor, pass_not_oligo, pass_not_covalent, pass_mw,
-            pass_positions, pass_interactions, pass_single_ligand,
+  # every build_manifest filter not relaxed above (HARD filters were applied
+  # when the manifest was built)
+  require: [pass_positions, pass_interactions, pass_single_ligand,
             pass_pocket_size, pass_crystal_contacts, pass_no_missing_pocket,
-            pass_all_chains]
+            pass_all_chains, pass_pocket_resolved]
   exclude: []
-  # x != x is the NaN test that works under both query engines; a null count
-  # passes, as it does in build_manifest's pass_pocket_resolved.
-  # (Folded scalar: keep every line at the same indent, or YAML keeps the
-  # newlines and pandas rejects a multi-line query.)
+  # Folded scalar: keep every line at the same indent, or YAML keeps the
+  # newlines and pandas rejects a multi-line query.
   query: >-
     n_ligand_chains == 1
-    and entry_resolution <= 3.0
-    and (system_pocket_validation_num_unresolved_heavy_atoms <= 5
-    or system_pocket_validation_num_unresolved_heavy_atoms
-    != system_pocket_validation_num_unresolved_heavy_atoms)
+    and entry_resolution <= 3.5
+    and ligand_molecular_weight >= 150 and ligand_molecular_weight <= 900
+    and (ligand_is_oligo != True or ligand_num_heavy_atoms <= 60)
   dedup:
     - [pli_unique_qcov__95__strong__component, ligand_ccd_code]
     # UniProt in the key: the same ligand on two different proteins of one
     # complex is two examples, not a symmetry copy
     - [entry, ligand_ccd_code, system_pocket_UniProt]
   dedup_sort: ["-strict_rep", entry_resolution, system_id]
+  cap:
+    - {where: "ligand_is_cofactor == True", by: ligand_ccd_code, max: 50,
+       spread: system_pocket_UniProt, splits: [train]}
 
 receptor_input:
   policy: plinder_receptor

@@ -1,4 +1,5 @@
 # CPU-side data scripts: build_manifest, fetch_structures, build_dataset,
+# structure_scan (gemmi), dataset_funnel,
 # labels, sanity. Install into ~/venvs/plinder:
 #   source ~/venvs/plinder/bin/activate && pip install -r envs/cpu-requirements.txt
 # GPU-side scripts (extract, probe_pocket) run in the container from
@@ -9,3 +10,4 @@ pyarrow
 pyyaml
 rdkit
 biopython
+gemmi
