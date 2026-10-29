@@ -225,11 +225,13 @@ def inspect_columns(plinder):
     names = pq.ParquetFile(ann_p).schema_arrow.names
     pick = sorted(c for c in names if any(t in c.lower() for t in QUALITY_TERMS))
     print(f"{len(pick)} of {len(names)} columns match {QUALITY_TERMS}")
-    df = pd.read_parquet(ann_p, columns=pick)
     used = set(WANTED)
     print(f"\n{'column':70s} {'dtype':>10s} {'null':>6s}  sample   (* = in the manifest)")
+    pf = pq.ParquetFile(ann_p)
     for c in pick:
-        v = df[c]
+        # One column at a time: all 122 together held >15 GB (list columns),
+        # and nothing here needs two columns at once.
+        v = pf.read(columns=[c]).column(0).to_pandas()
         sample = _sample(v.dropna())
         print(f"{('* ' if c in used else '  ') + c:70s} {str(v.dtype):>10s} "
               f"{v.isna().mean():6.1%}  {str(sample)[:60]}")
