@@ -180,6 +180,36 @@ Then, in any order:
    them), but misleading to read. `train.py` and `probe_retrieval.py` both
    take the flags.
 
+## Channel visualisation + PLIP diagnostic (`src/channel_viz.py`) - WRITTEN, selftest PASSES, never run
+
+What the per-point channels look like and mean, never inspected so far: the
+16 inputs (10 curvatures, fixed; 6 AtomNet channels, LEARNED and fine-tuned,
+so checkpoint-specific) and pair pooling's 8 site types + salience (trained
+only through the contrastive loss; whether they differentiated or collapsed
+is unknown). Also the gate for PLIP supervision of those heads (DESIGN, PLIP
+labels): how well they already match what ligands contact.
+
+`sbatch src/slurm/viz.sbatch` (GPU, test QOS, ~minutes): dumps C (resumed),
+v3d and v3f on the same 64 group-balanced val proteins (`--rows_from`),
+each with the PUBLISHED AtomNet channels on the same points and chemotype's
+12 channels as an interpretable reference; then the numpy report:
+- types: usage share, effective number of types, mean |r| between type
+  masses, per-point entropy -> "COLLAPSED / partly redundant /
+  differentiated"
+- naming: each learned channel's top-3 correlates among chemotype, local
+  element shares (6 A) and curvatures
+- pocket: AUROC of every channel for the 4 A label (also curvature sign)
+- plip: AUROC per channel x PLIP class inside the site region; chemotype's
+  own rows are the reference supervision could reach
+- `out/viz/report/<run>_html/*.html` (plotly viewer, every channel in a
+  dropdown, ligand drawn, points within 18 A) and `<run>_pymol/<system>/`
+  (`pymol load.pml`, B-factor = channel)
+`TARGETS=P56817,P0DTD1 sbatch ...` adds named targets. The dump stage is
+untested (no torch here); it reuses train.py's load_model_from_ckpt /
+build_batch / anchor_block exactly as retrieval_report.py does, and every
+attribute anchor_block reads is supplied by the parser. The report, viewer
+and PyMOL output are checked on a planted dump (11 checks).
+
 ## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, draft `dataset_v2.yaml`) - first funnel run DONE, second run + scan PENDING
 
 Decisions (user, 2026-10-29): add covalent ligands and SMALL oligomers;
