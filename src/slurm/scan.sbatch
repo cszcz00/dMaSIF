@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH --partition=alpha
+#SBATCH --qos=priority
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
-#SBATCH --time=06:00:00
+#SBATCH --time=01:00:00
 #SBATCH --array=0-63
 #SBATCH --output=logs/scan_%A_%a.log
 # Structure scan over the WHOLE manifest -> $OUT/part_<i>of<n>.parquet
@@ -15,6 +16,10 @@
 # part file exists is skipped, so resubmitting the array only redoes failed
 # or timed-out tasks. Time per receptor is printed every 500; at 64 tasks the
 # shard is ~3.5k receptors.
+# Measured on the 50-receptor test: ~0.12 s per receptor, so a shard is
+# ~7-10 min and 1 h leaves a wide margin. QOS: `sacctmgr show assoc
+# user=$USER format=account,qos%40` lists the ones you may use; override
+# at submit with `sbatch --qos=<name> ...`.
 #
 # Quick test first (one shard, 50 receptors, written to a scratch dir):
 #   OUT=$WORK/tmp/scan_test LIMIT=50 sbatch --array=0 src/slurm/scan.sbatch

@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=alpha
+#SBATCH --qos=priority
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
 #SBATCH --time=03:00:00
