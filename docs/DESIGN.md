@@ -521,6 +521,7 @@ before the real run.
 | `anchors.py` | region selectors, negatives, pooling (`mean` / `mean_std` / `shells`) |
 | `external_pockets.py` | fpocket pockets as regions: `run` / `score` / `selftest`, `PocketSource` for `--region_source external`, the per-row site pocket (`--pocket_select site`) |
 | `plip_labels.py` | PLIP interaction labels per training row (`run` / `demo` / `check` / `selftest`) and `site_labels` onto a surface |
+| `plip_loss.py` | PLIP supervision of pair pooling's salience and site types (v6): receptor-union point labels (numpy) + the two losses (torch); `--plip --lam_plip_sal --lam_plip_type`; `selftest` |
 | `valset.py` | one fixed validation set across datasets (v1's val targets, rows present in both); `train.py train / eval --val_set`; `selftest` |
 | `structure_scan.py` | per manifest row: ligand burial, pocket completeness / mobility, companion size x distance (gemmi); `src/slurm/scan.sbatch`, `selftest` |
 | `channel_viz.py` | per-point channel dump (inputs, pretrained AtomNet, chemotype reference, site types, salience) + report: type collapse, channel naming, pocket / PLIP AUROCs, HTML + PyMOL viewers; `src/slurm/viz.sbatch`, `selftest` |

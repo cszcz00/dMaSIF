@@ -925,6 +925,7 @@ def train(a):
     import torch
 
     from probe_retrieval import draw_batch, group_index, info_nce, split_by_group
+    from plip_loss import plip_losses, site_points
     from surface_encoder import pocket_loss
     from train_data import LabelCache, SurfaceStore
 
@@ -948,6 +949,22 @@ def train(a):
         if not a.lam_site:
             print("[warn] --n_decoys with --lam_site 0: the decoys are pooled "
                   "and reported (site) but nothing trains on them")
+    plip_on = bool(getattr(a, "lam_plip_sal", 0) or getattr(a, "lam_plip_type", 0))
+    if plip_on:
+        # PLIP supervision of the pair-pooling heads (plip_loss.py): needs the
+        # heads, and the row's SITE region to put the labels on.
+        if model.encoder.pair_pool is None:
+            raise SystemExit("--lam_plip_* supervises pair pooling's heads: "
+                             "needs --pool_mode pairs")
+        if enc_cfg.region_source != "external" or a.pocket_select != "site":
+            raise SystemExit("--lam_plip_* puts PLIP labels on the row's site "
+                             "region: needs --region_source external --pocket_select site")
+        if not a.plip or not Path(a.plip).is_dir():
+            raise SystemExit(f"--lam_plip_* needs --plip DIR (plip_labels.py run "
+                             f"output); got {a.plip!r}")
+        if enc_cfg.pair_types < 6:
+            raise SystemExit(f"--pair_types {enc_cfg.pair_types}: PLIP supervision ties "
+                             "types 0-5 to its 6 classes, so it needs >= 6")
     if a.freeze_encoder:
         freeze_encoder(model)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
@@ -962,7 +979,8 @@ def train(a):
     val_store = SurfaceStore(a.surface_cache, ram=a.val_ram, device=device,
                              keep_hydrogens=a.keep_hydrogens,
                              pockets=pocket_source(a, enc_cfg))
-    labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
+    labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram,
+                        plip=a.plip if plip_on else None)
 
     # split, sampler, state
     if getattr(a, "val_set", "") and a.val_split:
@@ -1061,6 +1079,7 @@ def train(a):
                            enc_cfg.pooled_dims, device)
     t_start = time.time()
     losses, nces, pocks = [], [], []
+    plip_sals, plip_types, plip_pos = [], [], []
     # Per-phase wall clock since the last evaluation line, summed over steps.
     # Synchronised at each boundary, so GPU work lands in the phase that
     # launched it rather than in whichever one next waits on the device.
@@ -1127,6 +1146,13 @@ def train(a):
             print(f"{step:8d} {met['sec']:7.0f}" + "".join(
                 f"{v:8.3f}" if isinstance(v, float) else f"{v:8d}"
                 for v in vals[2:]), flush=True)
+            if plip_on:
+                met.update(plip_sal=mean(plip_sals), plip_type=mean(plip_types),
+                           plip_pos=mean(plip_pos))
+                print(f"         plip  salience BCE {met['plip_sal']:.3f}  type CE "
+                      f"{met['plip_type']:.3f}  (contacted share of site points "
+                      f"{met['plip_pos']:.3f}; type CE at chance = "
+                      f"{np.log(enc_cfg.pair_types + 1):.3f})", flush=True)
             print(f"         train {store.report()}", flush=True)
             print(f"         val   {val_store.report()}", flush=True)
             if T["steps"]:
@@ -1206,6 +1232,26 @@ def train(a):
         pock = pocket_loss(blk["out"]["pocket_logit"], label, pw)
 
         loss = nce + a.lam_pocket * pock
+        if plip_on:
+            out_b = blk["out"]
+            tls, sls, ys = [], [], []
+            for b, lb in enumerate(labs):
+                sp = site_points(out_b, b, lb, site_select=True)
+                y = lb.get("plip_union")
+                if sp is None or y is None:
+                    continue
+                glob, loc = sp
+                f = out_b["input_feats"][glob] if enc_cfg.pair_feats else None
+                tl, sl = model.encoder.pair_pool.heads(out_b["pool_emb"][glob], f)
+                tls.append(tl)
+                sls.append(sl)
+                ys.append(y[loc.cpu().numpy()])
+            if tls:
+                p_sal, p_type, p_st = plip_losses(tls, sls, ys)
+                loss = loss + a.lam_plip_sal * p_sal + a.lam_plip_type * p_type
+                plip_sals.append(float(p_sal.detach()))
+                plip_types.append(float(p_type.detach()))
+                plip_pos.append(p_st["plip_pos"])
         if a.lam_site:
             per_anchor = (torch.einsum("bkd,bd->bk", blk["anchors"][keep], lig)
                           * model.scale())
@@ -1582,6 +1628,14 @@ def main():
                    help="weight of the per-point pocket BCE; 0 lets the regions drift")
     p.add_argument("--lam_site", type=float, default=0.0,
                    help="weight of the within-protein anchor CE (which anchor)")
+    p.add_argument("--plip", default="",
+                   help="plip_labels.py run output (data/plip), for --lam_plip_*")
+    p.add_argument("--lam_plip_sal", type=float, default=0.0,
+                   help="weight of the PLIP salience BCE on the site's points "
+                        "(plip_loss.py); 0 = off")
+    p.add_argument("--lam_plip_type", type=float, default=0.0,
+                   help="weight of the PLIP type CE: site types 0-5 tied to "
+                        "donor/acceptor/cation/anion/aromatic/hydrophobic; 0 = off")
     p.add_argument("--pos_weight", type=float, default=0.0,
                    help="pocket BCE positive weight; 0 = the running ratio")
     p.add_argument("--val_frac", type=float, default=0.1)

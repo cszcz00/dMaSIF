@@ -58,7 +58,8 @@
 # draws them from the top k_pos by druggability, the pockets the blind eval
 # scores. The `site` column then reads "own pocket above every decoy".
 #
-# Overrides here: POCKETS, POCKET_SHAPE, POCKET_MARGIN, PAIR_ARGS (e.g.
+# Overrides here: LAM_PLIP / LAM_PLIP_TYPE / PLIP (PLIP supervision, below),
+#   POCKETS, POCKET_SHAPE, POCKET_MARGIN, PAIR_ARGS (e.g.
 #   "--pair_types 12 --pair_bins 10"), DECOYS, POCKET_RANK, plus everything
 #   train.sbatch takes (TAU_MIN among them).
 POCKETS=${POCKETS:-$WORK/data/pockets/fpocket}
@@ -85,6 +86,13 @@ if [ -n "${DECOYS:-}" ] && [ "$DECOYS" != 0 ]; then
     # pooling; train.sbatch passes the same LAM_SITE again to the main run.
     export LAM_SITE=${LAM_SITE:-1.0}
     export REGION_ARGS="$REGION_ARGS --n_decoys $DECOYS --lam_site $LAM_SITE"
+fi
+# PLIP supervision of the site types and salience (off unless LAM_PLIP is set):
+# LAM_PLIP=0.1 weights both losses (LAM_PLIP_TYPE overrides the type one);
+# labels from PLIP (data/plip). In REGION_ARGS, so the smoke runs the losses.
+if [ -n "${LAM_PLIP:-}" ] && [ "$LAM_PLIP" != 0 ]; then
+    export REGION_ARGS="$REGION_ARGS --plip ${PLIP:-$WORK/data/plip} \
+--lam_plip_sal $LAM_PLIP --lam_plip_type ${LAM_PLIP_TYPE:-$LAM_PLIP}"
 fi
 export TRAIN_ARGS=${TRAIN_ARGS:-"--eval_every 125 --save_every 125"}
 exec bash $WORK/src/slurm/train.sbatch

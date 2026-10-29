@@ -103,12 +103,16 @@ class PairPool(nn.Module):
         a = torch.einsum("it,ijb->tjb", m, k)
         return torch.einsum("tjb,ju->tub", a, m)
 
+    def heads(self, emb, feats=None):
+        """-> (type logits (n, T + 1), salience logits (n,)): the raw head
+        outputs, which plip_loss.py supervises."""
+        z = emb if feats is None else torch.cat([emb, feats.to(emb.dtype)], dim=1)
+        return self.type_head(z), self.sal_head(z).squeeze(-1)
+
     def site_types(self, emb, feats=None):
         """-> (a (n, T), s (n,)) for points, e.g. to inspect what a type learned."""
-        z = emb if feats is None else torch.cat([emb, feats.to(emb.dtype)], dim=1)
-        a = F.softmax(self.type_head(z), dim=-1)[:, :self.n_types]
-        s = torch.sigmoid(self.sal_head(z)).squeeze(-1)
-        return a, s
+        tl, sl = self.heads(emb, feats)
+        return F.softmax(tl, dim=-1)[:, :self.n_types], torch.sigmoid(sl)
 
     def forward(self, emb, feats, w, regions, xyz, eps=1e-6):
         """emb (N, E), feats (N, F) or None, w (N,), regions: list of index

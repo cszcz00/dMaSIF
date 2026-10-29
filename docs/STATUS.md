@@ -180,6 +180,44 @@ Then, in any order:
    them), but misleading to read. `train.py` and `probe_retrieval.py` both
    take the flags.
 
+## v6: PLIP supervision of the site types and salience (`src/plip_loss.py`) - WRITTEN, numpy part of selftest PASSES, torch part + train path untested
+
+Why: channel_viz on C (RESULTS) - types coarse (polar / apolar / shape,
+never donor vs acceptor), salience = concavity (PLIP AUROC 0.55), and v3d
+showed more input chemistry alone does not sharpen them. Two auxiliary
+losses on the row's SITE region (`--pocket_select site`, slot 0):
+- salience: BCE(sal logit, contacted), contacted = any PLIP class at the
+  point for ANY ligand of the receptor (union over sibling rows), positive-
+  weighted by the batch's neg / pos ratio (capped at 20);
+- types: CE of the (T + 1)-way type softmax against the PLIP classes on
+  contacted points only, type t <- class t for the 6 classes (donor,
+  acceptor, cation, anion, aromatic, hydrophobic); types 6-7 and "not a
+  site" get no target; uncontacted points get no type loss (PLIP labels are
+  positive-unlabelled).
+Plumbing: `PairPool.heads()` (raw logits; `site_types` now wraps it),
+`LabelCache(plip=...)` attaches `plip_union` per row, train flags `--plip
+--lam_plip_sal --lam_plip_type` (refused without pairs / site select / >= 6
+types), a `plip` line under every evaluation (losses + contacted share; type
+CE at chance = log 9 = 2.197). `train_v3.sbatch`: LAM_PLIP=0.1 puts it in
+REGION_ARGS, so the smoke runs the losses too.
+
+Run order (login node first, container, CPU):
+```
+apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python src/plip_loss.py selftest
+apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python src/pair_pool.py
+apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python src/train.py selftest
+# v6 = v5 (C + chemo on dataset_v2) + PLIP supervision
+LAM_PLIP=0.1 SKIP_SMOKE=0 STEPS=10000 CHEMO=1 BANK= EXTRA_LIG= LR_SCHEDULE=const WARMUP=0 \
+POOL_MODE=pairs ANCHOR_NORM=batch RUN=$WORK/out/runs/v6_C_chemo_plip_dataset_v2 \
+DATA=$WORK/out/runs/dataset_v2 \
+TRAIN_ARGS="--eval_every 125 --save_every 125 --val_set $WORK/out/valset_v1v2" \
+sbatch --job-name=v6_plip src/slurm/train_v3.sbatch
+```
+Read: v6 against v5 (same everything but the two losses) on val MRR, and
+channel_viz on both for the per-type PLIP AUROCs. The `plip` line should show
+type CE falling well below 2.197 and salience BCE falling; if MRR drops while
+they fall, the weight is too high (try 0.03).
+
 ## Channel visualisation + PLIP diagnostic (`src/channel_viz.py`) - FIRST RUN DONE (RESULTS 2026-10-29)
 
 Result in one line: the site types did NOT collapse but encode a polar /

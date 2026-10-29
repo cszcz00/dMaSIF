@@ -381,9 +381,14 @@ class LabelCache:
     only costs the SDF read and one chunked cdist to rebuild.
     """
 
-    def __init__(self, table, cutoff=4.0, ram=512):
+    def __init__(self, table, cutoff=4.0, ram=512, plip=None):
         self.table = table
         self.cutoff = cutoff
+        # plip: a plip_labels.py output directory. When set, every record also
+        # carries `plip_union`, the (N, 6) PLIP class labels on this surface
+        # from every ligand of the receptor (plip_loss.receptor_labels), or
+        # None when no PLIP file exists for any of them.
+        self.plip = plip
         self.ram = max(int(ram), 1)
         self._mem = OrderedDict()
         self.failed = {}
@@ -420,6 +425,12 @@ class LabelCache:
 
         rec = {"pocket": pocket, "other": other, "lig": lig,
                "min_dist": float(d.min()), "n_other": n_other}
+        if self.plip:
+            from plip_loss import receptor_labels
+            sibs = [self.table.rows[j]["system_id"]
+                    for j in self.table.siblings.get(row["input_id"], [])]
+            _, rec["plip_union"] = receptor_labels(
+                np.asarray(entry["xyz"], np.float32), row["system_id"], sibs, self.plip)
         self._mem[key] = rec
         while len(self._mem) > self.ram:
             self._mem.popitem(last=False)
