@@ -496,11 +496,149 @@ def _bonds(lig, cut=1.9):
     return xs, ys, zs
 
 
-def html_viewer(meta, x, path, crop=18.0):
-    """One protein -> a self-contained plotly page with a channel dropdown."""
+# Mesh: the surface the model saw, triangulated, with features smoothed onto it.
+# The sampled points carry dMaSIF's outward normals, so the zero level set of
+# an oriented-point signed distance passes through them; naive surface nets
+# triangulates it. Numpy only (no scikit-image / Open3D in the container or
+# the venv). Between two pocket walls both normals point into the cleft, so
+# the field is positive across it and no sheet forms through the ligand.
+def implicit_grid(pts, nrm, h=0.6, sigma=1.0, reach=2.5, pad=2.0):
+    """Signed distance to the oriented point cloud on a grid:
+    f(x) = sum_i w_i n_i.(x - p_i) / sum_i w_i, w_i = exp(-|x-p_i|^2 / 2 sigma^2),
+    stamped from each point onto grid nodes within `reach`. Nodes no point
+    reaches are invalid (NaN), so the mesh stops where the samples stop."""
+    lo = pts.min(0) - pad
+    shape = np.ceil((pts.max(0) + pad - lo) / h).astype(int) + 1
+    r = int(np.ceil(reach / h))
+    off = np.stack(np.meshgrid(*[np.arange(-r, r + 1)] * 3, indexing="ij"), -1).reshape(-1, 3)
+    off = off[(off ** 2).sum(1) * h * h <= reach * reach]
+    base = np.round((pts - lo) / h).astype(int)
+    num = np.zeros(int(np.prod(shape)))
+    den = np.zeros_like(num)
+    for s in range(0, len(pts), 512):
+        b = base[s:s + 512, None] + off[None]                     # (k, m, 3)
+        ok = np.all((b >= 0) & (b < shape), -1)
+        x = lo + b * h
+        d = x - pts[s:s + 512, None]
+        w = np.exp(-(d ** 2).sum(-1) / (2 * sigma ** 2)) * ok
+        sd = (d * nrm[s:s + 512, None]).sum(-1)
+        flat = np.ravel_multi_index(tuple(np.clip(b, 0, shape - 1).reshape(-1, 3).T), shape)
+        num += np.bincount(flat, (w * sd).ravel(), len(num))
+        den += np.bincount(flat, w.ravel(), len(den))
+    f = np.full(len(num), np.nan)
+    good = den > 1e-3
+    f[good] = num[good] / den[good]
+    return f.reshape(shape), lo, h
+
+CORNERS = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0],
+                    [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]])
+EDGES = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7),
+         (0, 4), (1, 5), (2, 6), (3, 7)]
+
+def surface_nets(F, lo, h):
+    """Naive surface nets on the zero level set of F (NaN = invalid).
+    -> vertices (V,3), triangles (T,3)."""
+    nx, ny, nz = F.shape
+    c = np.stack([F[i:nx-1+i, j:ny-1+j, k:nz-1+k] for i, j, k in CORNERS], -1)  # cells x 8
+    valid = np.isfinite(c).all(-1)
+    neg = c < 0
+    cross = valid & neg.any(-1) & (~neg).any(-1)
+    idx = np.argwhere(cross)
+    cc = c[cross]
+    acc, cnt = np.zeros((len(idx), 3)), np.zeros(len(idx))
+    for a, b in EDGES:
+        fa, fb = cc[:, a], cc[:, b]
+        m = (fa < 0) != (fb < 0)
+        t = np.where(m, fa / np.where(m, fa - fb, 1), 0)
+        pa, pb = CORNERS[a], CORNERS[b]
+        acc += m[:, None] * (pa + t[:, None] * (pb - pa))
+        cnt += m
+    verts = lo + (idx + acc / cnt[:, None]) * h
+    vid = -np.ones(cross.shape, int)
+    vid[cross] = np.arange(len(idx))
+    tris = []
+    shape = np.array(vid.shape)
+    for ax in range(3):
+        sl0, sl1 = [slice(None)] * 3, [slice(None)] * 3
+        sl0[ax] = slice(0, -1); sl1[ax] = slice(1, None)
+        f0, f1 = F[tuple(sl0)], F[tuple(sl1)]
+        e = np.isfinite(f0) & np.isfinite(f1) & ((f0 < 0) != (f1 < 0))
+        p = np.argwhere(e)
+        if not len(p):
+            continue
+        u, v = [a for a in range(3) if a != ax]
+        q = []
+        for du, dv in ((0, 0), (-1, 0), (-1, -1), (0, -1)):
+            c = p.copy()
+            c[:, u] += du
+            c[:, v] += dv
+            ok = np.all((c >= 0) & (c < shape), 1)
+            ids = np.full(len(p), -1)
+            ids[ok] = vid[tuple(c[ok].T)]
+            q.append(ids)
+        q = np.stack(q, 1)
+        keep = (q >= 0).all(1)
+        q, p = q[keep], p[keep]
+        t = np.concatenate([q[:, [0, 1, 2]], q[:, [0, 2, 3]]])
+        # f < 0 inside (normals point out), so where the lower node is inside
+        # the outward direction is +ax: orient every face to agree
+        out = np.where(f0[tuple(p.T)] < 0, 1.0, -1.0)
+        out = np.concatenate([out, out])
+        fn = np.cross(verts[t[:, 1]] - verts[t[:, 0]], verts[t[:, 2]] - verts[t[:, 0]])
+        flip = np.sign(fn[:, ax]) != out
+        t[flip] = t[flip][:, ::-1]
+        tris.append(t)
+    return verts, (np.concatenate(tris) if tris else np.zeros((0, 3), int))
+
+
+def mesh_surface(pts, nrm, h=0.6, sigma=1.0, reach=2.5, max_gap=2.0):
+    """Oriented points -> (vertices, triangles), trimmed to within max_gap A of
+    a sample so the mesh stops where the samples do. 2 A, not tighter: at ~1
+    point per A^2 the gaps between samples reach ~2 A, and a tighter cut
+    punches holes (checked on a sampled sphere in the self-test)."""
+    F, lo, h = implicit_grid(pts, nrm, h, sigma, reach)
+    V, T = surface_nets(F, lo, h)
+    if not len(T):
+        return V, T
+    keep = _min_dist(V, pts) <= max_gap
+    return _subset(V, T, keep)
+
+
+def _min_dist(a, b, chunk=1024):
+    out = np.empty(len(a))
+    for s in range(0, len(a), chunk):
+        out[s:s + chunk] = np.sqrt(((a[s:s + chunk, None] - b[None]) ** 2).sum(-1).min(1))
+    return out
+
+
+def _subset(V, T, keep):
+    """Keep the vertices in `keep` and the triangles made only of them."""
+    T = T[keep[T].all(1)]
+    new = -np.ones(len(V), int)
+    new[keep] = np.arange(int(keep.sum()))
+    return V[keep], new[T]
+
+
+def smooth_onto(V, pts, vals, s=1.2, chunk=1024):
+    """Gaussian-weighted average of point values at each vertex: (V, C)."""
+    out = np.zeros((len(V), vals.shape[1]))
+    for a in range(0, len(V), chunk):
+        d2 = ((V[a:a + chunk, None] - pts[None]) ** 2).sum(-1)
+        w = np.exp(-d2 / (2 * s * s)) * (d2 <= (3 * s) ** 2)
+        out[a:a + chunk] = (w @ vals) / np.maximum(w.sum(1, keepdims=True), 1e-12)
+    return out
+
+
+def html_viewer(meta, x, path, crop=18.0, mesh=True, smooth=1.2, grid=0.6):
+    """One protein -> a self-contained plotly page with a channel dropdown.
+
+    mesh: a triangulated surface (mesh_surface) with every channel smoothed onto
+    its vertices (Gaussian, `smooth` A); otherwise the raw sampled points.
+    Falls back to points when the mesh comes out empty."""
     p, subj, ref, lab = x
-    d = np.sqrt(((p["xyz"][:, None] - p["lig_xyz"][None]) ** 2).sum(-1)).min(1)
-    keep = d <= crop if crop else np.ones(len(d), bool)
+    d = _min_dist(p["xyz"], p["lig_xyz"])
+    # mesh a margin beyond the crop so the cut edge is clean, then trim
+    keep = d <= (crop + 3.0 if mesh else crop) if crop else np.ones(len(d), bool)
     chans = {}
     for group, src in (("learned", subj), ("reference", ref)):
         for n, v in src.items():
@@ -510,9 +648,25 @@ def html_viewer(meta, x, path, crop=18.0):
     if lab is not None:
         for c, n in enumerate(PLIP_CLASSES):
             chans[f"plip_{n}"] = ("labels", lab[keep, c].astype(np.float32))
+    pts = p["xyz"][keep].astype(np.float64)
+    V = T = None
+    if mesh and "normals" in p and len(pts) >= 50:
+        V, T = mesh_surface(pts, p["normals"][keep].astype(np.float64), h=grid)
+        if crop and len(T):
+            V, T = _subset(V, T, _min_dist(V, p["lig_xyz"]) <= crop)
+        if not len(T):
+            V = T = None
+    names = list(chans)
+    M = np.nan_to_num(np.stack([chans[n][1] for n in names], 1).astype(np.float64))
+    if V is not None:
+        M = smooth_onto(V, pts, M, s=smooth)
+        geom = V
+    else:
+        sel = (d[keep] <= crop) if crop else np.ones(len(pts), bool)
+        M, geom = M[sel], pts[sel]
     data = {}
-    for n, (g, v) in chans.items():
-        v = np.nan_to_num(v.astype(np.float64))
+    for k, n in enumerate(names):
+        g, v = chans[n][0], M[:, k]
         if g == "labels":
             lo, hi, scale = 0.0, 1.0, "binary"
         elif n.startswith("curv_"):
@@ -522,11 +676,14 @@ def html_viewer(meta, x, path, crop=18.0):
             lo, hi = (float(q) for q in np.percentile(v, [2, 98]))
             hi, scale = (hi if hi > lo else lo + 1.0), "seq"
         data[n] = {"g": g, "v": np.round(v, 4).tolist(), "lo": lo, "hi": hi, "s": scale}
-    xyz = np.round(p["xyz"][keep], 2)
+    xyz = np.round(geom, 2)
+    tri = (T if V is not None else np.zeros((0, 3), int)).tolist()
     bx, by, bz = _bonds(p["lig_xyz"])
     first = "type_0" if "type_0" in data else next(iter(data))
+    what = (f"surface mesh, {len(xyz)} vertices, features smoothed over {smooth:g} A"
+            if V is not None else f"{len(xyz)} sampled points")
     title = (f"{meta['tag']} - {p['system_id']} ({p['group']}, {p['split']}); "
-             f"{int(keep.sum())} points within {crop:g} A of the ligand")
+             f"{what}, " + (f"within {crop:g} A of the ligand" if crop else "whole surface"))
     opts = "".join(f'<option value="{html.escape(n)}"{" selected" if n == first else ""}>'
                    f"{html.escape(c['g'])}: {html.escape(n)}</option>" for n, c in data.items())
     page = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -542,13 +699,21 @@ def html_viewer(meta, x, path, crop=18.0):
 const D = {json.dumps(data)};
 const X = {json.dumps(xyz[:, 0].tolist())}, Y = {json.dumps(xyz[:, 1].tolist())},
       Z = {json.dumps(xyz[:, 2].tolist())};
+const TRI = {json.dumps(tri)};
 const L = {json.dumps(np.round(p['lig_xyz'], 2).tolist())};
 const SC = {{signed: 'RdBu', seq: 'Viridis', binary: [[0, '#d9d9d9'], [1, '#d62728']]}};
 function trace(n) {{
   const c = D[n];
+  const bar = {{title: n, thickness: 14}};
+  if (TRI.length) return {{type: 'mesh3d', x: X, y: Y, z: Z, name: n,
+    i: TRI.map(t => t[0]), j: TRI.map(t => t[1]), k: TRI.map(t => t[2]),
+    intensity: c.v, intensitymode: 'vertex', colorscale: SC[c.s], cmin: c.lo,
+    cmax: c.hi, reversescale: c.s === 'signed', colorbar: bar, flatshading: false,
+    lighting: {{ambient: 0.55, diffuse: 0.7, specular: 0.05, roughness: 0.9}},
+    hovertemplate: n + ': %{{intensity:.3f}}<extra></extra>'}};
   return {{type: 'scatter3d', mode: 'markers', x: X, y: Y, z: Z, name: n,
     marker: {{size: 3, color: c.v, colorscale: SC[c.s], cmin: c.lo, cmax: c.hi,
-      reversescale: c.s === 'signed', colorbar: {{title: n, thickness: 14}}}},
+      reversescale: c.s === 'signed', colorbar: bar}},
     hovertemplate: n + ': %{{marker.color:.3f}}<extra></extra>'}};
 }}
 const lig = {{type: 'scatter3d', mode: 'markers', name: 'ligand',
@@ -557,15 +722,12 @@ const lig = {{type: 'scatter3d', mode: 'markers', name: 'ligand',
 const bonds = {{type: 'scatter3d', mode: 'lines', name: 'bonds', x: {json.dumps(bx)},
   y: {json.dumps(by)}, z: {json.dumps(bz)}, line: {{color: '#111', width: 5}},
   hoverinfo: 'skip'}};
-const layout = {{margin: {{l: 0, r: 0, t: 0, b: 0}}, showlegend: false,
+const layout = {{margin: {{l: 0, r: 0, t: 0, b: 0}}, showlegend: false, uirevision: 'keep',
   scene: {{aspectmode: 'data', xaxis: {{visible: false}}, yaxis: {{visible: false}},
            zaxis: {{visible: false}}}}}};
 Plotly.newPlot('plot', [trace('{first}'), lig, bonds], layout);
-document.getElementById('ch').onchange = e => {{
-  const t = trace(e.target.value);
-  Plotly.restyle('plot', {{marker: [t.marker], name: [t.name],
-    hovertemplate: [t.hovertemplate]}}, [0]);
-}};
+document.getElementById('ch').onchange = e =>
+  Plotly.react('plot', [trace(e.target.value), lig, bonds], layout);
 </script></body></html>"""
     Path(path).write_text(page)
 
@@ -625,7 +787,8 @@ def report(a):
         hdir = out / f"{tag}_html"
         hdir.mkdir(exist_ok=True)
         for x in res["per"][:a.n_html]:
-            html_viewer(meta, x, hdir / f"{x[0]['system_id']}.html", crop=a.crop)
+            html_viewer(meta, x, hdir / f"{x[0]['system_id']}.html", crop=a.crop,
+                        mesh=a.viewer == "mesh", smooth=a.smooth, grid=a.grid)
             pymol_files(meta, x, out / f"{tag}_pymol" / x[0]["system_id"],
                         a.pymol_channels.split(","), crop=a.crop)
         print(f"  {min(a.n_html, len(res['per']))} viewers in {hdir}/, PyMOL in "
@@ -726,6 +889,7 @@ def selftest():
         class A:
             dumps, plip, out, n_html, crop = [td / "d.npz"], td / "plip", td / "rep", 2, 18.0
             plip_lig_radius, pymol_channels = None, "type_2,salience,atomnet_0,plip_donor"
+            viewer, smooth, grid = "points", 1.2, 0.6
         report(A)
         pages = sorted((td / "rep" / "planted_html").glob("*.html"))
         page = pages[0].read_text() if pages else ""
@@ -742,6 +906,45 @@ def selftest():
               len(line) >= 66 and float(line[30:38]) == round(float(line[30:38]), 3),
               repr(line[:66]))
         check("report.txt written", (td / "rep" / "report.txt").exists())
+
+        # mesh: a sampled sphere has a known surface, orientation and channel
+        R = 8.0
+        u = rng.normal(size=(int(4 * np.pi * R * R), 3))
+        u /= np.linalg.norm(u, axis=1, keepdims=True)
+        V, Tm = mesh_surface(u * R, u)
+        E = {tuple(sorted(e)) for a_, b_, c_ in Tm for e in ((a_, b_), (b_, c_), (c_, a_))}
+        fn = np.cross(V[Tm[:, 1]] - V[Tm[:, 0]], V[Tm[:, 2]] - V[Tm[:, 0]])
+        r = np.linalg.norm(V, axis=1)
+        check("mesh: closed sphere (Euler 2), on the samples, faces outward",
+              len(V) - len(E) + len(Tm) == 2 and abs(r.mean() - R) < 0.2 and r.std() < 0.1
+              and ((fn * V[Tm].mean(1)).sum(1) > 0).mean() > 0.99,
+              f"{len(V)} vertices, radius {r.mean():.2f} +- {r.std():.2f}")
+        step = (u[:, 2:3] > 0).astype(np.float64)       # 1 on the upper half
+        sm = smooth_onto(V, u * R, step, s=1.2)[:, 0]
+        far = np.abs(V[:, 2]) > 3.0
+        check("smooth_onto: a step channel is exact away from the step, graded across it",
+              (np.abs(sm[far] - (V[far, 2] > 0)) < 0.01).all()
+              and 0.2 < sm[np.abs(V[:, 2]) < 0.3].mean() < 0.8,
+              f"max err away {np.abs(sm[far] - (V[far, 2] > 0)).max():.3f}")
+        half = u[u[:, 2] > 0.2]
+        Vh, Th = mesh_surface(half * R, half)
+        rh = np.linalg.norm(Vh, axis=1)
+        check("open patch: the mesh stops within 2 A of the last sample and puts no "
+              "cap across the opening",
+              len(Th) and Vh[:, 2].min() > 0.2 * R - 2.0 and np.abs(rh - R).max() < 0.5,
+              f"apron {0.2 * R - Vh[:, 2].min():.2f} A, max |r - R| {np.abs(rh - R).max():.2f}")
+        sph = dict(prots[0], xyz=u * R, normals=u,
+                   lig_xyz=np.zeros((3, 3)) + [[0, 0, 5], [0, 1, 5], [1, 0, 5]])
+        n = len(u)
+        for k in ("feats", "pre_atomnet", "chemo_ref", "point_emb", "types"):
+            sph[k] = rng.normal(size=(n, prots[0][k].shape[1]))
+        sph.update(pocket_logit=np.zeros(n), sal=np.full(n, 0.5),
+                   pocket_label=np.zeros(n, bool), site=np.zeros(n, bool))
+        subj, ref, _ = channels(m2, sph)
+        html_viewer(m2, (sph, subj, ref, None), td / "mesh.html", crop=0)
+        page = (td / "mesh.html").read_text()
+        check("mesh viewer: a mesh3d trace with triangles and per-vertex intensity",
+              "mesh3d" in page and "surface mesh" in page and "const TRI = [[" in page)
 
     print("\nPASS" if not fails else f"\nFAIL: {fails}")
     raise SystemExit(1 if fails else 0)
@@ -776,6 +979,11 @@ def main():
                    help="only label surface on the side facing the ligand partner")
     p.add_argument("--out", default="out/viz/report")
     p.add_argument("--n_html", type=int, default=12, help="proteins with a viewer")
+    p.add_argument("--viewer", choices=("mesh", "points"), default="mesh",
+                   help="mesh: triangulated surface, features smoothed onto it")
+    p.add_argument("--smooth", type=float, default=1.2,
+                   help="mesh viewer: Gaussian smoothing of features onto vertices (A)")
+    p.add_argument("--grid", type=float, default=0.6, help="mesh viewer: grid spacing (A)")
     p.add_argument("--crop", type=float, default=18.0,
                    help="viewer / PyMOL: points within this many A of the ligand (0 = all)")
     p.add_argument("--pymol_channels",

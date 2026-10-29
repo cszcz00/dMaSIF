@@ -211,7 +211,13 @@ each with the PUBLISHED AtomNet channels on the same points and chemotype's
 - `out/viz/report/<run>_html/*.html` (plotly viewer, every channel in a
   dropdown, ligand drawn, points within 18 A) and `<run>_pymol/<system>/`
   (`pymol load.pml`, B-factor = channel)
-`TARGETS=P56817,P0DTD1 sbatch ...` adds named targets. The dump stage is
+`TARGETS=P56817,P0DTD1 sbatch ...` adds named targets. Viewers are a SURFACE MESH by default
+(2026-10-29): the zero set of an oriented-point signed distance through the
+sampled points, triangulated by surface nets (numpy), every channel smoothed
+onto the vertices (Gaussian 1.2 A); `--viewer points` for the raw samples.
+`sbatch src/slurm/viz_report.sbatch` redoes report + viewers on existing
+dumps, CPU only. Checked: a sampled sphere meshes closed (Euler 2), on the
+samples, faces outward; a rendered page draws in headless Chromium. The dump stage is
 untested (no torch here); it reuses train.py's load_model_from_ckpt /
 build_batch / anchor_block exactly as retrieval_report.py does, and every
 attribute anchor_block reads is supplied by the parser. The report, viewer
