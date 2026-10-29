@@ -1045,3 +1045,22 @@ LCP lipids; not cholesterol). `dataset_v2.yaml` now mirrors LADDER_SCAN
 exactly (checked row for row on a planted manifest), including the cap.
 Also fixed: `build_dataset.select` would have crashed logging a cap with no
 `where`.
+
+## Funnel, fourth run (2026-10-29: all-ligand cap 50, detergents excluded) - FINAL for dataset_v2
+
+- Detergents: `not_detergent` removes 1,066 manifest rows; 23 of them were in
+  dataset_v1 (baseline 21,186 vs v1 21,209, hence "v1 subset: False"), and 2
+  train groups were detergent-only.
+- **The ladder that dataset_v2.yaml mirrors ends at 7,897 train groups**
+  (per-entry baseline 2,377; v1 rules 2,603): 34,316 train rows, visits per
+  group 67 -> 20.3, PLINDER val / test 356 / 735 (from 73 / 305), +23,023
+  receptor inputs (~7.1 GB of surfaces + pockets).
+- **What the cap costs.** Uncapped, the cofactor step alone adds +3,813 groups
+  (HEM 2,896 rows, GDP 1,009, ADP 976, FAD 959, NAD 731, GTP 632) for 11,062
+  in all; capping every ligand at 50 train rows brings that to 7,897. Applied
+  to the baseline alone the cap costs 45 groups (cap 25: 97, cap 100: 8):
+  dataset_v1 already had hub ligands. After the cap no ligand exceeds 50
+  rows, and most capped ligands keep ~50 distinct targets (GDP 50 / 50,
+  ADP 50 / 50, NAG-NAG 50 / 49); THP keeps 50 rows on 4 targets.
+- Largest groups: Mpro P0DTD1 880, carbonic anhydrase II P00918 591, BACE1
+  332, thrombin 316, CDK2 311 - balanced sampling handles these.

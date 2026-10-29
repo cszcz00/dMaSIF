@@ -226,7 +226,7 @@ build_batch / anchor_block exactly as retrieval_report.py does, and every
 attribute anchor_block reads is supplied by the parser. The report, viewer
 and PyMOL output are checked on a planted dump (11 checks).
 
-## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, `dataset_v2.yaml`) - third funnel run DONE, fourth (all-ligand cap + detergents) PENDING
+## Dataset expansion (`src/dataset_funnel.py`, `src/structure_scan.py`, `dataset_v2.yaml`) - FUNNEL DONE: dataset_v2 = 7,897 train groups (3.3x), ready to build
 
 Third run (RESULTS): 8,398 train groups (from 2,379; visits 67 -> 19) with
 the scan gates, but nucleotide analogues (ANP, GNP, ACP), NAG, maltose and
