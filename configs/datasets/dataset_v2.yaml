@@ -1,6 +1,6 @@
-# DRAFT - do not build until `src/dataset_funnel.py report` has been run and
-# its numbers recorded in docs/RESULTS.md. The relaxations below are its
-# default --ladder; change both together.
+# DRAFT - do not build yet. The relaxations below were the FIRST funnel
+# ladder, which the first run (RESULTS, 2026-10-29) showed picks the weak
+# levers (+832 groups); rewrite this from the second run's ladder.
 #
 # dataset_v1 + more distinct targets, the lever the v3c+ memorisation ceiling
 # points at (~69 visits per target group). Relative to dataset_v1:
@@ -45,7 +45,9 @@ selection:
     != system_pocket_validation_num_unresolved_heavy_atoms)
   dedup:
     - [pli_unique_qcov__95__strong__component, ligand_ccd_code]
-    - [entry, ligand_ccd_code]
+    # UniProt in the key: the same ligand on two different proteins of one
+    # complex is two examples, not a symmetry copy
+    - [entry, ligand_ccd_code, system_pocket_UniProt]
   dedup_sort: ["-strict_rep", entry_resolution, system_id]
 
 receptor_input:

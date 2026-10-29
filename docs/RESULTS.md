@@ -841,3 +841,58 @@ head regions); the blind eval is. Ablations in the sbatch header (pool
 mean / shells, no chemo, no bank, ball shape). v3 also switches on v2's bank
 and extra ligands and the cosine schedule; if v2 has still not run on a GPU,
 those are untested there too, and `BANK= EXTRA_LIG=` removes them.
+
+## Dataset funnel, first run (2026-10-29, `dataset_funnel.py report --per_entry`)
+
+**The manifest holds 24,327 train target groups; dataset_v1 uses 2,605 (11%).**
+The baseline reproduces dataset_v1 exactly (21,209 rows, v1 a subset).
+
+Strict attrition, in filter order (rows left): not_cofactor 262,365 ->
+not_oligo 191,599 -> not_covalent 142,108 -> mw 107,544 -> positions 103,326
+-> interactions 88,678 -> single_ligand 71,318 -> pocket_size 71,084 ->
+crystal_contacts 67,811 -> no_missing_pocket 65,606 -> **resolution 39,268**
+-> pocket_resolved 36,717 -> no_altlocs 29,933 -> **ligand_chains 22,443** ->
+dedup 21,209.
+
+NEW train target groups per single relaxation (each alone, against v1):
+
+| variant | +groups | rows in new groups | +inputs |
+|---|---|---|---|
+| not_cofactor=drop | **1,888** | 3,051 | 4,118 |
+| resolution=drop | 1,372 | 3,054 | 6,147 |
+| mw=drop | 1,246 | 2,027 | 3,518 |
+| not_oligo=drop | 760 | 1,209 | 2,088 |
+| resolution<=3.5 | 743 | 1,145 | 3,708 |
+| ligand_chains=drop | 715 | 1,321 | 3,471 |
+| mw150-900 | 646 | 957 | 1,880 |
+| resolution<=3.0 | 556 | 734 | 2,929 |
+| not_covalent=drop | 435 | 700 | 1,456 |
+| no_altlocs=drop | 209 | 270 | 2,386 |
+| crystal_contacts=drop | 155 | 194 | 913 |
+| pocket_resolved=drop | 78 | 89 | 734 |
+| everything else | <= 67 | | |
+
+Read:
+1. **The draft ladder chose the weak levers.** altlocs (+209) and
+   pocket_resolved<=5 (+48) are near the bottom; the big ones are LIGAND
+   CLASS (cofactor, MW, oligo, covalent) and resolution. Draft ladder total:
+   +832 groups, visits 61 -> 50.
+2. **New groups are thin: ~1.5-2 rows each.** They cut visits per group, which
+   is the memorisation axis, but each new target is seen from one or two
+   ligands.
+3. **Two tool bugs this run exposed, both fixed after it.** (a) Under
+   `--per_entry` the variants were per-entry deduplicated and the baseline
+   was not, so the `rows` column (11-17k against 20,810) compared unlike
+   things; `+groups` is unaffected. (b) The per-entry key (entry, ligand) cost
+   236 train groups (2,605 -> 2,369 in single_ligand=drop, which changes
+   nothing else): the same ligand on two DIFFERENT proteins of one complex
+   was folded as if a symmetry copy. The key is now (entry, ligand, UniProt).
+   Per-entry dedup itself removes ~9,700 of v1's 20,810 train rows: nearly
+   half of v1 is symmetry copies.
+4. Largest groups after the draft ladder (per-entry): Mpro P0DTD1 358, BACE1
+   P56817 313, CDK2 P24941 300, PDE10A Q9Y233 274 (747 before per-entry), ERa
+   P03372 248.
+
+Next: rerun with the fixed tool and the new default ladder (no_altlocs,
+resolution<=3.5, mw150-900, not_covalent, not_oligo, not_cofactor), which
+reports distinct ligands (`ligs`) too, since cofactors bring few chemotypes.

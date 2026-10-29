@@ -180,7 +180,14 @@ Then, in any order:
    them), but misleading to read. `train.py` and `probe_retrieval.py` both
    take the flags.
 
-## Dataset expansion (`src/dataset_funnel.py`, draft `dataset_v2.yaml`) - WRITTEN, selftest PASSES, never run on real data
+## Dataset expansion (`src/dataset_funnel.py`, draft `dataset_v2.yaml`) - FIRST RUN DONE (RESULTS 2026-10-29), rerun pending
+
+First run: 24,327 train groups in the manifest against v1's 2,605. Biggest
+levers are ligand class and resolution (not_cofactor +1,888 groups, mw
++1,246, resolution<=3.5 +743), not the quality filters the draft spec
+relaxed. Two funnel bugs fixed since (per-entry baseline, per-entry key now
+includes UniProt). Rerun with the new default ladder, then rewrite
+dataset_v2.yaml from it.
 
 Why: `v3c+` put the ceiling at memorisation (~69 visits per target group at
 5,000 x 32), so the lever is more distinct TARGET GROUPS (UniProt, the

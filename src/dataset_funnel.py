@@ -30,8 +30,11 @@ Dedup prefers baseline rows (`strict_rep` first, then resolution, then
 system_id), so every variant is a SUPERSET of the baseline: the existing
 surfaces, pocket files and PLIP labels stay valid, and a v2 run is directly
 comparable to every run so far. `--per_entry` adds a second dedup on (PDB
-entry, ligand), the fix for symmetry copies (TRP: 507 rows from 57 entries);
-that one removes rows, so it is reported against the plain baseline too.
+entry, ligand, UniProt), the fix for symmetry copies (TRP: 507 rows from 57
+entries). UniProt is in the key so the same ligand bound to two DIFFERENT
+proteins of one complex stays two examples; without it the first run lost
+236 train groups to this dedup. It removes rows, so under --per_entry the
+baseline itself is per-entry deduplicated and both baselines are printed.
 
 Modes:
     report    one line per single-criterion variant (leave-one-out and
@@ -80,6 +83,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 DEDUP_KEY = ["pli_unique_qcov__95__strong__component", "ligand_ccd_code"]
+ENTRY_KEY = ["entry", "ligand_ccd_code", "system_pocket_UniProt"]
 # Cost per new receptor, from inventory.py on dataset_v1 (2026-10-27):
 # 5.8 GB / 19,293 surfaces, 310 MB / 19,293 fpocket files.
 SURFACE_MB, POCKET_MB = 0.30, 0.016
@@ -110,7 +114,8 @@ def _col(d, c, fill):
 # (label, predicate) replacing the v1 predicate of that name.
 LOOSER = {
     "resolution": [("<=3.0", lambda d: d["entry_resolution"] <= 3.0),
-                   ("<=3.5", lambda d: d["entry_resolution"] <= 3.5)],
+                   ("<=3.5", lambda d: d["entry_resolution"] <= 3.5),
+                   ("<=4.0", lambda d: d["entry_resolution"] <= 4.0)],
     "no_altlocs": [("<=2", lambda d: _col(d, "system_pocket_validation_max_alt_count", 1) <= 2)],
     "pocket_resolved": [
         ("<=5", lambda d: _col(d, "system_pocket_validation_num_unresolved_heavy_atoms", 0) <= 5),
@@ -119,7 +124,8 @@ LOOSER = {
         ("<=1", lambda d: _col(d, "ligand_num_missing_pli_interface_residues", 0) <= 1)],
     "crystal_contacts": [
         ("<0.5", lambda d: _col(d, "ligand_fraction_atoms_with_crystal_contacts", 0) < 0.5)],
-    "mw": [("150-900", lambda d: d["ligand_molecular_weight"].between(150, 900))],
+    "mw": [("150-900", lambda d: d["ligand_molecular_weight"].between(150, 900)),
+           ("100-1000", lambda d: d["ligand_molecular_weight"].between(100, 1000))],
     "interactions": [("2-80", lambda d: d["ligand_num_interactions"].between(2, 80))],
     "pocket_size": [("5-150", lambda d: d["system_proper_num_pocket_residues"].between(5, 150))],
     "ligand_chains": [("<=2", lambda d: d["n_ligand_chains"] <= 2),
@@ -184,7 +190,7 @@ def dedup(d, key, per_entry=False):
     key = [k for k in key if k in d.columns]
     out = order.drop_duplicates(key, keep="first") if key else order
     if per_entry:
-        out = out.drop_duplicates(["entry", "ligand_ccd_code"], keep="first")
+        out = out.drop_duplicates([k for k in ENTRY_KEY if k in out.columns], keep="first")
     return out.drop(columns=["_rep", "_res"])
 
 
@@ -200,6 +206,7 @@ def stats(sel, base=None):
     tr = sel[sel["split"] == "train"]
     g = tr["group"].value_counts()
     s = {"rows": len(tr), "groups": len(g), "inputs": tr["input_id"].nunique(),
+         "ligs": tr["ligand_ccd_code"].nunique(),
          "val": int((sel["split"] == "val").sum()),
          "test": int((sel["split"] == "test").sum()),
          "visits": STEPS * BATCH / max(len(g), 1),
@@ -215,12 +222,13 @@ def stats(sel, base=None):
     return s
 
 
-HEAD = (f"{'variant':30s} {'rows':>8s} {'groups':>7s} {'+groups':>8s} "
+HEAD = (f"{'variant':30s} {'rows':>8s} {'groups':>7s} {'ligs':>7s} {'+groups':>8s} "
         f"{'+rows/new':>10s} {'+inputs':>8s} {'val':>6s} {'test':>6s} {'visits':>7s}")
 
 
 def line(name, s):
-    return (f"{name[:30]:30s} {s['rows']:>8,} {s['groups']:>7,} {s.get('+groups', 0):>8,} "
+    return (f"{name[:30]:30s} {s['rows']:>8,} {s['groups']:>7,} {s['ligs']:>7,} "
+            f"{s.get('+groups', 0):>8,} "
             f"{s.get('+rows/new', 0):>10,} {s.get('+inputs', 0):>8,} "
             f"{s['val']:>6,} {s['test']:>6,} {s['visits']:>7.1f}")
 
@@ -247,6 +255,14 @@ def report(a):
           f"{len(v1):,}. The difference is cluster keys whose strict_rep row had "
           "companions,\nwhere the baseline admits a sibling instead. v1 subset of "
           f"baseline: {bool(v1.index.isin(base.index).all())}\n")
+    v1_line = stats(base)
+    if a.per_entry:
+        base = select(df, crit, per_entry=True)
+        bs = stats(base)
+        print(f"per-entry dedup on {ENTRY_KEY}: train rows {v1_line['rows']:,} -> "
+              f"{bs['rows']:,}, train groups {v1_line['groups']:,} -> {bs['groups']:,}. "
+              "Every line below is per-entry deduplicated and counted against "
+              "this smaller baseline.\n")
 
     # Attrition, in build_manifest's order, so the biggest single losses are visible.
     print("strict attrition on the manifest's train/val/test rows:")
@@ -266,6 +282,8 @@ def report(a):
     rows.sort(key=lambda t: -t[1]["+groups"])
     print("single-criterion variants, sorted by NEW train target groups:")
     print(HEAD)
+    if a.per_entry:
+        print(line("dataset_v1 rules", v1_line))
     print(line("baseline", bs))
     for name, s in rows:
         print(line(name, s))
@@ -273,6 +291,8 @@ def report(a):
     if a.ladder:
         print(f"\ncumulative ladder{' (+ per-entry dedup)' if a.per_entry else ''}:")
         print(HEAD)
+        if a.per_entry:
+            print(line("dataset_v1 rules", v1_line))
         print(line("baseline", bs))
         cur = dict(crit)
         last = None
@@ -345,6 +365,8 @@ def selftest():
         row("5alt__1__1.A__1.B", "P1", "c5", "DDD", alts=3),
         # new target with a companion chain (two ligand chains in the system id)
         row("6cmp__1__1.A__1.B_1.C", None, "c6", "EEE"),
+        # same entry and ligand as 1abc but bound to a DIFFERENT protein
+        row("1abc__1__1.E__1.F", "P9", "c9", "LIG", rep=True),
     ]
     df = prepare_frame(pd.DataFrame(rows))
     check("vectorised groups == probe_retrieval.group_of",
@@ -353,27 +375,28 @@ def selftest():
     crit = v1_criteria()
     base = select(df, crit)
     check("baseline = the strict_rep, single-chain rows",
-          sorted(base["system_id"]) == sorted(r["system_id"] for r in rows[:3]))
+          sorted(base["system_id"]) == sorted(r["system_id"] for r in rows[:3] + rows[-1:]))
     bs = stats(base)
-    check("baseline counts train rows / groups only", (bs["rows"], bs["groups"], bs["val"]) == (2, 1, 1))
+    check("baseline counts train rows / groups only", (bs["rows"], bs["groups"], bs["val"]) == (3, 2, 1))
 
     s = stats(select(df, {**crit, "resolution": LOOSER["resolution"][0][1]}), base)
     check("resolution<=3.0 adds P3 as one new group, not the 2.4 A duplicate",
-          (s["+groups"], s["+rows/new"], s["rows"]) == (1, 1, 3) and s["superset"],
+          (s["+groups"], s["+rows/new"], s["rows"]) == (1, 1, 4) and s["superset"],
           f"{s['+groups']} / {s['+rows/new']} / {s['rows']}")
     s = stats(select(df, {**crit, "no_altlocs": LOOSER["no_altlocs"][0][1]}), base)
-    check("no_altlocs<=2 admits 2 alts but not 3", (s["+groups"], s["rows"]) == (1, 3))
+    check("no_altlocs<=2 admits 2 alts but not 3", (s["+groups"], s["rows"]) == (1, 4))
     drop = {**crit, "no_altlocs": lambda d: pd.Series(True, index=d.index)}
     s = stats(select(df, drop), base)
     check("no_altlocs=drop: +1 group, and the P1 row counts as rows but not groups",
-          (s["+groups"], s["+rows/new"], s["rows"]) == (1, 1, 4))
+          (s["+groups"], s["+rows/new"], s["rows"]) == (1, 1, 5))
     s = stats(select(df, {**crit, "ligand_chains": LOOSER["ligand_chains"][0][1]}), base)
     check("ligand_chains<=2 admits the companion system as a pli: group",
           s["+groups"] == 1 and "pli:c6" in set(select(df, {**crit, "ligand_chains":
                                                          LOOSER["ligand_chains"][0][1]})["group"]))
     pe = select(df, crit, per_entry=True)
-    check("per-entry dedup folds the symmetry copy, keeping a strict_rep row",
-          len(pe) == 2 and pe["strict_rep"].all())
+    check("per-entry dedup folds the symmetry copy, keeping a strict_rep row, "
+          "and keeps the same ligand on a different protein",
+          len(pe) == 3 and pe["strict_rep"].all() and set(pe["group"]) == {"up:P1", "up:P2", "up:P9"})
 
     name, lab, fn = parse_change("resolution<=3.0", crit)
     check("ladder tokens parse", (name, lab) == ("resolution", "<=3.0") and fn is not None
@@ -389,7 +412,11 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("report")
     p.add_argument("--manifest", default="data/meta/manifest.parquet")
-    p.add_argument("--ladder", default="no_altlocs=drop,resolution<=3.0,pocket_resolved<=5",
+    # Ordered from least to most change to what a training example IS: quality
+    # filters first, then ligand classes the first run showed to be the
+    # biggest sources of new targets (not_cofactor +1,888 groups, mw +1,246).
+    p.add_argument("--ladder", default="no_altlocs=drop,resolution<=3.5,mw150-900,"
+                   "not_covalent=drop,not_oligo=drop,not_cofactor=drop",
                    help="comma-separated cumulative changes, e.g. "
                         "'no_altlocs=drop,resolution<=3.0'; '' to skip")
     p.add_argument("--per_entry", action="store_true",
