@@ -629,12 +629,22 @@ def smooth_onto(V, pts, vals, s=1.2, chunk=1024):
     return out
 
 
-def html_viewer(meta, x, path, crop=18.0, mesh=True, smooth=1.2, grid=0.6):
+def _b64(a):
+    import base64
+    return base64.b64encode(np.ascontiguousarray(a).tobytes()).decode("ascii")
+
+
+def html_viewer(meta, x, path, crop=0.0, mesh=True, smooth=1.2, grid=0.7):
     """One protein -> a self-contained plotly page with a channel dropdown.
 
     mesh: a triangulated surface (mesh_surface) with every channel smoothed onto
     its vertices (Gaussian, `smooth` A); otherwise the raw sampled points.
-    Falls back to points when the mesh comes out empty."""
+    Falls back to points when the mesh comes out empty. crop 0 = the whole
+    protein; a crop sphere leaves ragged edges and see-through holes.
+
+    Size: geometry as float32 / int32 and every channel as 8-bit levels
+    between its colour limits, all base64. A whole-protein mesh is ~25k
+    vertices x ~60 channels, ~13 MB as JSON text and ~2-3 MB this way."""
     p, subj, ref, lab = x
     d = _min_dist(p["xyz"], p["lig_xyz"])
     # mesh a margin beyond the crop so the cut edge is clean, then trim
@@ -675,9 +685,10 @@ def html_viewer(meta, x, path, crop=18.0, mesh=True, smooth=1.2, grid=0.6):
         else:
             lo, hi = (float(q) for q in np.percentile(v, [2, 98]))
             hi, scale = (hi if hi > lo else lo + 1.0), "seq"
-        data[n] = {"g": g, "v": np.round(v, 4).tolist(), "lo": lo, "hi": hi, "s": scale}
-    xyz = np.round(geom, 2)
-    tri = (T if V is not None else np.zeros((0, 3), int)).tolist()
+        q = np.round(np.clip((v - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
+        data[n] = {"g": g, "q": _b64(q), "lo": lo, "hi": hi, "s": scale}
+    xyz = geom.astype(np.float32)
+    tri = (T if V is not None else np.zeros((0, 3), int)).astype(np.int32)
     bx, by, bz = _bonds(p["lig_xyz"])
     first = "type_0" if "type_0" in data else next(iter(data))
     what = (f"surface mesh, {len(xyz)} vertices, features smoothed over {smooth:g} A"
@@ -697,22 +708,29 @@ def html_viewer(meta, x, path, crop=18.0, mesh=True, smooth=1.2, grid=0.6):
 <div id="plot"></div>
 <script>
 const D = {json.dumps(data)};
-const X = {json.dumps(xyz[:, 0].tolist())}, Y = {json.dumps(xyz[:, 1].tolist())},
-      Z = {json.dumps(xyz[:, 2].tolist())};
-const TRI = {json.dumps(tri)};
+function bytes(s) {{ const b = atob(s), a = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; }}
+const XYZ = new Float32Array(bytes("{_b64(xyz)}").buffer);
+const X = [], Y = [], Z = [];
+for (let i = 0; i < XYZ.length; i += 3) {{ X.push(XYZ[i]); Y.push(XYZ[i + 1]); Z.push(XYZ[i + 2]); }}
+const TRI = new Int32Array(bytes("{_b64(tri)}").buffer);
+const I = [], J = [], K = [];
+for (let t = 0; t < TRI.length; t += 3) {{ I.push(TRI[t]); J.push(TRI[t + 1]); K.push(TRI[t + 2]); }}
+// 8-bit levels back to values between the channel's colour limits
+function values(c) {{ const q = bytes(c.q), v = new Array(q.length);
+  for (let i = 0; i < q.length; i++) v[i] = c.lo + q[i] / 255 * (c.hi - c.lo); return v; }}
 const L = {json.dumps(np.round(p['lig_xyz'], 2).tolist())};
 const SC = {{signed: 'RdBu', seq: 'Viridis', binary: [[0, '#d9d9d9'], [1, '#d62728']]}};
 function trace(n) {{
-  const c = D[n];
+  const c = D[n], v = values(c);
   const bar = {{title: n, thickness: 14}};
-  if (TRI.length) return {{type: 'mesh3d', x: X, y: Y, z: Z, name: n,
-    i: TRI.map(t => t[0]), j: TRI.map(t => t[1]), k: TRI.map(t => t[2]),
-    intensity: c.v, intensitymode: 'vertex', colorscale: SC[c.s], cmin: c.lo,
+  if (TRI.length) return {{type: 'mesh3d', x: X, y: Y, z: Z, name: n, i: I, j: J, k: K,
+    intensity: v, intensitymode: 'vertex', colorscale: SC[c.s], cmin: c.lo,
     cmax: c.hi, reversescale: c.s === 'signed', colorbar: bar, flatshading: false,
     lighting: {{ambient: 0.55, diffuse: 0.7, specular: 0.05, roughness: 0.9}},
     hovertemplate: n + ': %{{intensity:.3f}}<extra></extra>'}};
   return {{type: 'scatter3d', mode: 'markers', x: X, y: Y, z: Z, name: n,
-    marker: {{size: 3, color: c.v, colorscale: SC[c.s], cmin: c.lo, cmax: c.hi,
+    marker: {{size: 3, color: v, colorscale: SC[c.s], cmin: c.lo, cmax: c.hi,
       reversescale: c.s === 'signed', colorbar: bar}},
     hovertemplate: n + ': %{{marker.color:.3f}}<extra></extra>'}};
 }}
@@ -787,10 +805,13 @@ def report(a):
         hdir = out / f"{tag}_html"
         hdir.mkdir(exist_ok=True)
         for x in res["per"][:a.n_html]:
-            html_viewer(meta, x, hdir / f"{x[0]['system_id']}.html", crop=a.crop,
-                        mesh=a.viewer == "mesh", smooth=a.smooth, grid=a.grid)
+            mesh = a.viewer == "mesh"
+            crop = a.crop if a.crop is not None else (0.0 if mesh else 18.0)
+            html_viewer(meta, x, hdir / f"{x[0]['system_id']}.html", crop=crop,
+                        mesh=mesh, smooth=a.smooth, grid=a.grid)
             pymol_files(meta, x, out / f"{tag}_pymol" / x[0]["system_id"],
-                        a.pymol_channels.split(","), crop=a.crop)
+                        a.pymol_channels.split(","),
+                        crop=a.crop if a.crop is not None else 18.0)
         print(f"  {min(a.n_html, len(res['per']))} viewers in {hdir}/, PyMOL in "
               f"{out / (tag + '_pymol')}/\n")
     if len(sids) > 1 and any(s != sids[0] for s in sids[1:]):
@@ -887,7 +908,7 @@ def selftest():
               ("site types", "naming", "pocket:", "plip:")))
 
         class A:
-            dumps, plip, out, n_html, crop = [td / "d.npz"], td / "plip", td / "rep", 2, 18.0
+            dumps, plip, out, n_html, crop = [td / "d.npz"], td / "plip", td / "rep", 2, None
             plip_lig_radius, pymol_channels = None, "type_2,salience,atomnet_0,plip_donor"
             viewer, smooth, grid = "points", 1.2, 0.6
         report(A)
@@ -896,6 +917,23 @@ def selftest():
         check("two HTML viewers, each carrying plotly, the ligand and every channel",
               len(pages) == 2 and PLOTLY in page and '"type_2"' in page
               and '"plip_donor"' in page and '"curv_H1"' in page and "ligand" in page)
+        import base64
+        import re
+        D = json.loads(re.search(r"const D = (\{.*?\});\n", page).group(1))
+        xyz_b64 = re.search(r'new Float32Array\(bytes\("([^"]*)"\)', page).group(1)
+        n_geom = len(base64.b64decode(xyz_b64)) // 12
+        lv = np.frombuffer(base64.b64decode(D["atomnet_0"]["q"]), np.uint8)
+        # the page is the first protein's points within the default 18 A crop
+        p0 = back[0]
+        keep0 = _min_dist(p0["xyz"], p0["lig_xyz"]) <= 18.0
+        orig = p0["feats"][keep0, 10]
+        lo, hi = D["atomnet_0"]["lo"], D["atomnet_0"]["hi"]
+        dec = lo + lv / 255 * (hi - lo)
+        inside = (orig >= lo) & (orig <= hi)
+        check("channels: one 8-bit level per point, decoding to the value within a level",
+              len(lv) == n_geom == int(keep0.sum())
+              and np.abs(dec[inside] - orig[inside]).max() <= (hi - lo) / 255 + 1e-6,
+              f"{len(lv)} levels, {n_geom} points")
         pm = td / "rep" / "planted_pymol" / "sys0"
         check("PyMOL: one PDB per requested channel + ligand + load.pml",
               all((pm / f"points_{c}.pdb").exists() for c in
@@ -944,7 +982,8 @@ def selftest():
         html_viewer(m2, (sph, subj, ref, None), td / "mesh.html", crop=0)
         page = (td / "mesh.html").read_text()
         check("mesh viewer: a mesh3d trace with triangles and per-vertex intensity",
-              "mesh3d" in page and "surface mesh" in page and "const TRI = [[" in page)
+              "mesh3d" in page and "surface mesh" in page
+              and "new Int32Array" in page and "whole surface" in page)
 
     print("\nPASS" if not fails else f"\nFAIL: {fails}")
     raise SystemExit(1 if fails else 0)
@@ -983,9 +1022,11 @@ def main():
                    help="mesh: triangulated surface, features smoothed onto it")
     p.add_argument("--smooth", type=float, default=1.2,
                    help="mesh viewer: Gaussian smoothing of features onto vertices (A)")
-    p.add_argument("--grid", type=float, default=0.6, help="mesh viewer: grid spacing (A)")
-    p.add_argument("--crop", type=float, default=18.0,
-                   help="viewer / PyMOL: points within this many A of the ligand (0 = all)")
+    p.add_argument("--grid", type=float, default=0.7, help="mesh viewer: grid spacing (A)")
+    p.add_argument("--crop", type=float, default=None,
+                   help="viewer / PyMOL: only within this many A of the ligand (0 = "
+                        "all). Default: the whole protein for the mesh viewer, 18 A "
+                        "for the point viewer and PyMOL")
     p.add_argument("--pymol_channels",
                    default="salience,type_0,type_1,type_2,type_3,type_4,type_5,type_6,"
                            "type_7,atomnet_0,atomnet_1,atomnet_2,atomnet_3,atomnet_4,"

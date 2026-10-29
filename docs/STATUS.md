@@ -217,7 +217,10 @@ sampled points, triangulated by surface nets (numpy), every channel smoothed
 onto the vertices (Gaussian 1.2 A); `--viewer points` for the raw samples.
 `sbatch src/slurm/viz_report.sbatch` redoes report + viewers on existing
 dumps, CPU only. Checked: a sampled sphere meshes closed (Euler 2), on the
-samples, faces outward; a rendered page draws in headless Chromium. The dump stage is
+samples, faces outward; a rendered page draws in headless Chromium. Since
+2026-10-29 the mesh covers the WHOLE protein by default (an 18 A crop
+sphere left ragged edges and see-through holes), with geometry and 8-bit
+channel levels base64-encoded: ~3-4 MB and ~45 s per protein. The dump stage is
 untested (no torch here); it reuses train.py's load_model_from_ckpt /
 build_batch / anchor_block exactly as retrieval_report.py does, and every
 attribute anchor_block reads is supplied by the parser. The report, viewer
