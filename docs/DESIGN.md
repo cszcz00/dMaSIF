@@ -150,20 +150,35 @@ Two additions to the protein encoder, both off by default. Each module's
 docstring has the full definition; the decisions:
 
 - **Atom features, not atom names.** `atom_features.py` describes each heavy
-  atom by 16 chemistry values. The (residue, atom name) pair is only a key
+  atom by 13 chemistry values. The (residue, atom name) pair is only a key
   into its table: names alone are residue-relative (CG is aromatic in Phe,
   aliphatic in Leu, a carboxyl carbon in Asp), and residue + name is
-  residue identity. 175 entries collapse to 30 descriptors; the
-  single-residue ones are chemically unique groups and histidine, which has
-  its own flag rather than fractional tautomer / charge values. Partial
+  residue identity. 175 entries collapse to 23 descriptors; the 8
+  single-residue ones are chemically unique groups (histidine is known by
+  its aromatic donor + acceptor N, with no flag or fractional tautomer
+  values). Kept: what heavy-atom coordinates cannot show (charge, donor,
+  acceptor, aromaticity, density) and what is inferable only with
+  difficulty (sp2 / sp3, H count, backbone); dropped: what one message
+  round recovers (carbon bonded to N/O, a histidine flag, a second burial
+  radius). Partial
   charges are excluded on purpose: nearly unique per entry, so identity by
   another name. Sequence order never enters, and protein-level memorisation
   is controlled by the UniProt-disjoint split, not by input design.
 - **A second AtomNet, not a wider one.** Widening the pretrained AtomNet
-  would discard its weights; `chemnet` is dMaSIF's AtomNet architecture at
-  width 16 beside it, its outputs appended as input channels that the
-  inflation zero-pads. Burial is an atom feature because AtomNet sums over a
-  fixed 16 nearest atoms and cannot see density.
+  would discard its weights; `chemnet` (`dir_atomnet.DirAtomNet`) has
+  AtomNet's shape of computation at width 16 beside it, its outputs appended
+  as input channels that the inflation zero-pads. Its input Linear decouples
+  the 13 features from the 16 outputs. Burial is an atom feature because
+  AtomNet sums over a fixed 16 nearest atoms and cannot see density.
+- **Direction by dot products only.** Distances alone cannot say whether a
+  polar group faces the patch or the protein interior. Each polar atom gets
+  u = the normalised sum of unit vectors away from its bonded heavy
+  neighbours (the N-H / lone-pair bisector, the C->O axis), divided by
+  max(|sum|, 0.5) so that cancelling geometry fades to 0 instead of jumping;
+  each atom -> point message carries cos(u, point - atom), clamped divisor
+  0.5 A. Only dot products of vectors built from coordinate differences:
+  rotation / translation invariant, no frames or cross products to
+  degenerate or flip sign, every value bounded.
 - **Typed attention generalises pair pooling** (`pair_pool.TypedAttnPool`):
   PairPool is the case of one head per type pair, one-hot gates, one fixed
   bin and a constant value. Learned gates put capacity where retrieval wants

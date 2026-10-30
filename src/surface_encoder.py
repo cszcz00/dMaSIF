@@ -38,12 +38,15 @@ sys.path.insert(0, str(HERE))
 
 import atom_features  # noqa: E402
 import chemotype  # noqa: E402
+from dir_atomnet import DirAtomNet  # noqa: E402
 import dmasif_compat  # noqa: E402
 from anchors import pool_regions, pooled_width, select_regions  # noqa: E402
 from pair_pool import PairPool, TypedAttnPool  # noqa: E402
 
 # pool modes whose pooling is a learned module, held as SurfaceEncoder.pair_pool
 LEARNED_POOLS = ("pairs", "typed_attn")
+# input channels the learned-typing branch (cfg.atom_feats) adds
+CHEMNET_DIMS = 16
 
 DEFAULT_REPO = HERE.parent / "dMaSIF"
 
@@ -63,11 +66,12 @@ class EncoderConfig:
     # Pharmacophore channels (chemotype.py): composition, buriedness, proximity.
     # Off by default so every existing checkpoint and result is reproducible.
     chemo: bool = False
-    # Learned atom typing (atom_features.py): a second AtomNet-style branch
-    # over 16 per-atom chemistry values (element, hybridisation, H count,
-    # charge, donor / acceptor, polar carbon, backbone, histidine, burial),
-    # its 16 outputs appended as input channels after everything else. Needs
-    # P["atom_feats"] (SurfaceStore(atom_feats=True)). Off by default.
+    # Learned atom typing (atom_features.py, dir_atomnet.py): a second
+    # AtomNet-style branch over 13 per-atom chemistry values (element,
+    # hybridisation, H count, charge, donor / acceptor, backbone, burial) and
+    # each polar atom's direction, its 16 outputs appended as input channels
+    # after everything else. Needs P["atom_feats"] and P["atom_dir"]
+    # (SurfaceStore(atom_feats=True)). Off by default.
     atom_feats: bool = False
     chemo_sigmas: tuple = (3.0, 6.0, 9.0)
     dropout: float = 0.0
@@ -161,7 +165,7 @@ class EncoderConfig:
     @property
     def in_channels(self):
         return (2 * len(self.curvature_scales) + self.atom_dims + self.chemo_dims
-                + (atom_features.DIMS if self.atom_feats else 0))
+                + (CHEMNET_DIMS if self.atom_feats else 0))
 
     @property
     def pooled_dims(self):
@@ -187,11 +191,12 @@ class SurfaceEncoder(nn.Module):
         args = SimpleNamespace(atom_dims=cfg.atom_dims)
         # Same attribute names as dMaSIF's model, so its checkpoint keys load as-is.
         self.atomnet = AtomNet_MP(args)
-        # The learned-typing branch: dMaSIF's own AtomNet architecture at
-        # width atom_features.DIMS, fresh weights (its name is not in the
-        # checkpoint, so load_pretrained leaves it alone). Only built when
-        # asked for, so every other encoder keeps exactly its state dict.
-        self.chemnet = (AtomNet_MP(SimpleNamespace(atom_dims=atom_features.DIMS))
+        # The learned-typing branch: dir_atomnet.DirAtomNet, AtomNet's shape
+        # of computation over atom_features' chemistry plus polar direction,
+        # fresh weights (its name is not in the checkpoint, so load_pretrained
+        # leaves it alone). Only built when asked for, so every other encoder
+        # keeps exactly its state dict.
+        self.chemnet = (DirAtomNet(n_in=atom_features.DIMS, dim=CHEMNET_DIMS)
                         if cfg.atom_feats else None)
         self.orientation_scores = _mlp(I, cfg.orientation_units, 1)
         self.conv = dMaSIFConv_seg(args, in_channels=I, out_channels=E,
@@ -246,7 +251,7 @@ class SurfaceEncoder(nn.Module):
 
     # ------------------------------------------------------------------ (2)
     def input_features(self, xyz, normals, batch, atom_xyz, atomtypes, batch_atoms,
-                       atom_groups=None, chemo=None, atom_feats=None):
+                       atom_groups=None, chemo=None, atom_feats=None, atom_dir=None):
         """-> (N, in_channels): curvatures, AtomNet chemistry, chemo channels.
 
         `chemo` lets a caller pass precomputed pharmacophore channels, since
@@ -272,13 +277,13 @@ class SurfaceEncoder(nn.Module):
                     sigmas=tuple(self.cfg.chemo_sigmas))
             parts.append(chemo.to(curv.dtype))
         if self.chemnet is not None:
-            if atom_feats is None:
+            if atom_feats is None or atom_dir is None:
                 raise ValueError(
-                    "cfg.atom_feats is set but the batch carries no atom_feats; "
-                    "build the SurfaceStore with atom_feats=True (train.py "
-                    "--atom_feats) so the cache provides them")
+                    "cfg.atom_feats is set but the batch carries no atom_feats / "
+                    "atom_dir; build the SurfaceStore with atom_feats=True "
+                    "(train.py --atom_feats) so the cache provides them")
             parts.append(self.chemnet(xyz, atom_xyz, atom_feats.to(curv.dtype),
-                                      batch, batch_atoms))
+                                      batch, batch_atoms, atom_dir.to(curv.dtype)))
         return torch.cat(parts, dim=1).contiguous()
 
     # ------------------------------------------------------------------ (6)
@@ -364,7 +369,7 @@ class SurfaceEncoder(nn.Module):
         feats = self.dropout(self.input_features(
             xyz, normals, batch, P["atom_xyz"], P["atomtypes"], P["batch_atoms"],
             atom_groups=P.get("atom_groups"), chemo=P.get("chemo"),
-            atom_feats=P.get("atom_feats")))
+            atom_feats=P.get("atom_feats"), atom_dir=P.get("atom_dir")))
         weights = self.orientation_scores(feats)
         self.conv.load_mesh(xyz, normals=normals, weights=weights, batch=batch)
         emb = self.conv(feats)

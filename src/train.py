@@ -1589,8 +1589,9 @@ def add_model_args(p):
     p.add_argument("--attn_bins", type=int, default=12,
                    help="pool_mode typed_attn: Gaussians in each head's distance profile")
     p.add_argument("--atom_feats", action="store_true",
-                   help="learned atom typing: a second AtomNet over atom_features.py's "
-                        "16 per-atom chemistry values, 16 more input channels")
+                   help="learned atom typing: dir_atomnet.DirAtomNet over atom_features.py's "
+                        "13 per-atom chemistry values and polar directions, 16 more "
+                        "input channels")
     p.add_argument("--no_pair_feats", dest="pair_feats", action="store_false",
                    help="type head reads the conv embedding only, not also the "
                         "raw input channels")

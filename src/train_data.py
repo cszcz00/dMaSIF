@@ -188,10 +188,19 @@ class ItemTable:
 # ---------------------------------------------------------------------------
 SURFACE_KEYS = ("xyz", "normals", "atom_xyz", "atom_type", "atom_groups")
 # Written when present, required only by a store that asks for them. A cache
-# built before atom_features.py lacks atom_feats; SurfaceStore(atom_feats=True)
-# adds them in place (re-parsing the atoms only - the surface is kept), lazily
-# on first read or ahead of time through `train.py cache --atom_feats`.
-OPTIONAL_KEYS = ("atom_feats",)
+# built before atom_features.py lacks atom_feats / atom_dir (or holds an older
+# width of atom_feats); SurfaceStore(atom_feats=True) adds them in place
+# (re-parsing the atoms only - the surface is kept), lazily on first read or
+# ahead of time through `train.py cache --atom_feats`.
+OPTIONAL_KEYS = ("atom_feats", "atom_dir")
+
+
+def _needs_atom_feats(arrays):
+    """True when a cached entry lacks the CURRENT atom_features output."""
+    import atom_features
+    f = arrays.get("atom_feats")
+    return (f is None or "atom_dir" not in arrays
+            or f.ndim != 2 or f.shape[1] != atom_features.DIMS)
 
 
 class SurfaceStore:
@@ -259,7 +268,7 @@ class SurfaceStore:
                 "keep_hydrogens, or a changed structure file); delete the cached "
                 "surface to rebuild it")
         out = dict(arrays)
-        out["atom_feats"] = prot["atom_feats"]
+        out["atom_feats"], out["atom_dir"] = prot["atom_feats"], prot["atom_dir"]
         self.stats["upgraded"] += 1
         return out
 
@@ -298,8 +307,9 @@ class SurfaceStore:
                "normals": normals.cpu().numpy().astype(np.float32),
                "atom_xyz": prot["atom_xyz"], "atom_type": prot["atom_type"],
                "atom_groups": prot["atom_groups"]}
-        if "atom_feats" in prot:
-            out["atom_feats"] = prot["atom_feats"]
+        for k in OPTIONAL_KEYS:
+            if k in prot:
+                out[k] = prot[k]
         return out
 
     def write(self, row, arrays):
@@ -327,9 +337,10 @@ class SurfaceStore:
             if not self.atom_feats:
                 return False
             with np.load(path, allow_pickle=False) as d:
-                if "atom_feats" in d.files:
-                    return False
-                arrays = {k: d[k] for k in SURFACE_KEYS}
+                arrays = {k: d[k] for k in SURFACE_KEYS + OPTIONAL_KEYS
+                          if k in d.files}
+            if not _needs_atom_feats(arrays):
+                return False
             self.write(row, self._add_atom_feats(row, arrays))
             return True
         self.write(row, self._sample(enc, row))
@@ -361,7 +372,7 @@ class SurfaceStore:
             arrays = self._sample(enc, row)
             self.stats["sampled"] += 1
             self.write(row, arrays)
-        elif self.atom_feats and "atom_feats" not in arrays:
+        elif self.atom_feats and _needs_atom_feats(arrays):
             arrays = self._add_atom_feats(row, arrays)
             self.write(row, arrays)
 
@@ -375,6 +386,8 @@ class SurfaceStore:
         if self.atom_feats:
             entry["atom_feats"] = np.ascontiguousarray(arrays["atom_feats"],
                                                        dtype=np.float32)
+            entry["atom_dir"] = np.ascontiguousarray(arrays["atom_dir"],
+                                                     dtype=np.float32)
         if self.pockets is not None:
             # ext_regions / ext_map: the receptor's top pockets; ext_raw: the
             # spheres themselves, for the per-row `site` select

@@ -106,7 +106,8 @@ if [ -n "${LAM_PLIP:-}" ] && [ "$LAM_PLIP" != 0 ]; then
 ${PLIP_SOFT:+--plip_soft $PLIP_SOFT}"
 fi
 # Learned atom typing (atom_features.py; off unless ATOM_FEATS is set): a
-# second AtomNet over 16 per-atom chemistry values, 16 more input channels.
+# direction-aware AtomNet over 13 per-atom chemistry values and polar
+# directions (dir_atomnet.py), 16 more input channels.
 # The surface cache needs atom_feats first - ATOM_FEATS=1 sbatch
 # src/slurm/cache_surfaces.sbatch adds them in place - or the run adds them
 # lazily, re-parsing each receptor on its first read. Typed attention is

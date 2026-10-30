@@ -230,16 +230,23 @@ more so from richer chemistry? Same seed, data and batches for every run
 | learned atoms (32 ch) | `lad_p0_af`    | `lad_p2_af`   | `lad_p3_af`     |
 
 What is new (all off by default; v4-v7 and their resubmits are unchanged):
-- `src/atom_features.py`: 16 values per heavy atom - element, sp3 / sp2 /
-  aromatic, H count, delocalised formal charge, donor, acceptor, carbon
-  bonded to N/O, backbone, histidine, burial at 6 / 10 A. Residue and atom
-  names are only lookup keys: 175 (residue, atom) entries -> 30 descriptors
-  (self-test prints them). `--atom_feats` / `ATOM_FEATS=1`: a second
-  AtomNet (`SurfaceEncoder.chemnet`, dMaSIF's architecture at width 16,
-  fresh) over them, 16 more input channels after the pretrained ones, which
-  the inflation zero-pads, so step 0 is the pretrained function. Without
-  chemo: 10 curvature + 6 AtomNet + 16 = 32 channels.
-- Cache: `atom_feats` is an optional cached array. `ATOM_FEATS=1 sbatch
+- `src/atom_features.py`: 13 values per heavy atom - element, sp3 / sp2 /
+  aromatic, H count, delocalised formal charge, donor, acceptor, backbone,
+  burial at 10 A - plus each polar atom's direction (`atom_dir`, the N-H /
+  lone-pair bisector or C->O axis, a unit vector). Dropped as trivially
+  learned: carbon bonded to N/O, a histidine flag, burial at 6 A. Residue
+  and atom names are only lookup keys: 175 (residue, atom) entries -> 23
+  descriptors, 8 single-residue, all distinct chemical groups (self-test
+  prints them). `--atom_feats` / `ATOM_FEATS=1`: `dir_atomnet.DirAtomNet`
+  (`SurfaceEncoder.chemnet`, fresh) - AtomNet's 3 atom->atom and 3
+  atom->point rounds at width 16, input Linear(13 -> 16), distances as
+  d / 4 A, and every atom->point message carrying cos(polar direction,
+  atom -> point), which is rotation / translation invariant and bounded.
+  16 more input channels after the pretrained ones, which the inflation
+  zero-pads, so step 0 is the pretrained function. Without chemo: 10
+  curvature + 6 AtomNet + 16 = 32 channels.
+- Cache: `atom_feats` / `atom_dir` are optional cached arrays (an older
+  width is recomputed). `ATOM_FEATS=1 sbatch
   src/slurm/cache_surfaces.sbatch` adds it to existing surfaces in place
   (atoms re-parsed, surface kept, temp-file rename, so running jobs are
   unaffected); otherwise a run adds it lazily on first read.
@@ -258,7 +265,7 @@ Run order:
 ```
 # login node, container, CPU: the parts that need torch
 EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
-$EX src/atom_features.py && $EX src/pair_pool.py && $EX src/train.py selftest
+$EX src/atom_features.py && $EX src/dir_atomnet.py && $EX src/pair_pool.py && $EX src/train.py selftest
 # atom_feats into the shared cache (16 shards, ~1-2 s a receptor)
 ATOM_FEATS=1 RUN=$WORK/out/runs/dataset_v2 sbatch src/slurm/cache_surfaces.sbatch
 # the five runs

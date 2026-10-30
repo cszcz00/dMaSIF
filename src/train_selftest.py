@@ -199,7 +199,10 @@ def selftest(a):
         def _load_atoms(self, row):
             prot = super()._load_atoms(row)
             if self.atom_feats:
-                prot["atom_feats"] = np.full((len(prot["atom_xyz"]), 16), 0.5, np.float32)
+                import atom_features
+                n = len(prot["atom_xyz"])
+                prot["atom_feats"] = np.full((n, atom_features.DIMS), 0.5, np.float32)
+                prot["atom_dir"] = np.zeros((n, 3), np.float32)
             return prot
 
     shutil.copytree(tmp / "surfaces", tmp / "surfaces_f", dirs_exist_ok=True)
@@ -215,8 +218,9 @@ def selftest(a):
           "upgraded once, carried by to_batch",
           bool(torch.equal(ef["xyz"], e1["xyz"])) and has
           and storef.stats["upgraded"] == 1 and storef2.stats["upgraded"] == 0
-          and ef["atom_feats"].shape == (len(ef["atom_xyz"]), 16)
-          and tuple(Pf["atom_feats"].shape) == (2 * len(ef["atom_xyz"]), 16)
+          and ef["atom_feats"].shape[0] == ef["atom_dir"].shape[0] == len(ef["atom_xyz"])
+          and tuple(Pf["atom_dir"].shape) == (2 * len(ef["atom_xyz"]), 3)
+          and Pf["atom_feats"].shape[0] == 2 * len(ef["atom_xyz"])
           and "atom_feats" not in store2.get(sampler, rows[0]), storef.report())
 
     # Same receptor, a store that has never seen it, and a different amount of

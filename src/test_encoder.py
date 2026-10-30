@@ -124,10 +124,11 @@ def to_batch(items, device, with_surface=True):
     groups = all("atom_groups" in it for it in items)
     if groups:
         P["atom_groups"] = []
-    # atom_features.py's per-atom chemistry: likewise all or nothing
-    feats = bool(items) and all("atom_feats" in it for it in items)
+    # atom_features.py's per-atom chemistry and polar directions: likewise all
+    # or nothing
+    feats = bool(items) and all("atom_feats" in it and "atom_dir" in it for it in items)
     if feats:
-        P["atom_feats"] = []
+        P["atom_feats"], P["atom_dir"] = [], []
     for i, it in enumerate(items):
         P["atom_xyz"].append(torch.from_numpy(it["atom_xyz"]))
         P["atomtypes"].append(torch.nn.functional.one_hot(
@@ -147,6 +148,7 @@ def to_batch(items, device, with_surface=True):
                 raise ValueError(f"{it.get('id', '?')}: {len(f)} atom_feats rows for "
                                  f"{len(it['atom_type'])} atoms")
             P["atom_feats"].append(torch.from_numpy(np.asarray(f, np.float32)))
+            P["atom_dir"].append(torch.from_numpy(np.asarray(it["atom_dir"], np.float32)))
         if with_surface:
             P["xyz"].append(it["xyz"])
             P["normals"].append(it["normals"])
