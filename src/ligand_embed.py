@@ -125,6 +125,11 @@ def embed(a):
     c = enc.cfg
     print(f"{a.ckpt}: step {ckpt['step']}, ligand arm {c.arm} -> {c.out_dim} dims, "
           f"{enc.n_params():,} parameters")
+    saved = ckpt["args"]
+    # the run's own data, to check the pairing by eye: fp_row and train_rows
+    # only mean something against these two files
+    print(f"trained on --items {saved.get('items', '?')}, "
+          f"--lig_feats {saved.get('lig_feats', '?')}")
     ligands = LigandData(a.lig_feats)
     in_train = in_val = np.zeros(len(ligands), dtype=bool)
     if a.items:
