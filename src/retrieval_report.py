@@ -377,7 +377,7 @@ def report(a):
     from train_data import ItemTable, read_items
 
     dump_npz = {k: v for k, v in np.load(a.dump, allow_pickle=False).items()}
-    table = ItemTable(read_items(a.items, 0))
+    table = ItemTable(read_items(a.items))
     ligands = load_ligand_arrays(a.lig_feats)
     desc_names = ligands.desc_names
     bad = ligands.failed[table.fp_row]

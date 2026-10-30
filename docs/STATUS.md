@@ -218,6 +218,34 @@ channel_viz on both for the per-type PLIP AUROCs. The `plip` line should show
 type CE falling well below 2.197 and salience BCE falling; if MRR drops while
 they fall, the weight is too high (try 0.03).
 
+## Embedding clusters (`src/embed_clusters.py`) - WRITTEN; selftest PASSES and a planted end-to-end report recovers the planted structure; never run on real data
+
+What organises the retrieval space: do pocket vectors group by protein
+FAMILY (Pfam), by the CHEMOTYPE of what binds them, or by pocket SIZE? Three
+analyses, each with an SVG (t-SNE, numpy):
+- proteins: kNN label agreement against a permutation baseline (x chance,
+  z), k-means NMI, and each val pocket's nearest TRAIN pocket (val targets
+  are UniProt-disjoint, so this is how an unseen target is placed);
+- ligands: Spearman(cosine, Tanimoto), kNN agreement with chemotype class
+  and size, which descriptors the top PCs follow;
+- joint: modality gap, true-pair vs random cosine, class-level cross
+  retrieval; the figure centres each modality first.
+Ligand classes: Butina at ECFP4 Tanimoto >= 0.4 over every ligand.
+
+Also fixed: `read_items(path, 0)` returned NO rows (n=0 sliced an empty
+list); `retrieval_report.py report` called it that way, so its report stage
+would have run on an empty table. 0 now means all rows.
+
+C at its best (`v3c_site_pairs_bn/best.pt`, its own dataset_v1 val split):
+```
+SELECTS=site sbatch src/slurm/report.sbatch      # GPU -> out/reports/v3c_site_pairs_bn_site.npz
+python src/embed_clusters.py report --dump out/reports/v3c_site_pairs_bn_site.npz \
+    --items out/runs/v1/items.tsv --lig_feats out/runs/v1/ligand_feats.npz \
+    --manifest data/meta/manifest.parquet --out out/clusters/v3c     # CPU venv, ~1-2 min
+```
+The same dump also feeds `retrieval_report.py report` (hubs, chemotype
+rank, size baseline).
+
 ## Ladder: pooling P0 / P2 / P3 x features chemo / learned atom typing - WRITTEN; numpy self-tests PASS (atom_features, paired_eval), torch parts untested
 
 The question: does pooling that is more chemistry-aware extract more, and

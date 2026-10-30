@@ -145,7 +145,8 @@ def read_items(path, n=None):
     if missing:
         raise SystemExit(f"{path}: missing columns {missing}; rebuild it with "
                          "`train.py prepare`")
-    body = lines[1:] if n is None else lines[1:1 + n]
+    # n None or 0: every row (retrieval_report passed 0 and got an empty table)
+    body = lines[1:] if not n else lines[1:1 + n]
     rows = []
     for ln in body:
         if not ln.strip():
