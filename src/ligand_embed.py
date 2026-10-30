@@ -11,7 +11,7 @@ Only the `ligand.*` tensors of the checkpoint are loaded; the surface encoder's
 weights are skipped, so its config and dependencies never come into it.
 
     embed     a checkpoint + the ligand_feats.npz it trained on -> one .npz:
-                  emb        (n, out_dim) float32, L2-normalised as in training
+                  lig_vec    (n, out_dim) float32, L2-normalised as in training
                   smiles     (n,)
                   failed     (n,) bool; failed rows are left at zero
                   in_train   (n,) bool; the ligand is in some training row
@@ -143,7 +143,7 @@ def embed(a):
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as fh:          # a file handle: savez would append .npz
-        np.savez_compressed(fh, emb=emb, smiles=ligands.smiles, failed=ligands.failed,
+        np.savez_compressed(fh, lig_vec=emb, smiles=ligands.smiles, failed=ligands.failed,
                             in_train=in_train, in_val=in_val, n_heavy=ligands.n_heavy)
     print(f"wrote {out}")
 
