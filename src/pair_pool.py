@@ -176,8 +176,9 @@ class TypedAttnPool(PairPool):
         o_h  = sum_ij W_ij v_j / (M_h + eps)    what the partners look like,
                                             v_j = Linear(z_j) of v_dims
 
-    out = [mean h, log1p(mass / mass_scale), per head log1p(M_h / count_scale)
-    and o_h]. PairPool is the special case of one head per type pair with
+    out = [mean h (E), log1p(mass / mass_scale) (T), log1p(M_h / count_scale)
+    for every head (H), then every head's o_h (H x v_dims)] - counts grouped
+    first, then the partner descriptions. PairPool is the special case of one head per type pair with
     one-hot gates, one fixed bin each and v = 1. Sums, not a softmax, so
     counts survive ("two donors" vs "five donors"); distances only, so it is
     rigid-motion invariant; heads read as (from types, to types, distance
@@ -300,7 +301,7 @@ def _selftest():
     k = E + p0.n_types
     check("same composition: identical mean and mass", torch.allclose(a_near[:k], a_far[:k]))
     check("different arrangement: different pairs",
-          float((a_near[k:] - a_far[k:]).abs().max()) > 1e-3)
+          float((a_near[k:] - a_far[k:]).detach().abs().max()) > 1e-3)
     nb = p0.n_bins
     Hn = a_near[k:].view(-1, nb).sum(0)
     Hf = a_far[k:].view(-1, nb).sum(0)
@@ -357,12 +358,13 @@ def _selftest():
     two = torch.cat([near, near + torch.tensor([0.0, 30.0, 0.0])])
     a_two = t0(torch.cat([e2, e2]), None, torch.ones(80), [torch.arange(80)], two)[0]
     H, V = t0.n_heads, t0.v_dims
-    blk1, blk2 = a_near[k:].view(H, 1 + V), a_two[k:].view(H, 1 + V)
-    cnt1 = torch.expm1(blk1[:, 0]) * t0.count_scale
-    cnt2 = torch.expm1(blk2[:, 0]) * t0.count_scale
+    # layout after mean and mass: all H log counts, then H x V partner means
+    cnt1 = torch.expm1(a_near[k:k + H]) * t0.count_scale
+    cnt2 = torch.expm1(a_two[k:k + H]) * t0.count_scale
+    part1, part2 = a_near[k + H:].view(H, V), a_two[k + H:].view(H, V)
     check("typed_attn: two copies of a site -> twice the count, same partners",
           torch.allclose(cnt2, 2 * cnt1, rtol=1e-3)
-          and torch.allclose(blk2[:, 1:], blk1[:, 1:], atol=1e-4))
+          and torch.allclose(part2, part1, atol=1e-4))
     ta.train()
     emb_g = emb.clone().requires_grad_(True)
     feats_g = feats.clone().requires_grad_(True)

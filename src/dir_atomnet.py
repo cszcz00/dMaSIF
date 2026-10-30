@@ -171,7 +171,7 @@ def _selftest():
     t = torch.tensor([5.0, -3.0, 9.0])
     out_r = net(xyz @ R.T + t, atom_xyz @ R.T + t, feats, batch, atom_batch, d @ R.T)
     check("rotation / translation invariant", torch.allclose(out, out_r, atol=1e-4),
-          f"max diff {float((out - out_r).abs().max()):.1e}")
+          f"max diff {float((out - out_r).detach().abs().max()):.1e}")
     perm = torch.randperm(M1 + M2)
     out_p = net(xyz, atom_xyz[perm], feats[perm], batch, atom_batch[perm], d[perm])
     check("atom order does not matter", torch.allclose(out, out_p, atol=1e-4))
