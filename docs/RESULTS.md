@@ -1121,3 +1121,35 @@ against 2.197 at chance - the types learn; salience BCE 0.948 against
 salience head has learned nothing yet.** That motivated v7 (soft labels,
 salience weight 0.5; STATUS). (3) Throughput: 65% of training surface reads
 from disk at SURFACE_RAM 4,000, ~0.8 s/step of load; defaults raised.
+
+## v4 / v5 / v6 window means to step 2,750 (2026-10-30, logs pasted)
+
+Fixed val set (400 rows, chance 0.0165). Means of the evaluations in each
+window (4 per window, every 125 steps; the last window has 2). Same seed and
+data, so all three draw the same batches; chemo's input weights start at
+zero, so v5 starts as exactly v4 (identical MRR at steps 125 and 250).
+
+| steps | v4 C | v5 C + chemo | v6 C + chemo + PLIP 0.1 |
+|---|---|---|---|
+| 125-500 | 0.039 | 0.038 | 0.041 |
+| 625-1000 | 0.048 | 0.049 | 0.055 |
+| 1125-1500 | 0.064 | 0.075 | 0.076 |
+| 1625-2000 | 0.073 | 0.092 | 0.081 |
+| 2125-2500 | 0.074 | 0.086 | 0.079 |
+| 2625-2750 | - | 0.101 | 0.095 |
+
+Read: (1) **Chemo helps at dataset_v2's scale**: v5 leads v4 by 0.012-0.019
+in every window from ~1,000 steps (when the zero-initialised chemo weights
+have grown), top10 agreeing; v4 flat 0.073 -> 0.074 over its last two
+windows while v5 still rises. ~1-1.7 SE per window, one seed each: a
+paired per-row test would settle it. Consistent with chemo neutral at
+dataset_v1's 2,315 groups (v3d) and memorising at 32 proteins. (2) **PLIP
+supervision does nothing measurable to retrieval yet**: v6 tracks v5
+within +-0.011, slightly ahead early, slightly behind from 1,625. (3) Its
+type CE keeps falling (1.94 at 125 -> 1.27 at 2,750; chance 2.197), but
+**salience BCE is flat at ~0.945 from step 375 on, above the 0.930
+constant-prediction value: the salience head never learned contact.** v7
+(soft labels, salience x 0.5) tests whether a working salience matters.
+(4) cosdiff does not track MRR: v5 0.875 vs v4 0.828 at 2,500 with v5
+retrieving better. (5) v6's load time is ~0.1-0.2 s/step above v5's: the
+PLIP labels of every sibling are loaded and mapped on each label-cache miss.
