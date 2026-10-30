@@ -1102,3 +1102,22 @@ fixed set is a different 400-row draw (240 of the 283 pool groups). 0.151
 is the number to beat, compared as a mean over several evaluations, not a
 peak. Also the first run of `train.py eval --val_set`: found all 400 rows,
 no overlap with C's training rows.
+
+## v4 / v6 in progress on dataset_v2 (2026-10-30, single evaluations)
+
+Fixed val set (400 rows, chance 0.0165). One line each, as pasted:
+
+| run | step | nce | mrr | top1 | top10 | AUROC / AP | cosdiff | tau |
+|---|---|---|---|---|---|---|---|---|
+| v4 = C, no chemo | 2,125 | 2.609 | 0.081 | 0.032 | 0.188 | 0.939 / 0.525 | 0.850 | 0.073 |
+| v6 = C + chemo + PLIP 0.1 | 1,750 | 2.619 | 0.090 | 0.032 | 0.177 | 0.939 / 0.519 | 0.889 | 0.073 |
+
+Read: (1) NOT yet evidence for chemo or PLIP: 0.009 MRR is inside one
+evaluation's +-0.015, top1 ties, top10 favours v4, the steps differ, and
+v6 changes two things (v5 vs v4 is the chemo test). Compare window means
+from history.json at matched steps. (2) v6's PLIP line: **type CE 1.316
+against 2.197 at chance - the types learn; salience BCE 0.948 against
+0.930 for the best constant prediction at the 0.329 contacted share - the
+salience head has learned nothing yet.** That motivated v7 (soft labels,
+salience weight 0.5; STATUS). (3) Throughput: 65% of training surface reads
+from disk at SURFACE_RAM 4,000, ~0.8 s/step of load; defaults raised.

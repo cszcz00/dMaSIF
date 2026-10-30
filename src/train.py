@@ -918,6 +918,18 @@ def freeze_encoder(model):
           f"pocket head); {live:,} still train (projection, ligand, temperature)")
 
 
+def plip_sal_floor(pi, max_pos_weight=20.0):
+    """The salience BCE of the best CONSTANT prediction when a share `pi` of
+    the site's label mass is contacted, under plip_losses' positive weight
+    (n - pos) / pos: the number the plip line's salience BCE has to get below
+    before the head has learned anything. ~0.93 at v6's share of 0.33."""
+    if not 0 < pi < 1:
+        return float("nan")
+    pw = min((1 - pi) / pi, max_pos_weight)
+    p = pw * pi / (pw * pi + 1 - pi)
+    return float(-(pw * pi * np.log(p) + (1 - pi) * np.log(1 - p)))
+
+
 # ---------------------------------------------------------------------------
 # train
 # ---------------------------------------------------------------------------
@@ -965,6 +977,11 @@ def train(a):
         if enc_cfg.pair_types < 6:
             raise SystemExit(f"--pair_types {enc_cfg.pair_types}: PLIP supervision ties "
                              "types 0-5 to its 6 classes, so it needs >= 6")
+        soft = getattr(a, "plip_soft", 0.0)
+        print(f"PLIP supervision: salience x {a.lam_plip_sal}, types x "
+              f"{a.lam_plip_type}, labels "
+              + (f"soft (ramp {soft} A across the 3 / 4 A radius)" if soft > 0
+                 else "hard (step at 3 / 4 A)"))
     if a.freeze_encoder:
         freeze_encoder(model)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
@@ -980,7 +997,8 @@ def train(a):
                              keep_hydrogens=a.keep_hydrogens,
                              pockets=pocket_source(a, enc_cfg))
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram,
-                        plip=a.plip if plip_on else None)
+                        plip=a.plip if plip_on else None,
+                        plip_soft=getattr(a, "plip_soft", 0.0))
 
     # split, sampler, state
     if getattr(a, "val_set", "") and a.val_split:
@@ -1149,10 +1167,11 @@ def train(a):
             if plip_on:
                 met.update(plip_sal=mean(plip_sals), plip_type=mean(plip_types),
                            plip_pos=mean(plip_pos))
-                print(f"         plip  salience BCE {met['plip_sal']:.3f}  type CE "
-                      f"{met['plip_type']:.3f}  (contacted share of site points "
-                      f"{met['plip_pos']:.3f}; type CE at chance = "
-                      f"{np.log(enc_cfg.pair_types + 1):.3f})", flush=True)
+                print(f"         plip  salience BCE {met['plip_sal']:.3f} (constant "
+                      f"prediction {plip_sal_floor(met['plip_pos']):.3f})  type CE "
+                      f"{met['plip_type']:.3f} (chance "
+                      f"{np.log(enc_cfg.pair_types + 1):.3f})  contacted share of "
+                      f"site points {met['plip_pos']:.3f}", flush=True)
             print(f"         train {store.report()}", flush=True)
             print(f"         val   {val_store.report()}", flush=True)
             if T["steps"]:
@@ -1636,6 +1655,10 @@ def main():
     p.add_argument("--lam_plip_type", type=float, default=0.0,
                    help="weight of the PLIP type CE: site types 0-5 tied to "
                         "donor/acceptor/cation/anion/aromatic/hydrophobic; 0 = off")
+    p.add_argument("--plip_soft", type=float, default=0.0,
+                   help="PLIP label ramp width in A (plip_loss.soft_site_labels): "
+                        "labels fall linearly from 1 to 0 across the 3 A / 4 A "
+                        "radius instead of stepping; 0 = hard labels (v6)")
     p.add_argument("--pos_weight", type=float, default=0.0,
                    help="pocket BCE positive weight; 0 = the running ratio")
     p.add_argument("--val_frac", type=float, default=0.1)

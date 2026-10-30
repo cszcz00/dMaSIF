@@ -218,6 +218,42 @@ channel_viz on both for the per-type PLIP AUROCs. The `plip` line should show
 type CE falling well below 2.197 and salience BCE falling; if MRR drops while
 they fall, the weight is too high (try 0.03).
 
+## v7: soft PLIP labels + a heavier salience weight - WRITTEN, numpy part of `plip_loss.py selftest` PASSES, torch part untested
+
+Why: v6's salience BCE sits at its constant-prediction value (0.948 against
+0.930 at a 0.33 contacted share, step 1,750; RESULTS) while its type CE
+learns (1.316 against 2.197). Salience is the one PLIP loss with negatives,
+so the hard 3 A step - between surface points ~1 A apart that the conv
+cannot tell apart - hits it hardest; and at 0.1 it is ~0.09 of a ~3.4 loss.
+- `--plip_soft S` (`PLIP_SOFT`): labels ramp linearly from 1 at r - S/2 to 0
+  at r + S/2 (r = 3 A atoms, 4 A ring / charge centres), max over a class's
+  interactions; same label mass as the step (selftest: 1.06x). Salience
+  target = the point's max class weight, type target = the class weights
+  normalised, each point's type CE weighted by its salience target. 0 = the
+  v6 losses exactly (selftest checks bool vs 0/1 float).
+- `LAM_PLIP_SAL` overrides `LAM_PLIP` for the salience weight alone.
+- The `plip` line now prints the salience BCE's constant-prediction value
+  next to it (`train.plip_sal_floor`): below it = salience is learning.
+- `train_v3.sbatch` RAM defaults raised (SURFACE_RAM 4,000 -> 32,000,
+  LABEL_RAM 20,000 -> 40,000): every dataset_v2 training receptor stays
+  resident after its first read. Speed only; resubmits of v4-v6 get it too.
+
+All new behaviour is off by default, so resubmitting v4 / v5 / v6 after a
+pull continues them unchanged. Run order (login node, container, CPU):
+```
+apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python src/plip_loss.py selftest
+# v7 = v6 + soft labels (1.5 A) + salience weight 0.5 (types stay at 0.1)
+LAM_PLIP=0.1 LAM_PLIP_SAL=0.5 PLIP_SOFT=1.5 SKIP_SMOKE=0 STEPS=10000 CHEMO=1 BANK= EXTRA_LIG= \
+LR_SCHEDULE=const WARMUP=0 POOL_MODE=pairs ANCHOR_NORM=batch \
+RUN=$WORK/out/runs/v7_C_chemo_plip_soft_dataset_v2 DATA=$WORK/out/runs/dataset_v2 \
+TRAIN_ARGS="--eval_every 125 --save_every 125 --val_set $WORK/out/valset_v1v2" \
+sbatch --job-name=v7_soft src/slurm/train_v3.sbatch
+```
+Read: salience BCE below its constant-prediction value (the v6 symptom
+gone); type CE as v6's or lower; val MRR window means against v6 and v5 at
+matched steps. v7 changes two things against v6; if it moves MRR, a
+`PLIP_SOFT=1.5` run with `LAM_PLIP_SAL` unset (0.1) separates them.
+
 ## Channel visualisation + PLIP diagnostic (`src/channel_viz.py`) - FIRST RUN DONE (RESULTS 2026-10-29)
 
 Result in one line: the site types did NOT collapse but encode a polar /

@@ -24,11 +24,26 @@ on the points of the row's SITE region (the pocket the ligand sits in):
                no type loss: PLIP labels are positive-unlabelled (a donor this
                ligand does not use is still a donor).
 
+Hard or soft labels (`soft`, train.py --plip_soft). Hard (0, v6): a point is
+class c when it lies within 3 A of a class-c protein atom (4 A of a ring /
+charge centre), a step from 1 to 0. That step lands between surface points
+~1 A apart whose embeddings are nearly identical (the conv sees ~12 A), so
+salience is asked to separate the inseparable, and v6's salience BCE sat at
+its constant-prediction value (~0.93, RESULTS). Soft (width s A): a linear
+ramp from 1 at r - s/2 to 0 at r + s/2, max over the class's interactions -
+the same total label mass as the step, spread over the ~1 A uncertainty of
+where the surface sits over an atom. The salience target is then the
+point's max class weight (a soft BCE target), the type target q is the class
+weights normalised (the nearer interaction dominates a two-class point), and
+each point's type CE is weighted by its salience target. With hard labels
+every one of these reduces exactly to the v6 losses.
+
 Inference needs none of this: the labels are a training signal only.
 
 Split so the label side runs without torch:
     point_labels(xyz, recs)   numpy: per-point (N, 6) class labels, union over
-                              PLIP records (plip_labels.site_labels each)
+                              PLIP records (plip_labels.site_labels each, or
+                              soft_site_labels with soft > 0)
     receptor_labels(...)      numpy: this row's labels + the receptor union,
                               loaded from data/plip/<system_id>.npz
     plip_losses(...)          torch: the two losses for a batch
@@ -54,10 +69,42 @@ N_CLASSES = 6          # plip_labels.CLASSES: donor acceptor cation anion aromat
 # ---------------------------------------------------------------------------
 # labels (numpy)
 # ---------------------------------------------------------------------------
-def point_labels(xyz, recs, **kw):
-    """(N, 3) surface points + PLIP records -> (N, 6) bool, OR over records."""
+def soft_site_labels(xyz, rec, soft, atom_radius=3.0, centre_radius=4.0,
+                     chunk=8192):
+    """Surface points -> (N, 6) float32 in [0, 1]: plip_labels.site_labels with
+    the step at radius r replaced by a linear ramp from 1 at r - soft/2 to 0 at
+    r + soft/2, max over each class's interactions."""
+    from plip_labels import CENTRE_KINDS, KIND_CLASS
+
+    xyz = np.asarray(xyz, np.float32)
+    out = np.zeros((len(xyz), N_CLASSES), np.float32)
+    if not len(rec["kind"]):
+        return out
+    kind = rec["kind"].astype(np.int64)
+    r = np.where(CENTRE_KINDS[kind], centre_radius, atom_radius).astype(np.float32)
+    cls = KIND_CLASS[kind]
+    P = rec["prot_xyz"].astype(np.float32)
+    for s in range(0, len(xyz), chunk):
+        d = np.sqrt(((xyz[s:s + chunk, None] - P[None]) ** 2).sum(-1))       # (n, k)
+        w = np.clip((r[None] + soft / 2 - d) / soft, 0.0, 1.0)
+        for c in range(N_CLASSES):
+            m = cls == c
+            if m.any():
+                out[s:s + chunk, c] = w[:, m].max(1)
+    return out
+
+
+def point_labels(xyz, recs, soft=0.0, **kw):
+    """(N, 3) surface points + PLIP records -> (N, 6) labels, union over
+    records: bool (OR) when soft is 0, float32 (max) when soft > 0."""
     from plip_labels import site_labels
 
+    if soft > 0:
+        out = np.zeros((len(xyz), N_CLASSES), np.float32)
+        for rec in recs:
+            if rec is not None and len(rec["kind"]):
+                np.maximum(out, soft_site_labels(xyz, rec, soft, **kw), out=out)
+        return out
     out = np.zeros((len(xyz), N_CLASSES), bool)
     for rec in recs:
         if rec is not None and len(rec["kind"]):
@@ -90,35 +137,42 @@ def plip_losses(type_logits, sal_logits, union_labels, max_pos_weight=20.0):
 
     type_logits[b]   (n_b, T + 1)  pair_pool type head on the site points
     sal_logits[b]    (n_b,)        salience head on the same points
-    union_labels[b]  (n_b, 6) bool receptor-union PLIP classes there, or None
+    union_labels[b]  (n_b, 6)      receptor-union PLIP classes there, bool
+                                   (hard) or float in [0, 1] (soft), or None
 
-    Proteins without labels are skipped; a loss is 0 (with grad) when no
-    protein in the batch has any contacted point."""
+    Salience target t = max over classes; the positive weight is the batch's
+    (n - sum t) / sum t. The type CE runs on points with t > 0 against the
+    class weights normalised, each point weighted by t. Bool labels give
+    exactly the hard-label losses. Proteins without labels are skipped; a
+    loss is 0 (with grad) when no protein in the batch has any contacted
+    point."""
     import torch
     import torch.nn.functional as F
 
     sal_terms, type_terms = [], []
-    n_pos = n_all = 0
+    n_pos = n_all = 0.0
     for tl, sl, y in zip(type_logits, sal_logits, union_labels):
         if y is None or not len(sl):
             continue
-        y = torch.as_tensor(y, device=sl.device)
-        hit = y.any(1)
-        n_pos += int(hit.sum())
-        n_all += len(hit)
-        sal_terms.append((sl, hit.float()))
+        y = torch.as_tensor(np.asarray(y), device=sl.device).float()
+        t = y.max(1).values
+        hit = t > 0
+        n_pos += float(t.sum())
+        n_all += len(t)
+        sal_terms.append((sl, t))
         if hit.any():
             T1 = tl.shape[1]
             if T1 - 1 < N_CLASSES:
                 raise ValueError(f"{T1 - 1} site types; PLIP supervision needs >= {N_CLASSES}")
-            yy = y[hit].float()
+            yy, wt = y[hit], t[hit]
             q = torch.zeros(len(yy), T1, device=tl.device)
             q[:, :N_CLASSES] = yy / yy.sum(1, keepdim=True)
-            type_terms.append(-(q * F.log_softmax(tl[hit], dim=1)).sum(1).mean())
+            ce = -(q * F.log_softmax(tl[hit], dim=1)).sum(1)
+            type_terms.append((ce * wt).sum() / wt.sum())
     zero = (type_logits[0].sum() * 0) if len(type_logits) else torch.zeros(())
     if not sal_terms:
         return zero, zero, {"plip_pos": 0.0}
-    pw = min(max(n_all - n_pos, 1) / max(n_pos, 1), max_pos_weight)
+    pw = min(max(n_all - n_pos, 1.0) / max(n_pos, 1.0), max_pos_weight)
     sal = torch.stack([F.binary_cross_entropy_with_logits(
         sl, t, pos_weight=torch.tensor(pw, device=sl.device)) for sl, t in sal_terms]).mean()
     typ = torch.stack(type_terms).mean() if type_terms else zero
@@ -176,6 +230,36 @@ def selftest():
         none_row, none_u = receptor_labels(xyz, "rowX", ["rowX"], td)
         check("receptor_labels: no files -> (None, None)",
               none_row is None and none_u is None)
+        _, soft_u = receptor_labels(xyz, "rowA", ["rowA", "rowB"], td, soft=1.5)
+        check("receptor_labels: soft= reaches the labels (float, same support "
+              "as the hard union where the ramp is 1)",
+              soft_u.dtype == np.float32 and (soft_u[lab] > 0).all())
+
+    # soft ramp: exact values at known distances from one donor atom
+    probe = np.array([[0, 0, 2.0], [0, 0, 2.25], [0, 0, 3.0], [0, 0, 3.6],
+                      [0, 0, 3.75], [0, 0, 5.0]], np.float32)
+    one = {"kind": np.array([KINDS.index("hbond_pdon")], np.int8),
+           "prot_xyz": np.zeros((1, 3), np.float32), "lig_xyz": np.ones((1, 3), np.float32)}
+    w = soft_site_labels(probe, one, 1.5)[:, 0]
+    check("soft ramp: 1 inside r - s/2, 0.5 at r, 0 beyond r + s/2 (r 3 A, s 1.5 A)",
+          np.allclose(w, [1, 1, 0.5, 0.1, 0, 0], atol=1e-5), " ".join(f"{v:.2f}" for v in w))
+    cen = dict(one, kind=np.array([KINDS.index("pistack")], np.int8))
+    wc = soft_site_labels(np.array([[0, 0, 4.0]], np.float32), cen, 1.5)
+    check("soft ramp: ring / charge centres ramp around 4 A, into their own class",
+          abs(wc[0, 4] - 0.5) < 1e-5 and wc[0, [0, 1, 2, 3, 5]].sum() == 0)
+    dense = rng.uniform(-6, 6, size=(200000, 3)).astype(np.float32)
+    hard_n = point_labels(dense, [one])[:, 0].sum()
+    soft_m = point_labels(dense, [one], soft=1.5)[:, 0].sum()
+    check("soft ramp keeps roughly the hard label's mass (within 15%)",
+          abs(soft_m / hard_n - 1) < 0.15, f"{soft_m / hard_n:.3f}")
+    two = {"kind": np.array([KINDS.index("hbond_pdon")] * 2, np.int8),
+           "prot_xyz": np.array([[0, 0, 0], [0, 0, 1.0]], np.float32),
+           "lig_xyz": np.ones((2, 3), np.float32)}
+    check("soft: max (not sum) over a class's interactions, so stays in [0, 1]",
+          soft_site_labels(np.array([[0, 0, 0.5]], np.float32), two, 1.5)[0, 0] == 1.0)
+    check("soft=0 is exactly the hard boolean labels",
+          point_labels(xyz, [rec_a, rec_b], soft=0.0).dtype == bool
+          and (point_labels(xyz, [rec_a, rec_b], soft=0.0) == lab).all())
 
     try:
         import torch
@@ -207,6 +291,28 @@ def selftest():
           float(tl.grad.abs().sum()) > 0 and float(sl.grad.abs().sum()) > 0)
     check("type loss puts gradient only on labelled points",
           float(tl.grad[2:].abs().sum()) == 0)
+    tl2 = torch.randn(50, T + 1)
+    sl2 = torch.randn(50)
+    yb = rng.uniform(size=(50, 6)) < 0.15
+    hb = plip_losses([tl2], [sl2], [yb])
+    hf = plip_losses([tl2], [sl2], [yb.astype(np.float16)])
+    check("hard labels as bool and as 0/1 floats give identical losses",
+          abs(float(hb[0]) - float(hf[0])) < 1e-6 and abs(float(hb[1]) - float(hf[1])) < 1e-6)
+    hit = yb.any(1)
+    q = np.zeros((hit.sum(), T + 1))
+    q[:, :6] = yb[hit] / yb[hit].sum(1, keepdims=True)
+    ref_t = float(-(torch.as_tensor(q).float() * F.log_softmax(tl2[torch.as_tensor(hit)], 1)).sum(1).mean())
+    check("hard type CE is v6's: mean over contacted points of CE against "
+          "uniform-over-classes", abs(float(hb[1]) - ref_t) < 1e-5)
+    # soft: a point at weight 0.25 counts a quarter as much as one at 1
+    ys = np.zeros((2, 6), np.float32)
+    ys[0, 0], ys[1, 1] = 1.0, 0.25
+    tl3 = torch.randn(2, T + 1)
+    ce = -F.log_softmax(tl3, 1)
+    _, ts, sts = plip_losses([tl3], [torch.zeros(2)], [ys])
+    check("soft type CE weights each point by its salience target",
+          abs(float(ts) - float((ce[0, 0] + 0.25 * ce[1, 1]) / 1.25)) < 1e-5
+          and abs(sts["plip_pos"] - 0.625) < 1e-6)
     z, z2, _ = plip_losses([torch.zeros(3, T + 1, requires_grad=True)],
                            [torch.zeros(3, requires_grad=True)], [None])
     check("no labels in the batch -> zero losses that still backprop",

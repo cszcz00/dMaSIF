@@ -58,7 +58,8 @@
 # draws them from the top k_pos by druggability, the pockets the blind eval
 # scores. The `site` column then reads "own pocket above every decoy".
 #
-# Overrides here: LAM_PLIP / LAM_PLIP_TYPE / PLIP (PLIP supervision, below),
+# Overrides here: LAM_PLIP / LAM_PLIP_SAL / LAM_PLIP_TYPE / PLIP_SOFT / PLIP
+#   (PLIP supervision, below),
 #   POCKETS, POCKET_SHAPE, POCKET_MARGIN, PAIR_ARGS (e.g.
 #   "--pair_types 12 --pair_bins 10"), DECOYS, POCKET_RANK, plus everything
 #   train.sbatch takes (TAU_MIN among them).
@@ -73,8 +74,15 @@ export POOL_MODE=${POOL_MODE:-pairs}
 export CHEMO=${CHEMO-1}
 export BANK=${BANK-2048}
 export EXTRA_LIG=${EXTRA_LIG-1024}
-export SURFACE_RAM=${SURFACE_RAM:-4000}
-export LABEL_RAM=${LABEL_RAM:-20000}
+# RAM caches. 4,000 surfaces left ~65% of dataset_v2's training reads on disk
+# (v4: 44,087 of 68,000 by step 2,125, ~0.8 s/step of load) at RSS 5.1 GB of
+# the 96 GB asked for, CUDA context included, so <= ~1.2 MB per surface.
+# 32,000 holds every dataset_v2 training receptor (31,861 rows) after its
+# first visit, ~40 GB at most; LABEL_RAM likewise every row. Check the log's
+# "RSS peak" after the first evaluations. Results do not depend on these:
+# sampling is seeded per receptor, not by cache state.
+export SURFACE_RAM=${SURFACE_RAM:-32000}
+export LABEL_RAM=${LABEL_RAM:-40000}
 export LR_SCHEDULE=${LR_SCHEDULE:-cosine}
 export WARMUP=${WARMUP:-200}
 # In REGION_ARGS so the smoke runs the v3 path too, not just the main run.
@@ -88,11 +96,14 @@ if [ -n "${DECOYS:-}" ] && [ "$DECOYS" != 0 ]; then
     export REGION_ARGS="$REGION_ARGS --n_decoys $DECOYS --lam_site $LAM_SITE"
 fi
 # PLIP supervision of the site types and salience (off unless LAM_PLIP is set):
-# LAM_PLIP=0.1 weights both losses (LAM_PLIP_TYPE overrides the type one);
-# labels from PLIP (data/plip). In REGION_ARGS, so the smoke runs the losses.
+# LAM_PLIP=0.1 weights both losses (LAM_PLIP_SAL / LAM_PLIP_TYPE override one
+# each); PLIP_SOFT=1.5 ramps the labels across 1.5 A instead of stepping at
+# the radius (unset = hard, as v6); labels from PLIP (data/plip). In
+# REGION_ARGS, so the smoke runs the losses.
 if [ -n "${LAM_PLIP:-}" ] && [ "$LAM_PLIP" != 0 ]; then
     export REGION_ARGS="$REGION_ARGS --plip ${PLIP:-$WORK/data/plip} \
---lam_plip_sal $LAM_PLIP --lam_plip_type ${LAM_PLIP_TYPE:-$LAM_PLIP}"
+--lam_plip_sal ${LAM_PLIP_SAL:-$LAM_PLIP} --lam_plip_type ${LAM_PLIP_TYPE:-$LAM_PLIP} \
+${PLIP_SOFT:+--plip_soft $PLIP_SOFT}"
 fi
 export TRAIN_ARGS=${TRAIN_ARGS:-"--eval_every 125 --save_every 125"}
 exec bash $WORK/src/slurm/train.sbatch
