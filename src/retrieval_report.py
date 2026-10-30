@@ -211,7 +211,8 @@ def dump(a):
             setattr(a, k, getattr(saved, k, None) or v)
     store = SurfaceStore(a.surface_cache, ram=a.surface_ram, device=a.device,
                          keep_hydrogens=saved.keep_hydrogens,
-                         pockets=pocket_source(a, model.encoder.cfg))
+                         pockets=pocket_source(a, model.encoder.cfg),
+                         atom_feats=getattr(model.encoder.cfg, "atom_feats", False))
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
     tr = np.asarray(ckpt["train_rows"])
     va = np.asarray(ckpt["val_rows"])

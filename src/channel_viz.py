@@ -197,7 +197,8 @@ def dump(a):
             setattr(a, k, getattr(saved, k, None) or v)
     store = SurfaceStore(a.surface_cache, ram=a.surface_ram, device=a.device,
                          keep_hydrogens=saved.keep_hydrogens,
-                         pockets=pocket_source(a, cfg))
+                         pockets=pocket_source(a, cfg),
+                         atom_feats=getattr(cfg, "atom_feats", False))
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
     rows = pick_rows(table, ckpt, saved, a)
     print(f"{a.ckpt}: step {ckpt['step']}, pool_mode {cfg.pool_mode}, chemo "

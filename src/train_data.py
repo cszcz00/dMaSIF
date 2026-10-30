@@ -187,6 +187,11 @@ class ItemTable:
 # surfaces
 # ---------------------------------------------------------------------------
 SURFACE_KEYS = ("xyz", "normals", "atom_xyz", "atom_type", "atom_groups")
+# Written when present, required only by a store that asks for them. A cache
+# built before atom_features.py lacks atom_feats; SurfaceStore(atom_feats=True)
+# adds them in place (re-parsing the atoms only - the surface is kept), lazily
+# on first read or ahead of time through `train.py cache --atom_feats`.
+OPTIONAL_KEYS = ("atom_feats",)
 
 
 class SurfaceStore:
@@ -204,7 +209,7 @@ class SurfaceStore:
     """
 
     def __init__(self, cache_dir=None, ram=256, device="cpu",
-                 keep_hydrogens=False, pockets=None):
+                 keep_hydrogens=False, pockets=None, atom_feats=False):
         self.dir = Path(cache_dir) if cache_dir else None
         # external_pockets.PocketSource or None. Mapped onto each surface when
         # its RAM entry is built, so the regions live and die with the surface.
@@ -214,8 +219,10 @@ class SurfaceStore:
         self.ram = max(int(ram), 1)
         self.device = device
         self.keep_hydrogens = keep_hydrogens
+        # atom_features.py's per-atom chemistry, for cfg.atom_feats encoders
+        self.atom_feats = bool(atom_feats)
         self._mem = OrderedDict()
-        self.stats = {"ram": 0, "disk": 0, "sampled": 0, "failed": 0}
+        self.stats = {"ram": 0, "disk": 0, "sampled": 0, "failed": 0, "upgraded": 0}
 
     # --- the three layers -------------------------------------------------
     def path_for(self, row):
@@ -231,7 +238,30 @@ class SurfaceStore:
                                   keep_hydrogens=self.keep_hydrogens)
         # Always typed, cheap, and cached: a run with cfg.chemo on must not need
         # a different cache from one with it off.
-        return chemotype.annotate(prot)
+        chemotype.annotate(prot)
+        if self.atom_feats:
+            # Not always: burial is a neighbour count over every atom, which a
+            # cache built for the other arms has no use for.
+            import atom_features
+            atom_features.annotate(prot)
+        return prot
+
+    def _add_atom_feats(self, row, arrays):
+        """A cached entry without atom_feats -> the same arrays with them. The
+        atoms are re-parsed and must match the cached ones exactly; the surface
+        is not touched, so every other run's view of this receptor is unchanged."""
+        prot = self._load_atoms(row)
+        if (len(prot["atom_xyz"]) != len(arrays["atom_xyz"])
+                or not np.allclose(prot["atom_xyz"], arrays["atom_xyz"], atol=1e-3)):
+            raise ValueError(
+                f"{row['input_id']}: re-parsed {len(prot['atom_xyz'])} atoms do not "
+                f"match the {len(arrays['atom_xyz'])} cached ones (different "
+                "keep_hydrogens, or a changed structure file); delete the cached "
+                "surface to rebuild it")
+        out = dict(arrays)
+        out["atom_feats"] = prot["atom_feats"]
+        self.stats["upgraded"] += 1
+        return out
 
     def _sample(self, enc, row):
         """Atoms -> surface, seeded from this receptor's own identity.
@@ -264,10 +294,13 @@ class SurfaceStore:
             torch.set_rng_state(cpu_state)
             if cuda_state is not None:
                 torch.cuda.set_rng_state_all(cuda_state)
-        return {"xyz": xyz.cpu().numpy().astype(np.float32),
-                "normals": normals.cpu().numpy().astype(np.float32),
-                "atom_xyz": prot["atom_xyz"], "atom_type": prot["atom_type"],
-                "atom_groups": prot["atom_groups"]}
+        out = {"xyz": xyz.cpu().numpy().astype(np.float32),
+               "normals": normals.cpu().numpy().astype(np.float32),
+               "atom_xyz": prot["atom_xyz"], "atom_type": prot["atom_type"],
+               "atom_groups": prot["atom_groups"]}
+        if "atom_feats" in prot:
+            out["atom_feats"] = prot["atom_feats"]
+        return out
 
     def write(self, row, arrays):
         path = self.path_for(row)
@@ -283,14 +316,22 @@ class SurfaceStore:
         # nothing. A file object is left alone.
         tmp = path.with_suffix(".npz.tmp")
         with open(tmp, "wb") as fh:
-            np.savez(fh, **{k: arrays[k] for k in SURFACE_KEYS})
+            np.savez(fh, **{k: arrays[k] for k in SURFACE_KEYS + OPTIONAL_KEYS
+                            if k in arrays})
         tmp.replace(path)
 
     def ensure(self, enc, row):
         """Make sure this receptor is in the disk cache -> True if it was built."""
         path = self.path_for(row)
         if path is not None and path.exists():
-            return False
+            if not self.atom_feats:
+                return False
+            with np.load(path, allow_pickle=False) as d:
+                if "atom_feats" in d.files:
+                    return False
+                arrays = {k: d[k] for k in SURFACE_KEYS}
+            self.write(row, self._add_atom_feats(row, arrays))
+            return True
         self.write(row, self._sample(enc, row))
         self.stats["sampled"] += 1
         return True
@@ -310,7 +351,8 @@ class SurfaceStore:
         if path is not None and path.exists():
             try:
                 with np.load(path, allow_pickle=False) as d:
-                    arrays = {k: d[k] for k in SURFACE_KEYS}
+                    arrays = {k: d[k] for k in SURFACE_KEYS + OPTIONAL_KEYS
+                              if k in d.files}
                 self.stats["disk"] += 1
             except Exception as e:                       # truncated or stale file
                 print(f"[warn] {path}: {type(e).__name__}: {e}; resampling")
@@ -318,6 +360,9 @@ class SurfaceStore:
         if arrays is None:
             arrays = self._sample(enc, row)
             self.stats["sampled"] += 1
+            self.write(row, arrays)
+        elif self.atom_feats and "atom_feats" not in arrays:
+            arrays = self._add_atom_feats(row, arrays)
             self.write(row, arrays)
 
         entry = {"input_id": key,
@@ -327,6 +372,9 @@ class SurfaceStore:
                  "atom_type": np.ascontiguousarray(arrays["atom_type"]),
                  "atom_groups": np.ascontiguousarray(arrays["atom_groups"]),
                  "region_cache": {}}
+        if self.atom_feats:
+            entry["atom_feats"] = np.ascontiguousarray(arrays["atom_feats"],
+                                                       dtype=np.float32)
         if self.pockets is not None:
             # ext_regions / ext_map: the receptor's top pockets; ext_raw: the
             # spheres themselves, for the per-row `site` select
@@ -343,7 +391,9 @@ class SurfaceStore:
         s = self.stats
         total = s["ram"] + s["disk"] + s["sampled"]
         return (f"surfaces: {total} requests, {s['ram']} RAM / {s['disk']} disk / "
-                f"{s['sampled']} sampled; {len(self._mem)}/{self.ram} resident"
+                f"{s['sampled']} sampled"
+                + (f" ({s['upgraded']} given atom_feats)" if s["upgraded"] else "")
+                + f"; {len(self._mem)}/{self.ram} resident"
                 + ("" if self.pockets is None else "; " + self.pockets.report()))
 
 

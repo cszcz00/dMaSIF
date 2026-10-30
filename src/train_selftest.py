@@ -80,7 +80,7 @@ def selftest(a):
     from ligand_encoder import LigandConfig, LigandEncoder
     from probe_retrieval import (draw_batch, group_index, info_nce,
                                  retrieval_metrics, split_by_group)
-    from pair_pool import PairPool, pair_width
+    from pair_pool import PairPool, TypedAttnPool, attn_width, pair_width
     from surface_encoder import (EncoderConfig, SurfaceEncoder, pocket_loss,
                                  select_and_pool)
     from test_encoder import to_batch
@@ -191,6 +191,33 @@ def selftest(a):
     e3 = store2.get(sampler, rows[0])
     check("disk round-trip is exact",
           bool(torch.equal(e1["xyz"], e3["xyz"])) and store2.stats["disk"] == 1)
+
+    # atom_feats added in place to a surface cached without them (the
+    # learned-typing runs read the existing cache): same surface, file
+    # upgraded once, carried through to_batch
+    class FakeStoreF(FakeStore):
+        def _load_atoms(self, row):
+            prot = super()._load_atoms(row)
+            if self.atom_feats:
+                prot["atom_feats"] = np.full((len(prot["atom_xyz"]), 16), 0.5, np.float32)
+            return prot
+
+    shutil.copytree(tmp / "surfaces", tmp / "surfaces_f", dirs_exist_ok=True)
+    storef = FakeStoreF(tmp / "surfaces_f", ram=8, atom_feats=True)
+    ef = storef.get(sampler, rows[0])
+    with np.load(tmp / "surfaces_f" / "p000.npz") as d:
+        has = "atom_feats" in d.files
+    storef2 = FakeStoreF(tmp / "surfaces_f", ram=8, atom_feats=True)
+    ef2 = storef2.get(sampler, rows[0])
+    from test_encoder import to_batch
+    Pf = to_batch([ef, ef2], "cpu")
+    check("atom_feats added to a cached surface in place: same surface, file "
+          "upgraded once, carried by to_batch",
+          bool(torch.equal(ef["xyz"], e1["xyz"])) and has
+          and storef.stats["upgraded"] == 1 and storef2.stats["upgraded"] == 0
+          and ef["atom_feats"].shape == (len(ef["atom_xyz"]), 16)
+          and tuple(Pf["atom_feats"].shape) == (2 * len(ef["atom_xyz"]), 16)
+          and "atom_feats" not in store2.get(sampler, rows[0]), storef.report())
 
     # Same receptor, a store that has never seen it, and a different amount of
     # randomness consumed first: the surface must be the same anyway, or a
@@ -317,7 +344,12 @@ def selftest(a):
             self.pair_pool = (PairPool(EMB, 0, n_types=cfg.pair_types,
                                        n_bins=cfg.pair_bins, r_min=cfg.pair_rmin,
                                        r_max=cfg.pair_rmax, exclude=cfg.pair_exclude)
-                              if cfg.pool_mode == "pairs" else None)
+                              if cfg.pool_mode == "pairs" else
+                              TypedAttnPool(EMB, 0, n_types=cfg.pair_types,
+                                            n_heads=cfg.attn_heads, v_dims=cfg.attn_vdim,
+                                            n_bins=cfg.attn_bins, r_min=cfg.pair_rmin,
+                                            r_max=cfg.pair_rmax, exclude=cfg.pair_exclude)
+                              if cfg.pool_mode == "typed_attn" else None)
 
         # the real tail, so the normalisation and projection under test are
         # the ones training uses
@@ -332,7 +364,7 @@ def selftest(a):
             emb = self.mix(P["planted"])
             logit = self.pocket_head(emb).squeeze(-1)
             prob = torch.sigmoid(logit)
-            if c.region_source != "predicted" or c.pool_mode == "pairs":
+            if c.region_source != "predicted" or c.pool_mode in ("pairs", "typed_attn"):
                 # the external sources and pair pooling go through the REAL
                 # select_and_pool (groups [9], [10]); every earlier group keeps
                 # the loop below, unchanged
@@ -769,6 +801,26 @@ def selftest(a):
           all(p.grad is not None and float(p.grad.abs().sum()) > 0
               for p in pp.parameters())
           and model10.encoder.mix.weight.grad is not None)
+
+    # the same stack with typed attention in place of pair pooling (ladder P3)
+    cfg10t = dataclasses.replace(cfg10, pool_mode="typed_attn")
+    model10t = SimpleNamespace(encoder=StubEncoder(cfg10t))
+    check("typed_attn width: config, TypedAttnPool and projection agree",
+          cfg10t.pooled_dims == attn_width(EMB) == model10t.encoder.pair_pool.out_dims
+          == model10t.encoder.project[0].in_features, f"{cfg10t.pooled_dims} dims")
+    model10t.encoder.train()
+    blk10t = anchor_block(model10t, P10, labs10, args10,
+                          generator=torch.Generator().manual_seed(0))
+    check("typed_attn: same usable anchors and fallback as pairs",
+          blk10t["usable"].sum(1).tolist() == usable10
+          and blk10t["fallback"].tolist() == blk10["fallback"].tolist())
+    blk10t["anchors"][blk10t["usable"]].sum().backward()
+    check("typed_attn: the loss reaches every head parameter and the embedding",
+          all(p.grad is not None and float(p.grad.abs().sum()) > 0
+              for p in model10t.encoder.pair_pool.parameters())
+          and model10t.encoder.mix.weight.grad is not None,
+          str([n for n, p in model10t.encoder.pair_pool.named_parameters()
+               if p.grad is None or float(p.grad.abs().sum()) == 0]))
 
     # ---- site decoys: the receptor's other pockets as within-protein negatives
     print("\n[11] site decoys (--n_decoys) and the site metric")

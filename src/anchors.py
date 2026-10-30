@@ -550,11 +550,15 @@ def select_regions(xyz, prob, k_pos, k_neg, threshold=0.5, top_fraction=None, li
 POOL_MODES = ("mean", "mean_std", "shells")
 
 
-def pooled_width(emb_dims, mode="mean", n_shells=3, n_types=8, n_bins=8):
-    """Width of pool_regions' output for one embedding width. "pairs" is the
-    learned pair_pool.PairPool, which pool_regions itself does not compute."""
+def pooled_width(emb_dims, mode="mean", n_shells=3, n_types=8, n_bins=8,
+                 n_heads=16, v_dims=8):
+    """Width of pool_regions' output for one embedding width. "pairs" and
+    "typed_attn" are the learned pair_pool.PairPool / TypedAttnPool, which
+    pool_regions itself does not compute."""
     if mode == "pairs":
         return emb_dims + n_types + n_types * (n_types + 1) // 2 * n_bins
+    if mode == "typed_attn":
+        return emb_dims + n_types + n_heads * (1 + v_dims)
     if mode == "mean":
         return emb_dims
     if mode == "mean_std":

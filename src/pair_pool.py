@@ -50,6 +50,9 @@ is the difference between ~5 GB and nothing. Regions above `max_points` (4096)
 are thinned to every k-th point by distance from the centroid and H rescaled
 by (n / kept)^2, so a huge merged site cannot exhaust the GPU.
 
+TypedAttnPool (below) is the learned-heads generalisation, pool_mode
+"typed_attn".
+
 Depends on: torch. Self-test: `python src/pair_pool.py` (CPU torch, no KeOps).
 """
 
@@ -149,6 +152,113 @@ class PairPool(nn.Module):
         return torch.stack(out)
 
 
+def attn_width(emb_dims, n_types=8, n_heads=16, v_dims=8):
+    """TypedAttnPool's output width: mean + mass + per head (log count, value)."""
+    return emb_dims + n_types + n_heads * (1 + v_dims)
+
+
+class TypedAttnPool(PairPool):
+    """Typed distance attention: PairPool with learned heads (the v8 ladder rung P3).
+
+    PairPool counts, for every PAIR of site types and every distance bin, how
+    much type-t1 surface sits at that distance from type-t2 surface: 36 type
+    pairs x 8 bins, all with equal room, carrying a count and nothing else.
+    This keeps the per-point heads (type softmax a_i, salience s_i, so
+    PairPool.heads / site_types and the PLIP losses work unchanged) and makes
+    three things learned, per head h:
+
+        g_i = a_i . softplus(alpha_h)       which site types the head starts FROM
+        k_j = a_j . softplus(beta_h)        which site types it looks AT
+        psi_h(d) = sum_b softplus(c_hb) K_b(d)   its own distance profile over
+                                            n_bins Gaussians (r_min..r_max)
+        W_ij = m_i g_i * m_j k_j * psi_h(d_ij),  m = s * w, 0 below `exclude`
+        M_h  = sum_ij W_ij                  how much of the arrangement there is
+        o_h  = sum_ij W_ij v_j / (M_h + eps)    what the partners look like,
+                                            v_j = Linear(z_j) of v_dims
+
+    out = [mean h, log1p(mass / mass_scale), per head log1p(M_h / count_scale)
+    and o_h]. PairPool is the special case of one head per type pair with
+    one-hot gates, one fixed bin each and v = 1. Sums, not a softmax, so
+    counts survive ("two donors" vs "five donors"); distances only, so it is
+    rigid-motion invariant; heads read as (from types, to types, distance
+    profile), so channel_viz can print them.
+
+    Cost: the same no-grad n x n x n_bins bin tensor as PairPool, contracted
+    once against (n, heads, 1 + v_dims) - a matmul, recomputed in the backward
+    pass under checkpoint as PairPool's is. Regions above max_points are
+    thinned the same way, counts rescaled by (n / kept)^2.
+    """
+
+    def __init__(self, emb_dims, feat_dims=0, n_types=8, n_heads=16, v_dims=8,
+                 n_bins=12, r_min=3.0, r_max=16.0, exclude=2.0, hidden=32,
+                 mass_scale=10.0, count_scale=100.0, max_points=4096, eps=1e-6):
+        super().__init__(emb_dims, feat_dims, n_types=n_types, n_bins=n_bins,
+                         r_min=r_min, r_max=r_max, exclude=exclude, hidden=hidden,
+                         mass_scale=mass_scale, max_points=max_points)
+        self.n_heads, self.v_dims = n_heads, v_dims
+        self.count_scale, self.eps = count_scale, eps
+        # Random, not zero: identical heads would get identical gradients and
+        # never separate. softplus keeps every gate and profile >= 0, so W and
+        # M are counts.
+        self.q_aff = nn.Parameter(torch.randn(n_heads, n_types) * 0.5)
+        self.k_aff = nn.Parameter(torch.randn(n_heads, n_types) * 0.5)
+        self.dist_w = nn.Parameter(torch.randn(n_heads, n_bins) * 0.5)
+        self.value = nn.Linear(emb_dims + feat_dims, v_dims)
+
+    @property
+    def out_dims(self):
+        return attn_width(self.emb_dims, self.n_types, self.n_heads, self.v_dims)
+
+    def _attn(self, q, xv, c, x):
+        """q (n, H), xv (n, H, C), c (H, B), x (n, 3) -> (H, C)."""
+        k = self._bins(x)                                     # (n, n, B), no grad
+        a = torch.einsum("ijb,jhc->ibhc", k, xv)              # (n, B, H, C)
+        z = torch.einsum("ibhc,hb->ihc", a, c)
+        return torch.einsum("ih,ihc->hc", q, z)
+
+    def forward(self, emb, feats, w, regions, xyz, eps=1e-6):
+        """emb (N, E), feats (N, F) or None, w (N,), regions: list of index
+        tensors into these N points, xyz (N, 3) -> (R, out_dims)."""
+        if not regions:
+            return emb.new_zeros(0, self.out_dims)
+        qa, ka = F.softplus(self.q_aff), F.softplus(self.k_aff)
+        c = F.softplus(self.dist_w).float()
+        out = []
+        for r in regions:
+            r = r.to(emb.device)
+            h, ww = emb[r], w[r]
+            f = None if feats is None else feats[r]
+            z = h if f is None else torch.cat([h, f.to(h.dtype)], dim=1)
+            tl, sl = self.type_head(z), self.sal_head(z).squeeze(-1)
+            a = F.softmax(tl, dim=-1)[:, :self.n_types]
+            m = torch.sigmoid(sl) * ww
+            mean = (ww[:, None] * h).sum(0) / (ww.sum() + eps)
+            mass = (m[:, None] * a).sum(0)
+            q = (m[:, None] * (a @ qa.T)).float()                       # (n, H)
+            v = torch.cat([torch.ones_like(m)[:, None], self.value(z)], 1)
+            xv = ((m[:, None] * (a @ ka.T))[:, :, None] * v[:, None, :]).float()
+            x = xyz[r].detach().float()
+            scale = 1.0
+            if len(r) > self.max_points:
+                with torch.no_grad():
+                    cen = (ww[:, None] * x).sum(0) / (ww.sum() + eps)
+                    order = torch.argsort((x - cen).norm(dim=1))
+                    keep = order[::-(-len(r) // self.max_points)]
+                scale = (len(r) / len(keep)) ** 2
+                q, xv, x = q[keep], xv[keep], x[keep]
+            if self.training and (q.requires_grad or xv.requires_grad):
+                o = checkpoint(self._attn, q, xv, c, x, use_reentrant=False)
+            else:
+                o = self._attn(q, xv, c, x)
+            o = o * scale
+            cnt = o[:, 0]
+            part = o[:, 1:] / (cnt[:, None] + self.eps)
+            out.append(torch.cat([mean, torch.log1p(mass / self.mass_scale),
+                                  torch.log1p(cnt.to(mean.dtype) / self.count_scale),
+                                  part.to(mean.dtype).reshape(-1)]))
+        return torch.stack(out)
+
+
 # ---------------------------------------------------------------------------
 def _selftest():
     torch.manual_seed(0)
@@ -221,6 +331,60 @@ def _selftest():
                                                   [inv[r] for r in regs], xyz[perm]), atol=1e-4),
           f"pair-block cosine to the unthinned region {cos:.3f}")
     check("no regions -> empty", pool(emb, feats, w, [], xyz).shape == (0, pool.out_dims))
+
+    # ---- TypedAttnPool -------------------------------------------------
+    print("  TypedAttnPool:")
+    ta = TypedAttnPool(E, Fd).eval()
+    v = ta(emb, feats, w, regs, xyz)
+    check("typed_attn: shape = attn_width",
+          tuple(v.shape) == (2, attn_width(E)) == (2, ta.out_dims), f"{tuple(v.shape)}")
+    check("typed_attn: finite", bool(torch.isfinite(v).all()))
+    v_rot = ta(emb, feats, w, regs, xyz @ R.T + torch.tensor([5.0, -3.0, 9.0]))
+    check("typed_attn: rigid-motion invariant", torch.allclose(v, v_rot, atol=1e-4),
+          f"max diff {float((v - v_rot).abs().max()):.1e}")
+    v_p = ta(emb[perm], feats[perm], w[perm], [inv[r] for r in regs], xyz[perm])
+    check("typed_attn: permutation invariant", torch.allclose(v, v_p, atol=1e-4))
+    t0 = TypedAttnPool(E, 0).eval()
+    a_near = t0(e2, None, torch.ones(40), [torch.arange(40)], near)[0]
+    a_far = t0(e2, None, torch.ones(40), [torch.arange(40)], far)[0]
+    k = E + t0.n_types
+    check("typed_attn: same composition -> identical mean and mass",
+          torch.allclose(a_near[:k], a_far[:k]))
+    check("typed_attn: different arrangement -> different head block",
+          float((a_near[k:] - a_far[k:]).abs().max()) > 1e-3)
+    # counts survive: the same site twice over (a copy 30 A away, beyond every
+    # bin) doubles every head's count and leaves the partner means alone
+    two = torch.cat([near, near + torch.tensor([0.0, 30.0, 0.0])])
+    a_two = t0(torch.cat([e2, e2]), None, torch.ones(80), [torch.arange(80)], two)[0]
+    H, V = t0.n_heads, t0.v_dims
+    blk1, blk2 = a_near[k:].view(H, 1 + V), a_two[k:].view(H, 1 + V)
+    cnt1 = torch.expm1(blk1[:, 0]) * t0.count_scale
+    cnt2 = torch.expm1(blk2[:, 0]) * t0.count_scale
+    check("typed_attn: two copies of a site -> twice the count, same partners",
+          torch.allclose(cnt2, 2 * cnt1, rtol=1e-3)
+          and torch.allclose(blk2[:, 1:], blk1[:, 1:], atol=1e-4))
+    ta.train()
+    emb_g = emb.clone().requires_grad_(True)
+    feats_g = feats.clone().requires_grad_(True)
+    out = ta(emb_g, feats_g, w, regs, xyz)
+    out[:, E + ta.n_types:].sum().backward()
+    check("typed_attn: gradient reaches embeddings, input channels and every "
+          "parameter through the head block (checkpointed)",
+          float(emb_g.grad.abs().sum()) > 0 and float(feats_g.grad.abs().sum()) > 0
+          and all(p.grad is not None and float(p.grad.abs().sum()) > 0
+                  for p in ta.parameters()),
+          str([n for n, p in ta.named_parameters()
+               if p.grad is None or float(p.grad.abs().sum()) == 0]))
+    tsmall = TypedAttnPool(E, Fd, max_points=100).eval()
+    tsmall.load_state_dict(ta.state_dict())
+    vs = tsmall(emb, feats, w, regs, xyz)
+    full = ta.eval()(emb, feats, w, regs, xyz)
+    cos = float(F.cosine_similarity(vs[0, k:], full[0, k:], dim=0))
+    check("typed_attn: a thinned large region stays close to the full one",
+          cos > 0.95, f"head-block cosine {cos:.3f}")
+    check("typed_attn: heads() / site_types() are PairPool's (PLIP-compatible)",
+          ta.heads(emb, feats)[0].shape == (n, ta.n_types + 1))
+    check("typed_attn: no regions -> empty", ta(emb, feats, w, [], xyz).shape == (0, ta.out_dims))
     print("\nPASS" if not fails else f"\nFAIL: {fails}")
     raise SystemExit(1 if fails else 0)
 

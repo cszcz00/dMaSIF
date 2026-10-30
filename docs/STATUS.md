@@ -218,6 +218,82 @@ channel_viz on both for the per-type PLIP AUROCs. The `plip` line should show
 type CE falling well below 2.197 and salience BCE falling; if MRR drops while
 they fall, the weight is too high (try 0.03).
 
+## Ladder: pooling P0 / P2 / P3 x features chemo / learned atom typing - WRITTEN; numpy self-tests PASS (atom_features, paired_eval), torch parts untested
+
+The question: does pooling that is more chemistry-aware extract more, and
+more so from richer chemistry? Same seed, data and batches for every run
+(as v4 / v5), 5,000 steps, the winners extended.
+
+|                       | P0 `mean`     | P2 `pairs`    | P3 `typed_attn` |
+|---|---|---|---|
+| chemo (28 ch)         | `lad_p0_chemo` | **v5** (running) | `lad_p3_chemo` |
+| learned atoms (32 ch) | `lad_p0_af`    | `lad_p2_af`   | `lad_p3_af`     |
+
+What is new (all off by default; v4-v7 and their resubmits are unchanged):
+- `src/atom_features.py`: 16 values per heavy atom - element, sp3 / sp2 /
+  aromatic, H count, delocalised formal charge, donor, acceptor, carbon
+  bonded to N/O, backbone, histidine, burial at 6 / 10 A. Residue and atom
+  names are only lookup keys: 175 (residue, atom) entries -> 30 descriptors
+  (self-test prints them). `--atom_feats` / `ATOM_FEATS=1`: a second
+  AtomNet (`SurfaceEncoder.chemnet`, dMaSIF's architecture at width 16,
+  fresh) over them, 16 more input channels after the pretrained ones, which
+  the inflation zero-pads, so step 0 is the pretrained function. Without
+  chemo: 10 curvature + 6 AtomNet + 16 = 32 channels.
+- Cache: `atom_feats` is an optional cached array. `ATOM_FEATS=1 sbatch
+  src/slurm/cache_surfaces.sbatch` adds it to existing surfaces in place
+  (atoms re-parsed, surface kept, temp-file rename, so running jobs are
+  unaffected); otherwise a run adds it lazily on first read.
+- `--pool_mode typed_attn` (`pair_pool.TypedAttnPool`): PairPool's type /
+  salience heads, then 16 learned heads, each (from-type mix, to-type mix,
+  distance profile over 12 Gaussians 3-16 A) with an 8-dim partner
+  description; output mean + mass + per head (log count, partners) = 168
+  dims. Sizes via `PAIR_ARGS="--attn_heads .. --attn_vdim .. --attn_bins .."`.
+- `--keep_steps 5000` saves `step5000.pt`, never overwritten.
+- `train.py eval --per_row FILE` writes each scored row's rank;
+  `src/paired_eval.py A.tsv B.tsv` gives B - A with a 95% interval from a
+  bootstrap over TARGET GROUPS (numpy only; `python src/paired_eval.py
+  selftest`).
+
+Run order:
+```
+# login node, container, CPU: the parts that need torch
+EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
+$EX src/atom_features.py && $EX src/pair_pool.py && $EX src/train.py selftest
+# atom_feats into the shared cache (16 shards, ~1-2 s a receptor)
+ATOM_FEATS=1 RUN=$WORK/out/runs/dataset_v2 sbatch src/slurm/cache_surfaces.sbatch
+# the five runs
+COMMON="STEPS=5000 BANK= EXTRA_LIG= LR_SCHEDULE=const WARMUP=0 ANCHOR_NORM=batch \
+DATA=$WORK/out/runs/dataset_v2"
+TA="--eval_every 125 --save_every 125 --val_set $WORK/out/valset_v1v2 --keep_steps 2500,5000"
+for spec in "p0_chemo CHEMO=1 POOL_MODE=mean" "p3_chemo CHEMO=1 POOL_MODE=typed_attn" \
+            "p0_af CHEMO=0 ATOM_FEATS=1 POOL_MODE=mean" "p2_af CHEMO=0 ATOM_FEATS=1 POOL_MODE=pairs" \
+            "p3_af CHEMO=0 ATOM_FEATS=1 POOL_MODE=typed_attn"; do
+  set -- $spec; name=$1; shift
+  env $COMMON "$@" RUN=$WORK/out/runs/lad_$name TRAIN_ARGS="$TA" \
+      sbatch --job-name=lad_$name src/slurm/train_v3.sbatch
+done
+```
+v5 is P2 + chemo but started without --keep_steps: copy its last.pt when its
+history.json reaches step 5,000 (`last.pt` is rewritten every 125 steps), as
+`out/runs/v5_C_chemo_dataset_v2/step5000.pt`.
+
+Reading: window means at matched steps first (as for v4 / v5), then the
+paired test on step5000.pt of each pair:
+```
+for r in lad_p0_chemo v5_C_chemo_dataset_v2 lad_p3_chemo lad_p0_af lad_p2_af lad_p3_af; do
+  CKPTS=$WORK/out/runs/$r/step5000.pt DATA=$WORK/out/runs/dataset_v2 \
+  EVAL_ARGS="--val_set $WORK/out/valset_v1v2 --pocket_select site \
+             --per_row $WORK/out/per_row/$r.tsv" sbatch src/slurm/eval.sbatch
+done
+python src/paired_eval.py out/per_row/lad_p0_chemo.tsv out/per_row/v5_C_chemo_dataset_v2.tsv
+```
+The comparisons that answer the question: P0 -> P2 -> P3 within each row
+(does the pooling help?), and chemo vs learned atoms within each column
+(do the features?); the interaction is whether the column gaps grow
+left to right. Watch: s/step of typed_attn against pairs (estimated close),
+the learned branch's first ~1,000 steps (fresh weights, like chemo's), and
+cosdiff only as a collapse alarm.
+
 ## v7: soft PLIP labels + a heavier salience weight - WRITTEN, numpy part of `plip_loss.py selftest` PASSES, torch part untested
 
 Why: v6's salience BCE sits at its constant-prediction value (0.948 against

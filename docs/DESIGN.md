@@ -144,6 +144,34 @@ regions: low-probability patches, farthest-point seeded, sized like the pocket
 regions. In training the labelled pocket is currently `forced` in as the first
 positive region (see open decisions).
 
+### Learned atom typing and typed attention (the pooling ladder, 2026-10-30)
+
+Two additions to the protein encoder, both off by default. Each module's
+docstring has the full definition; the decisions:
+
+- **Atom features, not atom names.** `atom_features.py` describes each heavy
+  atom by 16 chemistry values. The (residue, atom name) pair is only a key
+  into its table: names alone are residue-relative (CG is aromatic in Phe,
+  aliphatic in Leu, a carboxyl carbon in Asp), and residue + name is
+  residue identity. 175 entries collapse to 30 descriptors; the
+  single-residue ones are chemically unique groups and histidine, which has
+  its own flag rather than fractional tautomer / charge values. Partial
+  charges are excluded on purpose: nearly unique per entry, so identity by
+  another name. Sequence order never enters, and protein-level memorisation
+  is controlled by the UniProt-disjoint split, not by input design.
+- **A second AtomNet, not a wider one.** Widening the pretrained AtomNet
+  would discard its weights; `chemnet` is dMaSIF's AtomNet architecture at
+  width 16 beside it, its outputs appended as input channels that the
+  inflation zero-pads. Burial is an atom feature because AtomNet sums over a
+  fixed 16 nearest atoms and cannot see density.
+- **Typed attention generalises pair pooling** (`pair_pool.TypedAttnPool`):
+  PairPool is the case of one head per type pair, one-hot gates, one fixed
+  bin and a constant value. Learned gates put capacity where retrieval wants
+  it instead of 36 equal type pairs; learned distance profiles per head;
+  partner descriptions instead of counts only. Sums, not softmax, so counts
+  survive; distances only, so rigid-motion invariant; the per-point heads
+  are PairPool's, so PLIP supervision and channel_viz work unchanged.
+
 ## Ligand encoder (`src/ligand_encoder.py`, `src/ligand_features.py`)
 
 Decision: **a small encoder trained from scratch, with fingerprint baselines as

@@ -36,10 +36,14 @@ import torch.nn.functional as F
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import atom_features  # noqa: E402
 import chemotype  # noqa: E402
 import dmasif_compat  # noqa: E402
 from anchors import pool_regions, pooled_width, select_regions  # noqa: E402
-from pair_pool import PairPool  # noqa: E402
+from pair_pool import PairPool, TypedAttnPool  # noqa: E402
+
+# pool modes whose pooling is a learned module, held as SurfaceEncoder.pair_pool
+LEARNED_POOLS = ("pairs", "typed_attn")
 
 DEFAULT_REPO = HERE.parent / "dMaSIF"
 
@@ -59,6 +63,12 @@ class EncoderConfig:
     # Pharmacophore channels (chemotype.py): composition, buriedness, proximity.
     # Off by default so every existing checkpoint and result is reproducible.
     chemo: bool = False
+    # Learned atom typing (atom_features.py): a second AtomNet-style branch
+    # over 16 per-atom chemistry values (element, hybridisation, H count,
+    # charge, donor / acceptor, polar carbon, backbone, histidine, burial),
+    # its 16 outputs appended as input channels after everything else. Needs
+    # P["atom_feats"] (SurfaceStore(atom_feats=True)). Off by default.
+    atom_feats: bool = False
     chemo_sigmas: tuple = (3.0, 6.0, 9.0)
     dropout: float = 0.0
     # (3) convolution; these match the published search checkpoint
@@ -107,7 +117,7 @@ class EncoderConfig:
     neg_exclusion: float = 4.0             # A; negatives keep off pocket regions
     neg_flat_quantile: float | None = None # e.g. 0.5: negative seeds on flatter half
     # (6) pooling and output
-    pool_mode: str = "mean"      # mean | mean_std | shells | pairs
+    pool_mode: str = "mean"      # mean | mean_std | shells | pairs | typed_attn
     n_shells: int = 3            # pool_mode "shells": radial shells per region
     # pool_mode "pairs" (pair_pool.PairPool): learned soft site types x types x
     # distance bins over each region - which kinds of site sit at what
@@ -121,6 +131,14 @@ class EncoderConfig:
     pair_rmax: float = 16.0
     pair_exclude: float = 2.0
     pair_feats: bool = True
+    # pool_mode "typed_attn" (pair_pool.TypedAttnPool): PairPool's per-point
+    # type / salience heads, then attn_heads learned heads, each a (from-type
+    # mix, to-type mix, distance profile over attn_bins Gaussians) with a
+    # v_dims partner description. Uses pair_types / pair_rmin / pair_rmax /
+    # pair_exclude / pair_feats as PairPool does.
+    attn_heads: int = 16
+    attn_vdim: int = 8
+    attn_bins: int = 12
     # Standardisation of the pooled vector before the projection. "none" is the
     # original path; "batch" is a BatchNorm1d over the batch's USABLE anchors,
     # which subtracts the per-feature mean the whole dataset shares. Worth
@@ -142,13 +160,15 @@ class EncoderConfig:
 
     @property
     def in_channels(self):
-        return 2 * len(self.curvature_scales) + self.atom_dims + self.chemo_dims
+        return (2 * len(self.curvature_scales) + self.atom_dims + self.chemo_dims
+                + (atom_features.DIMS if self.atom_feats else 0))
 
     @property
     def pooled_dims(self):
         """Width of a pooled region vector, which pool_mode decides."""
         return pooled_width(self.emb_dims + self.desc_dims, self.pool_mode,
-                            self.n_shells, self.pair_types, self.pair_bins)
+                            self.n_shells, self.pair_types, self.pair_bins,
+                            self.attn_heads, self.attn_vdim)
 
 
 def _mlp(i, h, o):
@@ -167,6 +187,12 @@ class SurfaceEncoder(nn.Module):
         args = SimpleNamespace(atom_dims=cfg.atom_dims)
         # Same attribute names as dMaSIF's model, so its checkpoint keys load as-is.
         self.atomnet = AtomNet_MP(args)
+        # The learned-typing branch: dMaSIF's own AtomNet architecture at
+        # width atom_features.DIMS, fresh weights (its name is not in the
+        # checkpoint, so load_pretrained leaves it alone). Only built when
+        # asked for, so every other encoder keeps exactly its state dict.
+        self.chemnet = (AtomNet_MP(SimpleNamespace(atom_dims=atom_features.DIMS))
+                        if cfg.atom_feats else None)
         self.orientation_scores = _mlp(I, cfg.orientation_units, 1)
         self.conv = dMaSIFConv_seg(args, in_channels=I, out_channels=E,
                                    n_layers=cfg.n_layers, radius=cfg.radius)
@@ -184,13 +210,20 @@ class SurfaceEncoder(nn.Module):
         # per-phase timing line
         self.last_select_sec = 0.0
         self.pocket_head = _mlp(E, cfg.head_hidden, 1)
-        # Only built for pool_mode "pairs", so every other encoder keeps exactly
-        # its original state dict.
-        self.pair_pool = (PairPool(E + cfg.desc_dims, I if cfg.pair_feats else 0,
-                                   n_types=cfg.pair_types, n_bins=cfg.pair_bins,
-                                   r_min=cfg.pair_rmin, r_max=cfg.pair_rmax,
-                                   exclude=cfg.pair_exclude)
-                          if cfg.pool_mode == "pairs" else None)
+        # Only built for the learned pool modes, so every other encoder keeps
+        # exactly its original state dict.
+        if cfg.pool_mode == "pairs":
+            self.pair_pool = PairPool(E + cfg.desc_dims, I if cfg.pair_feats else 0,
+                                      n_types=cfg.pair_types, n_bins=cfg.pair_bins,
+                                      r_min=cfg.pair_rmin, r_max=cfg.pair_rmax,
+                                      exclude=cfg.pair_exclude)
+        elif cfg.pool_mode == "typed_attn":
+            self.pair_pool = TypedAttnPool(
+                E + cfg.desc_dims, I if cfg.pair_feats else 0, n_types=cfg.pair_types,
+                n_heads=cfg.attn_heads, v_dims=cfg.attn_vdim, n_bins=cfg.attn_bins,
+                r_min=cfg.pair_rmin, r_max=cfg.pair_rmax, exclude=cfg.pair_exclude)
+        else:
+            self.pair_pool = None
         Pd = cfg.pooled_dims
         # named pool_norm, not anchor_norm: cfg.anchor_norm is the string that
         # chose it, and two attributes of one name would be a trap
@@ -213,7 +246,7 @@ class SurfaceEncoder(nn.Module):
 
     # ------------------------------------------------------------------ (2)
     def input_features(self, xyz, normals, batch, atom_xyz, atomtypes, batch_atoms,
-                       atom_groups=None, chemo=None):
+                       atom_groups=None, chemo=None, atom_feats=None):
         """-> (N, in_channels): curvatures, AtomNet chemistry, chemo channels.
 
         `chemo` lets a caller pass precomputed pharmacophore channels, since
@@ -238,6 +271,14 @@ class SurfaceEncoder(nn.Module):
                     xyz, batch, atom_xyz, atom_groups, batch_atoms,
                     sigmas=tuple(self.cfg.chemo_sigmas))
             parts.append(chemo.to(curv.dtype))
+        if self.chemnet is not None:
+            if atom_feats is None:
+                raise ValueError(
+                    "cfg.atom_feats is set but the batch carries no atom_feats; "
+                    "build the SurfaceStore with atom_feats=True (train.py "
+                    "--atom_feats) so the cache provides them")
+            parts.append(self.chemnet(xyz, atom_xyz, atom_feats.to(curv.dtype),
+                                      batch, batch_atoms))
         return torch.cat(parts, dim=1).contiguous()
 
     # ------------------------------------------------------------------ (6)
@@ -322,7 +363,8 @@ class SurfaceEncoder(nn.Module):
 
         feats = self.dropout(self.input_features(
             xyz, normals, batch, P["atom_xyz"], P["atomtypes"], P["batch_atoms"],
-            atom_groups=P.get("atom_groups"), chemo=P.get("chemo")))
+            atom_groups=P.get("atom_groups"), chemo=P.get("chemo"),
+            atom_feats=P.get("atom_feats")))
         weights = self.orientation_scores(feats)
         self.conv.load_mesh(xyz, normals=normals, weights=weights, batch=batch)
         emb = self.conv(feats)
@@ -419,7 +461,7 @@ def pool_region_vectors(c, pair_pool, emb, feats, w, regions, xyz):
     """One protein's regions -> (R, cfg.pooled_dims), by cfg.pool_mode. The
     one place a region becomes a vector, so the selector's anchors and the
     training loop's fallback anchor are pooled identically."""
-    if c.pool_mode == "pairs":
+    if c.pool_mode in LEARNED_POOLS:
         return pair_pool(emb, feats if c.pair_feats else None, w, regions, xyz)
     return pool_regions(emb, w, regions, mode=c.pool_mode, xyz=xyz,
                         n_shells=c.n_shells)
@@ -437,8 +479,8 @@ def select_and_pool(c, P, xyz, batch, feats, prob, pool_emb, forced=None,
     pool_weight, and select_sec. pair_pool: the encoder's PairPool, needed
     for pool_mode "pairs" (with `feats` when cfg.pair_feats).
     """
-    if c.pool_mode == "pairs" and pair_pool is None:
-        raise ValueError("pool_mode 'pairs' needs the encoder's pair_pool")
+    if c.pool_mode in LEARNED_POOLS and pair_pool is None:
+        raise ValueError(f"pool_mode {c.pool_mode!r} needs the encoder's pair_pool")
     if c.region_source not in REGION_SOURCES:
         raise ValueError(f"unknown region_source {c.region_source!r}; expected "
                          f"one of {REGION_SOURCES}")

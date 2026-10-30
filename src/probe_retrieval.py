@@ -453,13 +453,15 @@ def info_nce(scores, mask):
     return 0.5 * (F.cross_entropy(s, target) + F.cross_entropy(s.T, target))
 
 
-def retrieval_metrics(scores, mask, ks=(1, 5, 10)):
+def retrieval_metrics(scores, mask, ks=(1, 5, 10), ranks=False):
     """Rank of each query's true partner among its unmasked candidates.
 
     scores (Q, C) with the answer to query q on the diagonal. Ties count as
     better, so the reported rank is the pessimistic one. `chance` is the exact
     expected MRR of a random ranking over the same candidate counts, which is
-    the only honest floor when the candidate set is small.
+    the only honest floor when the candidate set is small. ranks=True adds
+    "rank" and "n_cand", the (Q,) per-query tensors, for a paired comparison
+    (train.py eval --per_row).
     """
     import torch
 
@@ -478,6 +480,8 @@ def retrieval_metrics(scores, mask, ks=(1, 5, 10)):
            "chance": float((harmonic / n_cand).mean())}
     for k in ks:
         out[f"top{k}"] = float((rank <= k).float().mean())
+    if ranks:
+        out["rank"], out["n_cand"] = rank, n_cand
     return out
 
 

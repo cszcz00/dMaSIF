@@ -138,6 +138,10 @@ def build_model(a, device):
         pair_rmin=getattr(a, "pair_rmin", 3.0), pair_rmax=getattr(a, "pair_rmax", 16.0),
         pair_exclude=getattr(a, "pair_exclude", 2.0),
         pair_feats=getattr(a, "pair_feats", True),
+        # getattr: checkpoints from before typed attention / atom features
+        attn_heads=getattr(a, "attn_heads", 16), attn_vdim=getattr(a, "attn_vdim", 8),
+        attn_bins=getattr(a, "attn_bins", 12),
+        atom_feats=getattr(a, "atom_feats", False),
         # getattr: checkpoints saved before the descriptor branch existed have
         # no such args, and load_model_from_ckpt rebuilds from saved args
         desc_dims=getattr(a, "desc_dims", 0), desc_layers=getattr(a, "desc_layers", 3),
@@ -724,8 +728,12 @@ def site_rate(sim, label, usable, site_mode):
     return rate, float(rows.float().mean())
 
 
-def evaluate(model, store, labels, table, rows, ligands, a, device):
-    """Retrieval + pocket + anchor-spread metrics over `rows`."""
+def evaluate(model, store, labels, table, rows, ligands, a, device, per_row=None):
+    """Retrieval + pocket + anchor-spread metrics over `rows`.
+
+    per_row: a list to extend with one dict per scored row (row index,
+    system_id, group, ligand -> protein rank, candidates), for a paired
+    comparison of two checkpoints on the same rows (src/paired_eval.py)."""
     import torch
 
     from probe_retrieval import anchor_spread, retrieval_metrics
@@ -758,7 +766,15 @@ def evaluate(model, store, labels, table, rows, ligands, a, device):
         lig = encode_ligands(model, ligands, table.fp_row[rows], device)
         scores = model.scores(anchors, usable, lig)
         mask = pair_mask(table, rows, ligands, device, a.tanimoto)
-        met = retrieval_metrics(scores.T.cpu(), mask.cpu())      # ligand -> protein
+        met = retrieval_metrics(scores.T.cpu(), mask.cpu(),      # ligand -> protein
+                                ranks=per_row is not None)
+        if per_row is not None:
+            rk, nc = met.pop("rank"), met.pop("n_cand")
+            for j, i in enumerate(rows):
+                r = table.rows[int(i)]
+                per_row.append({"row": int(i), "system_id": r.get("system_id", ""),
+                                "group": table.group[int(i)], "rank": int(rk[j]),
+                                "n_cand": int(nc[j])})
         p2l = retrieval_metrics(scores.cpu(), mask.cpu())        # protein -> ligand
         met["p2l_mrr"], met["p2l_top1"] = p2l["mrr"], p2l["top1"]
 
@@ -967,7 +983,7 @@ def train(a):
         # heads, and the row's SITE region to put the labels on.
         if model.encoder.pair_pool is None:
             raise SystemExit("--lam_plip_* supervises pair pooling's heads: "
-                             "needs --pool_mode pairs")
+                             "needs --pool_mode pairs or typed_attn")
         if enc_cfg.region_source != "external" or a.pocket_select != "site":
             raise SystemExit("--lam_plip_* puts PLIP labels on the row's site "
                              "region: needs --region_source external --pocket_select site")
@@ -992,10 +1008,12 @@ def train(a):
     # expensive thing, so the two sets get their own residency.
     store = SurfaceStore(a.surface_cache, ram=a.surface_ram, device=device,
                          keep_hydrogens=a.keep_hydrogens,
-                         pockets=pocket_source(a, enc_cfg))
+                         pockets=pocket_source(a, enc_cfg),
+                         atom_feats=enc_cfg.atom_feats)
     val_store = SurfaceStore(a.surface_cache, ram=a.val_ram, device=device,
                              keep_hydrogens=a.keep_hydrogens,
-                             pockets=pocket_source(a, enc_cfg))
+                             pockets=pocket_source(a, enc_cfg),
+                             atom_feats=enc_cfg.atom_feats)
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram,
                         plip=a.plip if plip_on else None,
                         plip_soft=getattr(a, "plip_soft", 0.0))
@@ -1147,6 +1165,8 @@ def train(a):
            "top10", "site", "AUROC", "AP", "fb", "cosdiff", "tau")
     print("".join(f"{h:>8s}" for h in hdr), flush=True)
 
+    keep_steps = {int(x) for x in str(getattr(a, "keep_steps", "") or "").split(",")
+                  if x.strip()}
     for step in range(step0, a.steps + 1):
         due = (step % a.eval_every == 0) or step == a.steps
         if due:
@@ -1192,6 +1212,11 @@ def train(a):
                           a, enc_cfg, lig_cfg, history, pos_neg)
         if step and (step % a.save_every == 0 or step == a.steps):
             save_ckpt(out / "last.pt", model, opt, step, (train_rows, val_rows),
+                      a, enc_cfg, lig_cfg, history, pos_neg)
+        if step and step in keep_steps:
+            # a checkpoint that later saves do not overwrite, so runs of
+            # different lengths can be compared row by row at the same step
+            save_ckpt(out / f"step{step}.pt", model, opt, step, (train_rows, val_rows),
                       a, enc_cfg, lig_cfg, history, pos_neg)
         if step == a.steps:
             break
@@ -1329,7 +1354,8 @@ def evaluate_only(a):
             setattr(a, k, getattr(saved, k, None) or v)
     store = SurfaceStore(a.surface_cache, ram=a.surface_ram, device=a.device,
                          keep_hydrogens=saved.keep_hydrogens,
-                         pockets=pocket_source(a, model.encoder.cfg))
+                         pockets=pocket_source(a, model.encoder.cfg),
+                         atom_feats=model.encoder.cfg.atom_feats)
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
     if sum(bool(x) for x in (a.use_ckpt_split, a.recarve, getattr(a, "val_set", ""))) > 1:
         raise SystemExit("--use_ckpt_split, --recarve and --val_set are alternatives")
@@ -1383,7 +1409,21 @@ def evaluate_only(a):
               "indices are being clipped, so this is a different table")
     ligands.set_scaler(table.fp_row[tr])
     print(f"{a.ckpt}: step {ckpt['step']}; evaluating {len(rows)} rows")
-    met = evaluate(model, store, labels, table, rows, ligands, a, a.device)
+    per_row = [] if getattr(a, "per_row", "") else None
+    met = evaluate(model, store, labels, table, rows, ligands, a, a.device,
+                   per_row=per_row)
+    if per_row is not None:
+        # One line per scored row, tab-separated, for src/paired_eval.py. Rows
+        # with no usable anchor are not scored and so not written; paired_eval
+        # pairs on the rows both files have and says how many it dropped.
+        out = Path(a.per_row)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cols = ("row", "system_id", "group", "rank", "n_cand")
+        with open(out, "w") as fh:
+            fh.write(f"# {a.ckpt} step {ckpt['step']}\n" + "\t".join(cols) + "\n")
+            for d in per_row:
+                fh.write("\t".join(str(d[c]) for c in cols) + "\n")
+        print(f"per-row ranks: {len(per_row)} rows -> {out}")
     for k in sorted(met):
         v = met[k]
         print(f"  {k:16s} {v:.4f}" if isinstance(v, float) else f"  {k:16s} {v}")
@@ -1398,8 +1438,12 @@ def cache(a):
 
     table = ItemTable(read_items(a.items, a.limit))
     model, _, _ = build_model(a, a.device)
+    # --atom_feats: also give every cached surface its atom_features (an
+    # existing surface is kept and only the atoms re-parsed), so a learned-
+    # typing run does not pay for it on its first epoch.
     store = SurfaceStore(a.surface_cache, ram=1, device=a.device,
-                         keep_hydrogens=a.keep_hydrogens)
+                         keep_hydrogens=a.keep_hydrogens,
+                         atom_feats=getattr(a, "atom_feats", False))
     # One row per surface, in a fixed order, so shards are disjoint and a rerun
     # of shard i covers exactly the same receptors.
     firsts = sorted(table.siblings.items())
@@ -1527,7 +1571,8 @@ def add_model_args(p):
                    help="add chemotype.py's 12 pharmacophore channels")
     p.add_argument("--pool_mode", default="mean",
                    help="mean | mean_std | shells (anchors.pool_regions) | pairs "
-                        "(pair_pool.PairPool: site types x distance bins)")
+                        "(pair_pool.PairPool: site types x distance bins) | "
+                        "typed_attn (pair_pool.TypedAttnPool: learned typed heads)")
     p.add_argument("--n_shells", type=int, default=3)
     p.add_argument("--pair_types", type=int, default=8,
                    help="pool_mode pairs: learned soft site types")
@@ -1537,6 +1582,15 @@ def add_model_args(p):
     p.add_argument("--pair_rmax", type=float, default=16.0)
     p.add_argument("--pair_exclude", type=float, default=2.0,
                    help="A; closer point pairs are one atom's own cluster")
+    p.add_argument("--attn_heads", type=int, default=16,
+                   help="pool_mode typed_attn: learned heads (pair_pool.TypedAttnPool)")
+    p.add_argument("--attn_vdim", type=int, default=8,
+                   help="pool_mode typed_attn: partner-description width per head")
+    p.add_argument("--attn_bins", type=int, default=12,
+                   help="pool_mode typed_attn: Gaussians in each head's distance profile")
+    p.add_argument("--atom_feats", action="store_true",
+                   help="learned atom typing: a second AtomNet over atom_features.py's "
+                        "16 per-atom chemistry values, 16 more input channels")
     p.add_argument("--no_pair_feats", dest="pair_feats", action="store_false",
                    help="type head reads the conv embedding only, not also the "
                         "raw input channels")
@@ -1680,6 +1734,9 @@ def main():
     p.add_argument("--split_seed", type=int, default=0)
     p.add_argument("--eval_every", type=int, default=500)
     p.add_argument("--save_every", type=int, default=500)
+    p.add_argument("--keep_steps", default="",
+                   help="comma-separated steps to also checkpoint as step<N>.pt, "
+                        "never overwritten (paired comparisons at matched steps)")
     p.add_argument("--max_hours", type=float, default=0.0,
                    help="stop cleanly and checkpoint after this long")
     p.add_argument("--resume", default="", help="checkpoint to resume from")
@@ -1702,6 +1759,9 @@ def main():
                    help="then subsample to this many rows (0 = all)")
     p.add_argument("--val_balance", action="store_true",
                    help="subsample round-robin over target groups")
+    p.add_argument("--per_row", default="",
+                   help="also write each scored row's ligand -> protein rank to "
+                        "this TSV, for src/paired_eval.py")
 
     p = sub.add_parser("selftest", help="planted signal; no data, no GPU, no KeOps")
     p.add_argument("--tmp", default="tmp/train_selftest")

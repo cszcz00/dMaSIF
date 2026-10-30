@@ -59,7 +59,7 @@
 # scores. The `site` column then reads "own pocket above every decoy".
 #
 # Overrides here: LAM_PLIP / LAM_PLIP_SAL / LAM_PLIP_TYPE / PLIP_SOFT / PLIP
-#   (PLIP supervision, below),
+#   (PLIP supervision, below), ATOM_FEATS (learned atom typing, below),
 #   POCKETS, POCKET_SHAPE, POCKET_MARGIN, PAIR_ARGS (e.g.
 #   "--pair_types 12 --pair_bins 10"), DECOYS, POCKET_RANK, plus everything
 #   train.sbatch takes (TAU_MIN among them).
@@ -104,6 +104,16 @@ if [ -n "${LAM_PLIP:-}" ] && [ "$LAM_PLIP" != 0 ]; then
     export REGION_ARGS="$REGION_ARGS --plip ${PLIP:-$WORK/data/plip} \
 --lam_plip_sal ${LAM_PLIP_SAL:-$LAM_PLIP} --lam_plip_type ${LAM_PLIP_TYPE:-$LAM_PLIP} \
 ${PLIP_SOFT:+--plip_soft $PLIP_SOFT}"
+fi
+# Learned atom typing (atom_features.py; off unless ATOM_FEATS is set): a
+# second AtomNet over 16 per-atom chemistry values, 16 more input channels.
+# The surface cache needs atom_feats first - ATOM_FEATS=1 sbatch
+# src/slurm/cache_surfaces.sbatch adds them in place - or the run adds them
+# lazily, re-parsing each receptor on its first read. Typed attention is
+# POOL_MODE=typed_attn; its sizes go in PAIR_ARGS ("--attn_heads 16
+# --attn_vdim 8 --attn_bins 12" are the defaults).
+if [ -n "${ATOM_FEATS:-}" ] && [ "$ATOM_FEATS" != 0 ]; then
+    export REGION_ARGS="$REGION_ARGS --atom_feats"
 fi
 export TRAIN_ARGS=${TRAIN_ARGS:-"--eval_every 125 --save_every 125"}
 exec bash $WORK/src/slurm/train.sbatch
