@@ -3,9 +3,9 @@
 One real items.tsv row, five panels left to right:
 
   1  the complex: receptor atoms with the ligand in place (whole protein; the
-     dashed box is the window panels 2, 4 and 5 zoom into)
+     dashed box is the window panels 2 and 4 zoom into, sized to the ligand)
   2  fpocket's alpha spheres; the pocket(s) at the ligand's site in orange,
-     every other pocket fpocket found in grey
+     the centres of every other pocket fpocket found as blue dots
   3  the split: the receptor as 3D atoms, the ligand as a 2D graph - the two
      inputs the two encoders see
   4  dMaSIF's sampled surface over the site pocket's alpha spheres; the points
@@ -49,7 +49,7 @@ sys.path.insert(0, str(HERE.parent / "src"))
 GREY = "#b9bec6"           # receptor atoms
 POCKET_COLOR = "#d1495b"   # the site region (as in contrastive_fig / structview)
 SITE_SPHERE = "#e0a030"    # fpocket's site pocket
-OTHER_SPHERE = "#9db4d0"   # fpocket's other pockets
+OTHER_SPHERE = "#4f78b0"   # centres of fpocket's other pockets
 SURF_GREY = "#c9ced6"
 ATOM_A, POINT_A = 3.4, 1.0
 
@@ -125,18 +125,31 @@ def ligand_3d(ax, cam, lig, z=5):
     ax.scatter(p[:, 0], p[:, 1], s=max(0.55 * k, 1.5) ** 2, c="black", zorder=z + 1)
 
 
-def spheres(ax, cam, xyz, r, color, alpha, z):
-    """Alpha spheres at their true radii, back to front."""
+def spheres(ax, cam, xyz, r, color, face=0.07, edge=0.45, z=3):
+    """Alpha spheres at their true radii, as faint bubbles: a pocket has
+    dozens to hundreds, so opaque discs merge into one block, while a faint
+    face with a coloured outline shows the cluster's shape and density."""
     from matplotlib.collections import PatchCollection
+    from matplotlib.colors import to_rgba
     from matplotlib.patches import Circle
 
     if not len(xyz):
         return
     p = cam(xyz)
     o = np.argsort(p[:, 2])
-    pc = PatchCollection([Circle(p[i, :2], r[i]) for i in o], facecolor=color,
-                         edgecolor=(0, 0, 0, 0.25), linewidth=0.3, alpha=alpha, zorder=z)
+    pc = PatchCollection([Circle(p[i, :2], r[i]) for i in o],
+                         facecolor=to_rgba(color, face), edgecolor=to_rgba(color, edge),
+                         linewidth=0.5, zorder=z)
     ax.add_collection(pc)
+
+
+def centres(ax, cam, xyz, color, diam_a=0.8, z=4):
+    """Alpha-sphere centres as small dots: where fpocket's void is."""
+    if not len(xyz):
+        return
+    p = cam(xyz)
+    ax.scatter(p[:, 0], p[:, 1], s=max(diam_a * pt_per_a(ax), 1.0) ** 2, c=color,
+               linewidths=0, zorder=z)
 
 
 def site_info(surf, pk, lig):
@@ -148,7 +161,8 @@ def site_info(surf, pk, lig):
     return ids, (np.zeros(0, np.int64) if region is None else region)
 
 
-def draw(row, out, root=".", window=12.0, normal_a=2.5, tilt=60.0, title=None):
+def draw(row, out, root=".", window=10.0, normal_a=1.6, tilt=35.0, max_normals=250,
+         title=None):
     import matplotlib.pyplot as plt
     from matplotlib.patches import FancyArrowPatch, Rectangle
 
@@ -168,10 +182,12 @@ def draw(row, out, root=".", window=12.0, normal_a=2.5, tilt=60.0, title=None):
         print("  fpocket found no pocket at this ligand: panels 4-5 will be empty "
               "(training falls back to a ball here); try another row")
 
+    # the zoom fits the ligand: at least `window`, else its extent + 6 A
+    win = max(window, np.ptp(L[:, :2], axis=0).max() / 2 + 6.0)
     # window panels: drop what sits in front of the pocket opening, so the
     # zoomed views look into the site rather than at a wall
     front = lambda q: q[:, 2] <= c[2] + 4.0
-    near = lambda q: (np.abs(q[:, :2] - c[:2]) <= window * 1.15).all(1)
+    near = lambda q: (np.abs(q[:, :2] - c[:2]) <= win * 1.15).all(1)
 
     W, H, gap = 3.2, 3.2, 0.55
     fig = plt.figure(figsize=(5 * W + 4 * gap, H + 0.9))
@@ -186,37 +202,42 @@ def draw(row, out, root=".", window=12.0, normal_a=2.5, tilt=60.0, title=None):
     frame(a1, P[:, :2].min(0) + np.ptp(P[:, :2], axis=0) / 2, half)
     discs(a1, P, GREY, ATOM_A)
     ligand_3d(a1, cam, lig)
-    a1.add_patch(Rectangle(c[:2] - window, 2 * window, 2 * window, fill=False,
+    a1.add_patch(Rectangle(c[:2] - win, 2 * win, 2 * win, fill=False,
                            ls="--", lw=1, ec="#555", zorder=10))
 
     # 2 alpha spheres at the site window
-    frame(a2, c, window)
+    frame(a2, c, win)
     m = near(P) & front(P)
-    discs(a2, P[m], GREY, ATOM_A, alpha=0.35, edge=0.1)
+    discs(a2, P[m], GREY, ATOM_A, alpha=0.5, edge=0.1)
     site = np.isin(pk["sphere_pocket"], ids)
     other = ~site & near(cam(pk["sphere_xyz"]))
-    spheres(a2, cam, pk["sphere_xyz"][other], pk["sphere_r"][other], OTHER_SPHERE, 0.35, 3)
-    spheres(a2, cam, pk["sphere_xyz"][site], pk["sphere_r"][site], SITE_SPHERE, 0.45, 4)
+    # other pockets: centres only, so they mark fpocket's other voids without
+    # drowning the site
+    centres(a2, cam, pk["sphere_xyz"][other], OTHER_SPHERE, 0.9, z=3)
+    spheres(a2, cam, pk["sphere_xyz"][site], pk["sphere_r"][site], SITE_SPHERE, z=4)
+    centres(a2, cam, pk["sphere_xyz"][site], "#b5791a", 0.7, z=5)
     ligand_3d(a2, cam, lig, z=6)
 
     # 3 split: receptor atoms (top) + ligand graph (bottom)
     a3.axis("off")
     pos = a3.get_position()
-    top = fig.add_axes([pos.x0, pos.y0 + pos.height * 0.47, pos.width, pos.height * 0.53])
-    bot = fig.add_axes([pos.x0, pos.y0, pos.width, pos.height * 0.42])
+    top = fig.add_axes([pos.x0, pos.y0 + pos.height * 0.5, pos.width, pos.height * 0.5])
+    bot = fig.add_axes([pos.x0, pos.y0, pos.width, pos.height * 0.44])
     frame(top, P[:, :2].min(0) + np.ptp(P[:, :2], axis=0) / 2, half)
     discs(top, P, GREY, ATOM_A)
-    bot.imshow(ligand_image(row.smiles, px=600, bond_px=40))
+    # one ligand here, so scale it to fill the box (-1: no fixed bond length)
+    bot.imshow(ligand_image(row.smiles, px=600, bond_px=-1))
     bot.axis("off")
-    a3.text(0.5, 0.455, "+", ha="center", va="center", fontsize=18, color="#555",
+    a3.text(0.5, 0.47, "+", ha="center", va="center", fontsize=18, color="#555",
             transform=a3.transAxes)
 
     # 4 surface samples over the site pocket
-    frame(a4, c, window)
+    frame(a4, c, win)
     ms = near(S) & front(S)
     in_site = np.zeros(len(S), bool)
     in_site[region] = True
-    spheres(a4, cam, pk["sphere_xyz"][site], pk["sphere_r"][site], SITE_SPHERE, 0.18, 2)
+    spheres(a4, cam, pk["sphere_xyz"][site], pk["sphere_r"][site], SITE_SPHERE,
+            face=0.05, edge=0.3, z=2)
     discs(a4, S[ms & ~in_site], SURF_GREY, POINT_A, edge=0.15, z=3)
     discs(a4, S[ms & in_site], POCKET_COLOR, POINT_A, edge=0.15, z=4)
 
@@ -228,21 +249,23 @@ def draw(row, out, root=".", window=12.0, normal_a=2.5, tilt=60.0, title=None):
         tips = np.vstack([R, R + normal_a * Nr])[:, :2]
         frame(a5, tips.min(0) + np.ptp(tips, axis=0) / 2, np.ptp(tips, axis=0).max() / 2 * 1.15)
     else:
-        frame(a5, c, window)
+        frame(a5, c, win)
     if len(R):
-        o = np.argsort(R[:, 2])
+        # every point drawn, normals on an even subsample: hundreds of
+        # crossing sticks read as hatching, not as a surface's orientation
         tip = R + normal_a * Nr
-        for i in o:
+        pick = np.random.default_rng(0).permutation(len(R))[:max_normals]
+        for i in pick[np.argsort(R[pick, 2])]:
             a5.plot([R[i, 0], tip[i, 0]], [R[i, 1], tip[i, 1]], color="#7a2230",
-                    lw=0.8, alpha=0.9, zorder=5)
+                    lw=0.6, alpha=0.75, zorder=5, solid_capstyle="round")
         # smaller than panel 4's 1 A: this panel is zoomed in, and the
         # normals are the point of it
-        discs(a5, R, POCKET_COLOR, 0.5 * POINT_A, edge=0.15, z=4)
+        discs(a5, R, POCKET_COLOR, 0.6 * POINT_A, edge=0.15, z=4)
 
     titles = ["1  Protein–ligand complex", "2  fpocket alpha spheres",
               "3  Receptor + ligand graph", "4  dMaSIF surface samples",
               "5  Pocket surface points"]
-    subs = ["receptor atoms, ligand in place", "site pocket orange, others grey",
+    subs = ["receptor atoms, ligand in place", "site pocket orange, other pockets' centres blue",
             "the two encoders' inputs", f"site region red ({len(region)} points)",
             f"position + normal (tilted {tilt:g}°) → encoded, pooled"]
     for ax, t, s in zip(axes, titles, subs):
@@ -272,9 +295,11 @@ def main():
     ap.add_argument("--subset", required=True, help="a subset (or items) TSV")
     ap.add_argument("--row", default="0", help="row number, or a system_id")
     ap.add_argument("--out", default="plots/output/pipeline")
-    ap.add_argument("--window", type=float, default=12.0,
-                    help="half-width in A of the zoomed panels around the ligand")
-    ap.add_argument("--tilt", type=float, default=60.0,
+    ap.add_argument("--window", type=float, default=10.0,
+                    help="minimum half-width in A of the zoomed panels (grows to fit the ligand)")
+    ap.add_argument("--max_normals", type=int, default=250,
+                    help="panel 5 draws normals on at most this many points")
+    ap.add_argument("--tilt", type=float, default=35.0,
                     help="degrees panel 5's camera is tilted, to show the normals")
     ap.add_argument("--title", default="")
     a = ap.parse_args()
@@ -282,7 +307,8 @@ def main():
     from structview import load_row
 
     row = load_row(a.subset, int(a.row) if a.row.isdigit() else a.row)
-    draw(row, a.out, window=a.window, tilt=a.tilt, title=a.title or None)
+    draw(row, a.out, window=a.window, tilt=a.tilt, max_normals=a.max_normals,
+         title=a.title or None)
 
 
 if __name__ == "__main__":
