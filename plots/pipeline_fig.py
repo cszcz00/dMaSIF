@@ -113,16 +113,16 @@ def discs(ax, p, color, diam_a, shade=True, alpha=1.0, edge=0.25, z=1):
                edgecolors=(0, 0, 0, edge), linewidths=0.3, zorder=z)
 
 
-def ligand_3d(ax, cam, lig, z=5):
+def ligand_3d(ax, cam, lig, z=5, ball_a=0.55, bond_a=0.3):
     """Black ball-and-stick, drawn over the protein (it sits in the pocket
-    opening, which faces the viewer)."""
+    opening, which faces the viewer). ball_a / bond_a: sizes in A."""
     p = cam(lig["xyz"])
     k = pt_per_a(ax)
-    lw = float(np.clip(0.3 * k, 0.6, 2.2))                       # ~0.3 A bonds
+    lw = float(np.clip(bond_a * k, 0.6, 2.2))
     for i, j in lig["bonds"]:
         ax.plot(p[[i, j], 0], p[[i, j], 1], color="black", lw=lw, zorder=z,
                 solid_capstyle="round")
-    ax.scatter(p[:, 0], p[:, 1], s=max(0.55 * k, 1.5) ** 2, c="black", zorder=z + 1)
+    ax.scatter(p[:, 0], p[:, 1], s=max(ball_a * k, 1.5) ** 2, c="black", zorder=z + 1)
 
 
 def spheres(ax, cam, xyz, r, color, face=0.07, edge=0.45, z=3):
