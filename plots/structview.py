@@ -10,6 +10,7 @@ loader is not reused because importing it pulls in torch and torch_geometric.
     surf = load_surface(row)       # data/surfaces/<input_id>.npz
     fig_atoms(rec, lig).show()
     fig_surface(surf, lig).show()
+    fig_mesh(surf, lig).show()     # the same points, triangulated and shaded
 
 Coordinates are all in the deposited frame (nothing is centred when a surface
 is cached), so the three overlay without any alignment.
@@ -17,10 +18,14 @@ is cached), so the three overlay without any alignment.
 Depends on: numpy, pandas, biopython, rdkit, plotly.
 """
 
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# src/ for channel_viz's mesher (numpy only at import, so the venv is enough)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 # CPK-ish, readable on white
 ELEMENT_COLORS = {"C": "#909090", "N": "#3050f8", "O": "#ff0d0d", "S": "#e6c228",
@@ -30,6 +35,8 @@ LIGAND_CARBON = "#2fb36b"      # ligand carbons, for lig_color="element"
 LIGAND_COLOR = "black"         # default: the whole ligand one colour
 LIGAND_SIZE = 4                # ligand ball size (receptor atoms are 3, surface 2.5)
 POCKET_A = 4.0                 # the repo's pocket label: surface within 4 A of the ligand
+# distance colouring: red at the ligand (the pocket red), orange at 4 A, pale blue far
+DISTANCE_SCALE = [[0, "#d1495b"], [POCKET_A / 12, "#f2a65a"], [1, "#c9d6e8"]]
 
 
 def load_row(table, i=0):
@@ -191,8 +198,7 @@ def fig_surface(surf, lig, radius=None, color="distance", title=None,
         # near = the pocket red of color="pocket", far = pale blue, so the
         # ligand stays visible against the points around it
         marker = dict(size=2.5, color=np.minimum(d, 12.0),
-                      colorscale=[[0, "#d1495b"], [POCKET_A / 12, "#f2a65a"],
-                                  [1, "#c9d6e8"]],
+                      colorscale=DISTANCE_SCALE,
                       cmin=0, cmax=12, colorbar=dict(title="Å to ligand", x=0.92))
         name = f"surface ({m.sum()} points)"
     pts = go.Scatter3d(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2], mode="markers",
@@ -200,3 +206,57 @@ def fig_surface(surf, lig, radius=None, color="distance", title=None,
                        hoverinfo="text")
     fig = go.Figure([pts] + _ligand_traces(lig, lig_color, lig_size))
     return _layout(fig, title or f"sampled surface + ligand  {lig['smiles']}")
+
+
+
+def mesh(surf, h=0.5, sigma=1.0):
+    """Triangulate the sampled points -> (vertices, triangles).
+
+    channel_viz.mesh_surface: a signed distance from the oriented points
+    (dMaSIF's outward normals) on an h-A grid, surface nets on its zero level,
+    trimmed to within 2 A of a sample. Between two pocket walls both normals
+    point into the cleft, so no sheet is drawn through the ligand. Smaller h
+    is smoother and slower (0.5: a few seconds for a typical receptor).
+    """
+    from channel_viz import mesh_surface
+
+    return mesh_surface(surf["xyz"].astype(np.float64),
+                        surf["normals"].astype(np.float64), h=h, sigma=sigma)
+
+
+def fig_mesh(surf, lig, radius=None, color="distance", title=None,
+             lig_color=LIGAND_COLOR, lig_size=LIGAND_SIZE, h=0.5, mesh_vt=None,
+             opacity=1.0):
+    """The sampled surface as a smooth shaded mesh, with the ligand in its pocket.
+
+    color: "distance" (red at the ligand -> pale blue at 12 A), "pocket"
+    (the 4 A label), or any plotly colour for a plain surface.
+    radius: keep only the mesh within this many A of the ligand.
+    mesh_vt: a (vertices, triangles) from mesh(), to restyle without re-meshing.
+    opacity < 1 shows the ligand through the surface when it is buried.
+    """
+    import plotly.graph_objects as go
+
+    from channel_viz import _subset
+
+    V, T = mesh_vt if mesh_vt is not None else mesh(surf, h)
+    if radius is not None:
+        V, T = _subset(V, T, crop(V, lig, radius))
+    d = min_dist(V.astype(np.float32), lig["xyz"])
+    style = dict(flatshading=False, opacity=opacity,
+                 lighting=dict(ambient=0.45, diffuse=0.8, specular=0.25,
+                               roughness=0.6, fresnel=0.1),
+                 lightposition=dict(x=1000, y=1000, z=2000))
+    if color == "distance":
+        style.update(intensity=np.minimum(d, 12.0), cmin=0, cmax=12,
+                     colorscale=DISTANCE_SCALE, colorbar=dict(title="Å to ligand", x=0.92))
+    elif color == "pocket":
+        style.update(intensity=(d <= POCKET_A).astype(float), cmin=0, cmax=1,
+                     colorscale=[[0, "#9db4d0"], [1, "#d1495b"]], showscale=False)
+    else:
+        style.update(color=color)
+    surf_tr = go.Mesh3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], i=T[:, 0], j=T[:, 1], k=T[:, 2],
+                        name=f"surface mesh ({len(T)} triangles)", showlegend=True,
+                        hoverinfo="skip", **style)
+    fig = go.Figure([surf_tr] + _ligand_traces(lig, lig_color, lig_size))
+    return _layout(fig, title or f"surface + ligand  {lig['smiles']}")
