@@ -26,7 +26,9 @@ import pandas as pd
 ELEMENT_COLORS = {"C": "#909090", "N": "#3050f8", "O": "#ff0d0d", "S": "#e6c228",
                   "P": "#ff8000", "SE": "#ffa100", "H": "#dddddd", "F": "#90e050",
                   "CL": "#1ff01f", "BR": "#a62929", "I": "#940094", "FE": "#e06633"}
-LIGAND_CARBON = "#2fb36b"      # ligand carbons green, so it stands out from the protein
+LIGAND_CARBON = "#2fb36b"      # ligand carbons, for lig_color="element"
+LIGAND_COLOR = "black"         # default: the whole ligand one colour
+LIGAND_SIZE = 4                # ligand ball size (receptor atoms are 3, surface 2.5)
 POCKET_A = 4.0                 # the repo's pocket label: surface within 4 A of the ligand
 
 
@@ -109,7 +111,8 @@ def min_dist(points, ref):
     return out
 
 
-def _ligand_traces(lig, size=7):
+def _ligand_traces(lig, color=LIGAND_COLOR, size=LIGAND_SIZE):
+    """Ball-and-stick: one colour, or color="element" for green carbons + CPK."""
     import plotly.graph_objects as go
 
     xyz = lig["xyz"]
@@ -118,15 +121,18 @@ def _ligand_traces(lig, size=7):
         ex += [xyz[i, 0], xyz[j, 0], None]
         ey += [xyz[i, 1], xyz[j, 1], None]
         ez += [xyz[i, 2], xyz[j, 2], None]
-    colors = [LIGAND_CARBON if e == "C" else ELEMENT_COLORS.get(e, "#ff69b4")
-              for e in lig["element"]]
+    if color == "element":
+        colors, bond = [LIGAND_CARBON if e == "C" else ELEMENT_COLORS.get(e, "#ff69b4")
+                        for e in lig["element"]], "#1d7a47"
+    else:
+        colors, bond = color, color
     return [go.Scatter3d(x=ex, y=ey, z=ez, mode="lines", name="ligand bonds",
-                         line=dict(color="#1d7a47", width=6), hoverinfo="skip",
+                         line=dict(color=bond, width=5), hoverinfo="skip",
                          showlegend=False),
             go.Scatter3d(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2], mode="markers",
                          name="ligand", text=lig["element"],
                          marker=dict(size=size, color=colors,
-                                     line=dict(color="black", width=1)))]
+                                     line=dict(color="black", width=0.5)))]
 
 
 def _layout(fig, title):
@@ -144,11 +150,13 @@ def crop(xyz, lig, radius):
     return min_dist(xyz, lig["xyz"]) <= radius
 
 
-def fig_atoms(rec, lig, radius=None, title=None):
+def fig_atoms(rec, lig, radius=None, title=None, lig_color=LIGAND_COLOR,
+              lig_size=LIGAND_SIZE):
     """Receptor heavy atoms by element, ligand as ball-and-stick.
 
     radius: show only receptor atoms within this many A of the ligand
     (e.g. 12 for the binding site); None shows the whole protein.
+    lig_color: any plotly colour, or "element"; lig_size: ball size.
     """
     import plotly.graph_objects as go
 
@@ -158,16 +166,17 @@ def fig_atoms(rec, lig, radius=None, title=None):
     prot = go.Scatter3d(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2], mode="markers",
                         name=f"receptor ({m.sum()} atoms)", text=rec["label"][m],
                         marker=dict(size=3, color=colors, opacity=0.6))
-    fig = go.Figure([prot] + _ligand_traces(lig))
+    fig = go.Figure([prot] + _ligand_traces(lig, lig_color, lig_size))
     return _layout(fig, title or f"receptor + ligand  {lig['smiles']}")
 
 
-def fig_surface(surf, lig, radius=None, color="distance", title=None):
+def fig_surface(surf, lig, radius=None, color="distance", title=None,
+                lig_color=LIGAND_COLOR, lig_size=LIGAND_SIZE):
     """dMaSIF's sampled surface points with the ligand.
 
     color: "distance" (to the nearest ligand atom, capped at 12 A), or
            "pocket" (within POCKET_A of the ligand = the repo's pocket label).
-    radius: as in fig_atoms, to show only the binding-site surface.
+    radius, lig_color, lig_size: as in fig_atoms.
     """
     import plotly.graph_objects as go
 
@@ -180,7 +189,7 @@ def fig_surface(surf, lig, radius=None, color="distance", title=None):
         name = f"surface ({m.sum()} pts, {pocket.sum()} pocket)"
     else:
         # near = the pocket red of color="pocket", far = pale blue, so the
-        # green-carbon ligand stays visible against the points around it
+        # ligand stays visible against the points around it
         marker = dict(size=2.5, color=np.minimum(d, 12.0),
                       colorscale=[[0, "#d1495b"], [POCKET_A / 12, "#f2a65a"],
                                   [1, "#c9d6e8"]],
@@ -189,5 +198,5 @@ def fig_surface(surf, lig, radius=None, color="distance", title=None):
     pts = go.Scatter3d(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2], mode="markers",
                        name=name, marker=marker, text=[f"{v:.1f} Å" for v in d],
                        hoverinfo="text")
-    fig = go.Figure([pts] + _ligand_traces(lig))
+    fig = go.Figure([pts] + _ligand_traces(lig, lig_color, lig_size))
     return _layout(fig, title or f"sampled surface + ligand  {lig['smiles']}")
