@@ -1043,10 +1043,16 @@ def train(a):
                              keep_hydrogens=a.keep_hydrogens,
                              pockets=pocket_source(a, enc_cfg),
                              atom_feats=enc_cfg.atom_feats)
+    # The row's in-pocket PLIP weights are loaded whenever --plip is a
+    # directory, not only for the graded target: the in-pocket AUROC readout
+    # (plip_in) needs them, and a contact-target ablation has to report it
+    # too or it cannot be compared with the graded run.
+    plip_dir_ok = bool(a.plip) and Path(a.plip).is_dir()
+    load_pocket_plip = plip_pocket or plip_dir_ok
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram,
-                        plip=a.plip if (plip_on or plip_pocket) else None,
+                        plip=a.plip if (plip_on or load_pocket_plip) else None,
                         plip_soft=getattr(a, "plip_soft", 0.0),
-                        plip_union=plip_on, plip_pocket=plip_pocket)
+                        plip_union=plip_on, plip_pocket=load_pocket_plip)
 
     # split, sampler, state
     if getattr(a, "val_set", "") and a.val_split:
@@ -1237,7 +1243,7 @@ def train(a):
                       f"{met['plip_type']:.3f} (chance "
                       f"{np.log(enc_cfg.pair_types + 1):.3f})  contacted share of "
                       f"site points {met['plip_pos']:.3f}", flush=True)
-            if plip_pocket and np.isfinite(met.get("plip_in", float("nan"))):
+            if np.isfinite(met.get("plip_in", float("nan"))):
                 print(f"         pocket head inside the pocket: AUROC "
                       f"{met['plip_in']:.3f} for PLIP-interacting vs contact-only "
                       f"points (0.5 = the logit cannot tell them apart)", flush=True)
@@ -1446,8 +1452,7 @@ def evaluate_only(a):
                          atom_feats=model.encoder.cfg.atom_feats)
     # A checkpoint trained with the PLIP-graded pocket target also reports the
     # in-pocket AUROC (plip_in), when its PLIP directory is still there.
-    plip_dir = (getattr(saved, "plip", "") if getattr(saved, "pocket_target",
-                                                     "contact") == "contact_plip" else "")
+    plip_dir = getattr(saved, "plip", "")
     plip_dir = plip_dir if plip_dir and Path(plip_dir).is_dir() else None
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram, plip=plip_dir,
                         plip_soft=getattr(saved, "plip_soft", 0.0),
