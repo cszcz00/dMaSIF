@@ -206,6 +206,15 @@ in the scoring space. `src/slurm/train_v8.sbatch`, all of it in one preset:
   collapse alarm).
 All new flags default off; every earlier command reproduces.
 
+**SUBMITTED 2026-11-01** (selftests incl. torch parts PASS on the login node;
+all older held fpocket / v9_af jobs cancelled by the user):
+- `161292` cache array [0-15]: `ATOM_FEATS=1 RUN=$WORK/out/runs/dataset_v2
+  cache_surfaces.sbatch` - atom features into the shared surface cache
+- `161298` v8 (main run only, defaults), `--dependency=afterok:161292`,
+  -> `$WORK/out/runs/v8_logit_plip_af_pairs_lsim`
+Ablations `v8_contact` / `v8_nolsim` NOT submitted (optional; same seed and
+batches, so they can be added later and compared at matched steps).
+
 Run order (login node first, container, CPU):
 ```
 EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
