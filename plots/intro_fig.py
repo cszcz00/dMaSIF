@@ -15,10 +15,14 @@ Two panels from one real items.tsv row:
      protein) and anything under 6 heavy atoms (ions, solvents).
 
 The tinted pocket (--pocket): `contact`, the surface within 4 A of a ligand
-heavy atom (the pocket label), or `fallback`, training's fallback region
+heavy atom (the pocket label); `fallback`, training's fallback region
 (train_data.fallback_region): a ball of --ball_radius (8 A, train.py's
-default) at the centroid of the contact patch, marked +. The ligand's own
-atoms say where the ball goes.
+default) at the centroid of the contact patch, marked +; or `site`, the
+fpocket pocket(s) at the ligand (external_pockets.site_region), which is what
+`--pocket_select site` pools whenever fpocket found one. Every run prints all
+three regions' sizes and how many PLIP contacts each covers (most of the
+contact's surface cap - points within 3 A of its protein atom, 4 A of a ring /
+charge centre, plip_labels' convention - lies in the region).
 
 Picking the row (--row auto, the default): among subset rows whose files are
 present, a ligand of 15-40 heavy atoms with the most kinds of specific contact
@@ -127,33 +131,84 @@ def pocket_mesh(surf, lig, radius):
     return mesh({"xyz": surf["xyz"][keep], "normals": surf["normals"][keep]})
 
 
-def pocket_region(surf, lig, how="contact", radius=BALL_R):
-    """-> (centre or None, test(points) -> bool mask) for the tinted region.
+def nearest_index(q, xyz, chunk=4096):
+    """Index of the nearest xyz point for each q (chunked, numpy only)."""
+    out = np.empty(len(q), np.int64)
+    for s in range(0, len(q), chunk):
+        d = ((q[s:s + chunk, None, :] - xyz[None]) ** 2).sum(-1)
+        out[s:s + chunk] = d.argmin(1)
+    return out
+
+
+def region_masks(surf, lig, radius=BALL_R, pk=None):
+    """The candidate pocket regions as boolean masks over the surface points.
 
     contact   surface within 4 A of a ligand heavy atom: the pocket LABEL.
     fallback  train_data.fallback_region: a ball of `radius` at the centroid
-              of the labelled points - the region training uses when no
-              predicted / fpocket region covers the site, and the same shape
-              as the ball_R8 selector's regions.
+              of the labelled points - what training uses when no other
+              region covers the site; the same shape as the ball_R8 selector.
+    site      external_pockets.site_region with train.py's defaults: the
+              fpocket pocket(s) at the ligand, which `--pocket_select site`
+              (v3c, v5) pools for every row where fpocket found one.
+    -> ({name: mask}, fallback centre)
     """
     from structview import POCKET_A, min_dist
 
-    label = min_dist(surf["xyz"], lig["xyz"]) <= POCKET_A
-    if how == "contact":
-        return None, lambda q: min_dist(q.astype(np.float32), lig["xyz"]) <= POCKET_A
-    if how != "fallback":
-        raise ValueError(f"unknown pocket style {how!r}")
+    xyz = surf["xyz"]
+    label = min_dist(xyz, lig["xyz"]) <= POCKET_A
     if not label.any():
-        raise SystemExit("no surface point within 4 A of the ligand; no fallback ball")
-    centre = surf["xyz"][label].mean(0)
-    return centre, lambda q: ((q - centre) ** 2).sum(-1) < radius * radius
+        raise SystemExit("no surface point within 4 A of the ligand")
+    centre = xyz[label].mean(0)
+    masks = {"contact": label,
+             "fallback": ((xyz - centre) ** 2).sum(-1) < radius * radius}
+    if pk is not None:
+        from external_pockets import site_region
+
+        idx, _ = site_region(xyz, pk, lig["xyz"])
+        site = np.zeros(len(xyz), bool)
+        if idx is not None:
+            site[idx] = True
+        masks["site"] = site
+    return masks, centre
+
+
+def coverage(surf, plip, masks, atom_radius=3.0, centre_radius=4.0):
+    """PLIP contacts under each region -> {name: (covered, with a cap)}, and
+    how many contacts have no surface within reach.
+
+    A contact's CAP is the surface over its protein side, by plip_labels'
+    site_labels convention: points within 3 A of the protein atom (4 A of a
+    ring / charge-group centre; the surface sits ~1.5-2 A out from atom
+    centres). A region covers the contact when it holds most of that cap.
+    """
+    from plip_labels import CENTRE_KINDS, KINDS
+
+    xyz = surf["xyz"]
+    centre = CENTRE_KINDS[[KINDS.index(k) for k in plip["kind"]]]
+    out = {k: 0 for k in masks}
+    capped = 0
+    for p_, c_ in zip(plip["prot_xyz"].astype(np.float32), centre):
+        r = centre_radius if c_ else atom_radius
+        cap = ((xyz - p_) ** 2).sum(-1) <= r * r
+        if not cap.any():
+            continue
+        capped += 1
+        for k, m in masks.items():
+            out[k] += m[cap].mean() > 0.5
+    return {k: (int(v), capped) for k, v in out.items()}, len(plip["kind"]) - capped
+
+
+def as_test(surf, mask):
+    """A surface-point mask -> test(points) for mesh faces: a face belongs to
+    the region when its nearest surface sample does."""
+    return lambda q: mask[nearest_index(q.astype(np.float32), surf["xyz"])]
 
 
 def draw_mesh(ax, V, T, cam, lig, front_cut=None, tint=True, z=1, region=None):
     """Painter's-algorithm render of a triangle mesh in the camera's view:
     Lambert shading from a light over the viewer's left shoulder, the 4 A
     contact patch tinted (or `region`, a points -> mask test from
-    pocket_region). front_cut (A in front of the ligand) drops faces
+    region_masks + as_test). front_cut (A in front of the ligand) drops faces
     nearer the viewer than that; off by default, because cutting the pocket's
     rim leaves holes, and the camera already looks straight into the pocket."""
     from matplotlib.collections import PolyCollection
@@ -262,13 +317,27 @@ def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None,
     cam = Camera(rec["xyz"], lig["xyz"])
     L = cam(lig["xyz"])
     half = half or max(9.0, np.ptp(L[:, :2], axis=0).max() / 2 + 5.0)
-    centre, region = pocket_region(surf, lig, pocket, ball_radius)
-    from structview import POCKET_A, min_dist
-    n_label = int((min_dist(surf["xyz"], lig["xyz"]) <= POCKET_A).sum())
-    n_region = int(region(surf["xyz"]).sum())
-    print(f"pocket: {n_label} surface points within {POCKET_A:g} A of the ligand"
-          + (f"; fallback ball R={ball_radius:g} A: {n_region} points" if centre is not None
-             else ""))
+    pk_path = Path(root) / "data" / "pockets" / "fpocket" / f"{row.input_id}.npz"
+    pk = None
+    if pk_path.exists():
+        from pipeline_fig import load_fpocket
+        pk = load_fpocket(row, root)
+    masks, ball_c = region_masks(surf, lig, ball_radius, pk)
+    span = np.sqrt(((lig["xyz"][:, None] - lig["xyz"][None]) ** 2).sum(-1)).max()
+    cov, n_buried = coverage(surf, plip, masks)
+    print(f"ligand spans {span:.1f} A; PLIP contacts whose surface cap lies mostly in "
+          f"each region ({n_buried} with no surface within reach, left out):")
+    for k, m in masks.items():
+        a_, b_ = cov[k]
+        print(f"  {k:9s} {int(m.sum()):5d} points  covers {a_}/{b_} contacts"
+              + (f"  (ball R={ball_radius:g} A)" if k == "fallback" else ""))
+    if pocket not in masks:
+        raise SystemExit(f"--pocket {pocket}: no fpocket file at {pk_path}")
+    if not masks[pocket].any():
+        raise SystemExit(f"--pocket {pocket}: empty for this row (fpocket found no pocket "
+                         "at the ligand; training falls back to the ball here)")
+    region = as_test(surf, masks[pocket])
+    centre = ball_c if pocket == "fallback" else None
     rows_, cols = grid
     dec, n_total = decoys(items, row, rows_ * cols - 1, seed)
     print(f"{row.system_id} ({row.group}): {len(plip['kind'])} PLIP contacts; "
@@ -314,8 +383,9 @@ def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None,
              fontsize=14, weight="bold", va="top")
     fig.text(0.0, 0.915, f"{row.receptor_key.split('__')[0].upper()} · {row.group} · "
              "dMaSIF surface, crystal ligand, PLIP contacts; "
-             + (f"pocket = {ball_radius:g} Å ball at the ligand's contact patch (+)"
-                if centre is not None else "pocket ≤ 4 Å tinted"),
+             + {"fallback": f"pocket = {ball_radius:g} Å ball at the contact patch (+)",
+                "site": "pocket = fpocket's pocket at the ligand",
+                "contact": "pocket ≤ 4 Å tinted"}[pocket],
              fontsize=9.5, color="#555", va="top")
     fig.text(0.445, 0.97, "B  Finding binders: a needle in a haystack",
              fontsize=14, weight="bold", va="top")
@@ -344,8 +414,9 @@ def main():
                     help="half-width in A of panel A (default: fits the ligand)")
     ap.add_argument("--grid", type=int, nargs=2, default=(4, 4), metavar=("ROWS", "COLS"))
     ap.add_argument("--seed", type=int, default=0, help="which random decoys")
-    ap.add_argument("--pocket", default="contact", choices=("contact", "fallback"),
-                    help="tint the 4 A contact patch, or training's fallback ball")
+    ap.add_argument("--pocket", default="contact", choices=("contact", "fallback", "site"),
+                    help="tint the 4 A contact patch, training's fallback ball, or the "
+                         "fpocket site region --pocket_select site pools")
     ap.add_argument("--ball_radius", type=float, default=BALL_R,
                     help="fallback ball radius in A (train.py --ball_radius)")
     ap.add_argument("--title", default="")
