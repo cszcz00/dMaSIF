@@ -153,10 +153,12 @@ def pick(a):
 # ---------------------------------------------------------------------------
 # draw
 # ---------------------------------------------------------------------------
-def view_basis(rec_xyz, lig_xyz):
-    """Orthonormal (right, up, toward-viewer) with the pocket facing the viewer."""
-    z = lig_xyz.mean(0) - rec_xyz.mean(0)
-    z /= np.linalg.norm(z) + 1e-9
+def view_basis(rec_xyz, lig_xyz, view=None):
+    """Orthonormal (right, up, toward-viewer) with the pocket facing the viewer:
+    looking along -view if given, else from outside along protein centroid ->
+    ligand centroid."""
+    z = np.asarray(view, float) if view is not None else lig_xyz.mean(0) - rec_xyz.mean(0)
+    z = z / (np.linalg.norm(z) + 1e-9)
     helper = np.array([0.0, 0.0, 1.0]) if abs(z[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
     x = np.cross(helper, z)
     x /= np.linalg.norm(x)

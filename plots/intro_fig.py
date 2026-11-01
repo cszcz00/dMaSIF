@@ -3,8 +3,8 @@
 Two panels from one real items.tsv row:
 
   A  the binding site: dMaSIF's surface around the pocket as a shaded mesh,
-     the crystal ligand in it, and PLIP's protein-ligand contacts as dashed
-     lines (H-bonds, salt bridges, pi-stacking, halogen bonds, hydrophobic
+     seen down the pocket's opening, the crystal ligand in it, and PLIP's
+     protein-ligand contacts as dashed lines to the surface over each contact (H-bonds, salt bridges, pi-stacking, halogen bonds, hydrophobic
      contacts), the H-bonding / charged / stacking residues labelled.
      "Shape and chemistry complement each other."
   B  needle in a haystack: the same pocket, empty, then "?" and a grid of
@@ -248,6 +248,35 @@ def residue_name(rec, xyz):
     return name.capitalize() + num
 
 
+def surface_ends(surf, plip, atom_radius=3.0, centre_radius=4.0):
+    """Where to draw each contact's protein end: on the surface, not at the
+    buried atom. The point of the contact's surface cap (coverage()'s
+    convention) nearest its ligand partner - the patch of surface the ligand
+    actually faces - or the atom itself when no surface is within reach."""
+    from plip_labels import CENTRE_KINDS, KINDS
+
+    xyz = surf["xyz"]
+    centre = CENTRE_KINDS[[KINDS.index(k) for k in plip["kind"]]]
+    out = plip["prot_xyz"].astype(np.float32).copy()
+    for i, (p_, l_, c_) in enumerate(zip(plip["prot_xyz"], plip["lig_xyz"], centre)):
+        r = centre_radius if c_ else atom_radius
+        cap = np.flatnonzero(((xyz - p_) ** 2).sum(-1) <= r * r)
+        if len(cap):
+            out[i] = xyz[cap[((xyz[cap] - l_) ** 2).sum(-1).argmin()]]
+    return out
+
+
+def pocket_view(surf, lig):
+    """Look down the pocket's opening: the mean outward normal of the 4 A
+    contact patch. None (use the default camera) when the patch wraps round
+    the ligand so far that its normals cancel."""
+    from structview import POCKET_A, min_dist
+
+    m = min_dist(surf["xyz"], lig["xyz"]) <= POCKET_A
+    v = surf["normals"][m].mean(0)
+    return v if np.linalg.norm(v) > 0.2 else None
+
+
 def panel_a(ax, rec, lig, surf, plip, cam, half, max_labels=6, region=None, centre=None):
     from pipeline_fig import frame, ligand_3d
 
@@ -260,15 +289,16 @@ def panel_a(ax, rec, lig, surf, plip, cam, half, max_labels=6, region=None, cent
         ax.scatter([cc[0]], [cc[1]], marker="+", s=120, c="#7a2230", lw=2, zorder=9)
     ligand_3d(ax, cam, lig, z=6, ball_a=0.32, bond_a=0.22)
 
+    ends = surface_ends(surf, plip)
     labels, used = [], set()
     for name, (kinds, color, ls) in CONTACTS.items():
         m = np.isin(plip["kind"], kinds)
-        for pp, lp in zip(cam(plip["prot_xyz"][m]), cam(plip["lig_xyz"][m])):
+        for pp, lp in zip(cam(ends[m]), cam(plip["lig_xyz"][m])):
             ax.plot([lp[0], pp[0]], [lp[1], pp[1]], color=color, lw=1.6, ls=ls, zorder=7)
             ax.scatter([pp[0]], [pp[1]], s=22, c=color, zorder=8, edgecolors="white",
                        linewidths=0.6)
         if name in SPECIFIC:
-            for xyz, pp in zip(plip["prot_xyz"][m], cam(plip["prot_xyz"][m])):
+            for xyz, pp in zip(plip["prot_xyz"][m], cam(ends[m])):
                 labels.append((name, residue_name(rec, xyz), pp))
     for name, res, pp in labels:
         if res in used or len(used) >= max_labels:
@@ -303,7 +333,7 @@ def decoys(items, row, n, seed=0, min_heavy=6):
 
 
 def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None,
-         pocket="contact", ball_radius=BALL_R):
+         pocket="contact", ball_radius=BALL_R, view="pocket"):
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from matplotlib.patches import FancyArrowPatch, Rectangle
@@ -314,7 +344,8 @@ def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None,
 
     rec, lig, surf, plip = (load_receptor(row, root), load_ligand(row, root),
                             load_surface(row, root), load_plip(row, root))
-    cam = Camera(rec["xyz"], lig["xyz"])
+    # down the pocket's opening (normal 'view'), else protein centroid -> ligand
+    cam = Camera(rec["xyz"], lig["xyz"], pocket_view(surf, lig) if view == "pocket" else None)
     L = cam(lig["xyz"])
     half = half or max(9.0, np.ptp(L[:, :2], axis=0).max() / 2 + 5.0)
     pk_path = Path(root) / "data" / "pockets" / "fpocket" / f"{row.input_id}.npz"
@@ -417,6 +448,9 @@ def main():
     ap.add_argument("--pocket", default="contact", choices=("contact", "fallback", "site"),
                     help="tint the 4 A contact patch, training's fallback ball, or the "
                          "fpocket site region --pocket_select site pools")
+    ap.add_argument("--view", default="pocket", choices=("pocket", "centroid"),
+                    help="camera down the pocket opening (mean contact-patch normal), or "
+                         "along protein centroid -> ligand")
     ap.add_argument("--ball_radius", type=float, default=BALL_R,
                     help="fallback ball radius in A (train.py --ball_radius)")
     ap.add_argument("--title", default="")
@@ -428,7 +462,8 @@ def main():
     else:
         i = int(a.row) if a.row.isdigit() else int(np.flatnonzero(sub.system_id == a.row)[0])
     draw(sub.iloc[i], a.items, a.out, half=a.half or None, grid=tuple(a.grid),
-         seed=a.seed, title=a.title or None, pocket=a.pocket, ball_radius=a.ball_radius)
+         seed=a.seed, title=a.title or None, pocket=a.pocket, ball_radius=a.ball_radius,
+         view=a.view)
 
 
 if __name__ == "__main__":

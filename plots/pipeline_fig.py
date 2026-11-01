@@ -64,10 +64,10 @@ class Camera:
     """Orthographic view with the pocket facing the viewer; x right, y up,
     depth toward the viewer."""
 
-    def __init__(self, rec_xyz, lig_xyz):
+    def __init__(self, rec_xyz, lig_xyz, view=None):
         from contrastive_fig import view_basis
 
-        self.B = view_basis(rec_xyz, lig_xyz)
+        self.B = view_basis(rec_xyz, lig_xyz, view)
         self.o = rec_xyz.mean(0)
 
     def __call__(self, xyz):
