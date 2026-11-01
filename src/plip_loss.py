@@ -129,6 +129,35 @@ def receptor_labels(xyz, system_id, sibling_ids, plip_dir, **kw):
     return row, union
 
 
+def pocket_plip(row_labels, pocket):
+    """This row's (N, 6) PLIP labels -> (N,) float16 interaction weight, kept
+    only INSIDE the row's 4 A contact pocket (`pocket`, (N,) bool): an
+    interaction label that spills past the contact shell is dropped, so the
+    graded pocket target below never marks a point the contact label does not."""
+    w = np.asarray(row_labels, np.float32).max(1)
+    return (w * np.asarray(pocket, bool)).astype(np.float16)
+
+
+def pocket_target(contact, plip_w, base=0.5):
+    """The pocket head's per-point BCE target under --pocket_target contact_plip:
+
+        y = contact * (base + (1 - base) * plip_w)
+
+    contact (N,) 0/1 (the 4 A label), plip_w (N,) in [0, 1] (pocket_plip, or
+    None for a row without a PLIP file -> plain contact). A contacted point the
+    ligand does not interact with is a half-positive at base 0.5, an
+    interacting one a full positive, and everything outside the pocket stays
+    0. So the logit still separates pocket from surface (AUROC / AP against
+    the contact label keep their meaning) and, inside the pocket, ranks the
+    interacting points highest - which is what the ball selector's seeds and
+    mean-shift centres follow. base 1 is the contact target exactly. Works on
+    numpy arrays and torch tensors alike."""
+    if plip_w is None:
+        return contact * 1.0
+    w = plip_w * contact          # restrict to the pocket again, defensively
+    return contact * base + (1.0 - base) * w
+
+
 # ---------------------------------------------------------------------------
 # losses (torch)
 # ---------------------------------------------------------------------------
@@ -260,6 +289,22 @@ def selftest():
     check("soft=0 is exactly the hard boolean labels",
           point_labels(xyz, [rec_a, rec_b], soft=0.0).dtype == bool
           and (point_labels(xyz, [rec_a, rec_b], soft=0.0) == lab).all())
+
+    # graded pocket target (--pocket_target contact_plip)
+    contact = np.array([1, 1, 1, 0, 0], bool)
+    rowlab = np.zeros((5, 6), np.float32)
+    rowlab[0, 0] = 1.0            # interacting, in the pocket
+    rowlab[1, [1, 5]] = 0.4, 0.6  # soft, in the pocket
+    rowlab[3, 2] = 1.0            # interaction outside the pocket: dropped
+    pw = pocket_plip(rowlab, contact)
+    check("pocket_plip: max over classes, zero outside the contact pocket",
+          np.allclose(pw, [1, 0.6, 0, 0, 0], atol=1e-3) and pw.dtype == np.float16)
+    y = pocket_target(contact.astype(np.float32), pw.astype(np.float32), 0.5)
+    check("pocket_target: interacting 1, contact-only base, outside 0",
+          np.allclose(y, [1, 0.8, 0.5, 0, 0], atol=1e-3), str(np.round(y, 3)))
+    check("pocket_target: base 1 or no PLIP file is the contact label exactly",
+          np.allclose(pocket_target(contact * 1.0, pw.astype(np.float32), 1.0), contact)
+          and np.allclose(pocket_target(contact * 1.0, None), contact))
 
     try:
         import torch

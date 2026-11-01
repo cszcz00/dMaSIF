@@ -445,7 +445,8 @@ class LabelCache:
     only costs the SDF read and one chunked cdist to rebuild.
     """
 
-    def __init__(self, table, cutoff=4.0, ram=512, plip=None, plip_soft=0.0):
+    def __init__(self, table, cutoff=4.0, ram=512, plip=None, plip_soft=0.0,
+                 plip_union=True, plip_pocket=False):
         self.table = table
         self.cutoff = cutoff
         # plip: a plip_labels.py output directory. When set, every record also
@@ -453,8 +454,14 @@ class LabelCache:
         # from every ligand of the receptor (plip_loss.receptor_labels), or
         # None when no PLIP file exists for any of them. plip_soft > 0 makes
         # them soft (plip_loss.soft_site_labels), held as float16.
+        # plip_pocket (train.py --pocket_target contact_plip): also carry
+        # `plip_pocket`, (N,) float16 = this ROW's own PLIP interactions (max
+        # over classes) inside this row's 4 A pocket, or None without a file.
+        # plip_union=False skips the union when only plip_pocket is wanted.
         self.plip = plip
         self.plip_soft = float(plip_soft)
+        self.plip_union = bool(plip_union)
+        self.plip_pocket = bool(plip_pocket)
         self.ram = max(int(ram), 1)
         self._mem = OrderedDict()
         self.failed = {}
@@ -491,16 +498,22 @@ class LabelCache:
 
         rec = {"pocket": pocket, "other": other, "lig": lig,
                "min_dist": float(d.min()), "n_other": n_other}
-        if self.plip:
+        if self.plip and (self.plip_union or self.plip_pocket):
             from plip_loss import receptor_labels
-            sibs = [self.table.rows[j]["system_id"]
-                    for j in self.table.siblings.get(row["input_id"], [])]
-            _, union = receptor_labels(
+            sibs = ([self.table.rows[j]["system_id"]
+                     for j in self.table.siblings.get(row["input_id"], [])]
+                    if self.plip_union else [])
+            own, union = receptor_labels(
                 np.asarray(entry["xyz"], np.float32), row["system_id"], sibs, self.plip,
                 soft=self.plip_soft)
-            if union is not None and self.plip_soft > 0:
-                union = union.astype(np.float16)
-            rec["plip_union"] = union
+            if self.plip_union:
+                if union is not None and self.plip_soft > 0:
+                    union = union.astype(np.float16)
+                rec["plip_union"] = union
+            if self.plip_pocket:
+                from plip_loss import pocket_plip
+                rec["plip_pocket"] = (None if own is None
+                                      else pocket_plip(own, pocket.numpy()))
         self._mem[key] = rec
         while len(self._mem) > self.ram:
             self._mem.popitem(last=False)

@@ -658,6 +658,7 @@ def collect(model, store, labels, table, rows, a, device):
     model.eval()
     anchors, usable, label, pooled = [], [], [], []
     aucs, aps, n_fallback, kept = [], [], 0, []
+    plip_in = []
     # Its own generator, re-seeded per call: negative-region seeding is the one
     # random draw inside selection, and taking it from the global RNG would
     # make the training stream depend on how often validation ran.
@@ -673,6 +674,14 @@ def collect(model, store, labels, table, rows, a, device):
                 lg = blk["out"]["pocket_logit"][m].cpu()
                 aucs.append(auroc(lg, lb["pocket"]))
                 aps.append(average_precision(lg, lb["pocket"]))
+                pp = lb.get("plip_pocket")
+                if pp is not None:
+                    # inside the contact pocket only: does the logit rank the
+                    # PLIP-interacting points above the contact-only ones?
+                    inside = lb["pocket"].numpy()
+                    hit = torch.from_numpy(pp[inside].astype(np.float32) >= 0.5)
+                    if 0 < int(hit.sum()) < len(hit):
+                        plip_in.append(auroc(lg[torch.from_numpy(inside)], hit))
             n_fallback += int(blk["fallback"].sum())
             anchors.append(blk["anchors"].cpu())
             usable.append(blk["usable"].cpu())
@@ -699,6 +708,7 @@ def collect(model, store, labels, table, rows, a, device):
             "pooled": torch.cat([pad(t) for t in pooled]),
             "label": torch.cat([pad(t, -1) for t in label]),
             "auroc": float(np.nanmean(aucs)), "ap": float(np.nanmean(aps)),
+            "plip_in": float(np.nanmean(plip_in)) if plip_in else float("nan"),
             "fallback_rate": n_fallback / max(len(rows), 1)}
 
 
@@ -797,7 +807,7 @@ def evaluate(model, store, labels, table, rows, ligands, a, device, per_row=None
     model.train()
     # The temperature the scores were taken at: 1 / the clamped logit scale,
     # so a run sitting at --tau_min reads exactly tau_min.
-    met.update(auroc=got["auroc"], ap=got["ap"],
+    met.update(auroc=got["auroc"], ap=got["ap"], plip_in=got["plip_in"],
                fallback_rate=got["fallback_rate"], tau=1.0 / float(model.scale().detach()))
     return met
 
@@ -998,6 +1008,25 @@ def train(a):
               f"{a.lam_plip_type}, labels "
               + (f"soft (ramp {soft} A across the 3 / 4 A radius)" if soft > 0
                  else "hard (step at 3 / 4 A)"))
+    plip_pocket = getattr(a, "pocket_target", "contact") == "contact_plip"
+    if plip_pocket:
+        if not a.plip or not Path(a.plip).is_dir():
+            raise SystemExit(f"--pocket_target contact_plip grades the pocket target "
+                             f"by PLIP: needs --plip DIR; got {a.plip!r}")
+        if not 0.0 <= a.pocket_plip_base <= 1.0:
+            raise SystemExit(f"--pocket_plip_base {a.pocket_plip_base}: must be in [0, 1]")
+        if not a.lam_pocket:
+            print("[warn] --pocket_target contact_plip with --lam_pocket 0: the "
+                  "target is built but nothing trains on it")
+        if enc_cfg.region_source != "predicted":
+            print("[warn] --pocket_target contact_plip with an external "
+                  "region_source: the head no longer places the regions, so the "
+                  "graded target only shapes the auxiliary BCE")
+        print(f"pocket target: contact graded by this row's PLIP interactions inside "
+              f"the pocket - interacting 1, contact-only {a.pocket_plip_base}, "
+              "elsewhere 0" + (f" (PLIP labels soft, {a.plip_soft} A)"
+                               if getattr(a, "plip_soft", 0) > 0 else ""))
+    lam_lig_sim = getattr(a, "lam_lig_sim", 0.0)
     if a.freeze_encoder:
         freeze_encoder(model)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
@@ -1015,8 +1044,9 @@ def train(a):
                              pockets=pocket_source(a, enc_cfg),
                              atom_feats=enc_cfg.atom_feats)
     labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram,
-                        plip=a.plip if plip_on else None,
-                        plip_soft=getattr(a, "plip_soft", 0.0))
+                        plip=a.plip if (plip_on or plip_pocket) else None,
+                        plip_soft=getattr(a, "plip_soft", 0.0),
+                        plip_union=plip_on, plip_pocket=plip_pocket)
 
     # split, sampler, state
     if getattr(a, "val_set", "") and a.val_split:
@@ -1104,6 +1134,20 @@ def train(a):
               f"({len(train_rows)} train / {len(val_rows)} val); sampler "
               f"reseeded from (seed, step) = ({a.seed}, {step0})")
 
+    # Tanimoto neighbours over the TRAIN ligands (after a resume, so they are
+    # the checkpoint's train rows), and the stream partners are drawn from:
+    # its own, so switching the pull on does not change the batches.
+    nbrs = None
+    rng_s = np.random.default_rng([a.seed, step0, 2])
+    if lam_lig_sim:
+        from lig_sim import Neighbours
+        t_nb = time.time()
+        nbrs = Neighbours(ligands.fp, table.fp_row[train_rows], thr=a.lig_sim_thr,
+                          k=max(a.lig_sim_k, 1))
+        print(f"ligand Tanimoto pull x {lam_lig_sim}: {nbrs.describe()}; "
+              + (f"each batch ligand brings one neighbour" if a.lig_sim_k > 0
+                 else "in-batch pairs only")
+              + f" ({time.time() - t_nb:.0f} s)")
     best = max((h.get("mrr", float("nan")) for h in history), default=float("nan"))
     if not np.isfinite(best):
         best = -1.0
@@ -1116,6 +1160,7 @@ def train(a):
     t_start = time.time()
     losses, nces, pocks = [], [], []
     plip_sals, plip_types, plip_pos = [], [], []
+    ls_loss, ls_cos, ls_t, ls_rand, ls_n = [], [], [], [], []
     # Per-phase wall clock since the last evaluation line, summed over steps.
     # Synchronised at each boundary, so GPU work lands in the phase that
     # launched it rather than in whichever one next waits on the device.
@@ -1192,6 +1237,18 @@ def train(a):
                       f"{met['plip_type']:.3f} (chance "
                       f"{np.log(enc_cfg.pair_types + 1):.3f})  contacted share of "
                       f"site points {met['plip_pos']:.3f}", flush=True)
+            if plip_pocket and np.isfinite(met.get("plip_in", float("nan"))):
+                print(f"         pocket head inside the pocket: AUROC "
+                      f"{met['plip_in']:.3f} for PLIP-interacting vs contact-only "
+                      f"points (0.5 = the logit cannot tell them apart)", flush=True)
+            if lam_lig_sim:
+                met.update(lig_sim=mean(ls_loss), lig_sim_cos=mean(ls_cos),
+                           lig_sim_t=mean(ls_t), lig_rand_cos=mean(ls_rand),
+                           lig_sim_pairs=mean(ls_n))
+                print(f"         ligsim  loss {met['lig_sim']:.4f}  pulled pairs: cos "
+                      f"{met['lig_sim_cos']:.3f} vs Tanimoto {met['lig_sim_t']:.3f} "
+                      f"({met['lig_sim_pairs']:.1f} / step)  random in-batch cos "
+                      f"{met['lig_rand_cos']:.3f} (collapse alarm)", flush=True)
             print(f"         train {store.report()}", flush=True)
             print(f"         val   {val_store.report()}", flush=True)
             if T["steps"]:
@@ -1248,11 +1305,16 @@ def train(a):
 
         extra = (train_rows[draw_batch(rng_x, members, counts, a.extra_ligands, a.alpha)]
                  if a.extra_ligands else rows_k[:0])
-        # One ligand forward for batch and extras together, so both go through
-        # the same normalisation statistics.
-        lig_all = encode_ligands(model, ligands,
-                                 table.fp_row[np.concatenate([rows_k, extra])], device)
-        lig, lig_x = lig_all[:len(rows_k)], lig_all[len(rows_k):]
+        fp_k = table.fp_row[rows_k]
+        part_at = part_fp = part_t = np.zeros(0, np.int64)
+        if nbrs is not None and a.lig_sim_k > 0:
+            part_at, part_fp, part_t = nbrs.sample(rng_s, fp_k)
+        # One ligand forward for batch, extras and Tanimoto partners together.
+        lig_all = encode_ligands(model, ligands, np.concatenate(
+            [fp_k, table.fp_row[extra], part_fp]).astype(np.int64), device)
+        nb_, nx_ = len(rows_k), len(extra)
+        lig, lig_x = lig_all[:nb_], lig_all[nb_:nb_ + nx_]
+        lig_p = lig_all[nb_ + nx_:]
         scores = model.scores(anchors_k, usable_k, lig)
         mask = pair_mask(table, rows_k, ligands, device, a.tanimoto)
         banked = bank.anchors(model) if bank is not None else None
@@ -1273,7 +1335,19 @@ def train(a):
         pos_neg[0] += float(label.sum())
         pos_neg[1] += float((1 - label).sum())
         pw = a.pos_weight or (pos_neg[1] / max(pos_neg[0], 1.0))
-        pock = pocket_loss(blk["out"]["pocket_logit"], label, pw)
+        target = label
+        if plip_pocket:
+            # Graded per row; a row without a PLIP file keeps the contact
+            # target. pos_weight stays the CONTACT ratio, so it is the same
+            # number as in every contact-target run.
+            from plip_loss import pocket_target
+            target = torch.cat([
+                pocket_target(lb["pocket"].float(),
+                              None if lb.get("plip_pocket") is None else
+                              torch.from_numpy(lb["plip_pocket"].astype(np.float32)),
+                              a.pocket_plip_base)
+                for lb in labs]).to(device)
+        pock = pocket_loss(blk["out"]["pocket_logit"], target, pw)
 
         loss = nce + a.lam_pocket * pock
         if plip_on:
@@ -1300,6 +1374,20 @@ def train(a):
             per_anchor = (torch.einsum("bkd,bd->bk", blk["anchors"][keep], lig)
                           * model.scale())
             loss = loss + a.lam_site * site_loss(per_anchor, blk["label"][keep])
+        if lam_lig_sim:
+            from lig_sim import in_batch_pairs, pair_loss, random_cos
+            bi, bj, bt = in_batch_pairs(ligands.fp, fp_k, a.lig_sim_thr)
+            ia = torch.as_tensor(np.concatenate([bi, part_at]), device=lig.device)
+            za = lig[ia]
+            zb = torch.cat([lig[torch.as_tensor(bj, device=lig.device)], lig_p])
+            l_s, c_s = pair_loss(za, zb, np.concatenate([bt, part_t]))
+            loss = loss + lam_lig_sim * l_s
+            ls_loss.append(float(l_s.detach()))
+            ls_n.append(len(za))
+            if len(za):
+                ls_cos.append(c_s)
+                ls_t.append(float(np.concatenate([bt, part_t]).mean()))
+            ls_rand.append(random_cos(lig))
         t3 = clock()
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -1356,7 +1444,14 @@ def evaluate_only(a):
                          keep_hydrogens=saved.keep_hydrogens,
                          pockets=pocket_source(a, model.encoder.cfg),
                          atom_feats=model.encoder.cfg.atom_feats)
-    labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram)
+    # A checkpoint trained with the PLIP-graded pocket target also reports the
+    # in-pocket AUROC (plip_in), when its PLIP directory is still there.
+    plip_dir = (getattr(saved, "plip", "") if getattr(saved, "pocket_target",
+                                                     "contact") == "contact_plip" else "")
+    plip_dir = plip_dir if plip_dir and Path(plip_dir).is_dir() else None
+    labels = LabelCache(table, cutoff=a.cutoff, ram=a.label_ram, plip=plip_dir,
+                        plip_soft=getattr(saved, "plip_soft", 0.0),
+                        plip_union=False, plip_pocket=plip_dir is not None)
     if sum(bool(x) for x in (a.use_ckpt_split, a.recarve, getattr(a, "val_set", ""))) > 1:
         raise SystemExit("--use_ckpt_split, --recarve and --val_set are alternatives")
     if getattr(a, "val_set", ""):
@@ -1716,6 +1811,25 @@ def main():
                         "radius instead of stepping; 0 = hard labels (v6)")
     p.add_argument("--pos_weight", type=float, default=0.0,
                    help="pocket BCE positive weight; 0 = the running ratio")
+    p.add_argument("--pocket_target", default="contact",
+                   choices=("contact", "contact_plip"),
+                   help="the pocket head's BCE target: 'contact' = the 4 A label "
+                        "(every run before v8); 'contact_plip' = contact graded by "
+                        "this row's PLIP interactions INSIDE the pocket "
+                        "(plip_loss.pocket_target), so the logit the ball selector "
+                        "seeds from peaks where the ligand interacts. Needs --plip")
+    p.add_argument("--pocket_plip_base", type=float, default=0.5,
+                   help="contact_plip: target of a contacted point with no PLIP "
+                        "interaction (interacting = 1, outside the pocket = 0)")
+    p.add_argument("--lam_lig_sim", type=float, default=0.0,
+                   help="weight of the Tanimoto pull on the ligand vectors "
+                        "(lig_sim.py): pairs at Tanimoto >= --lig_sim_thr asked for "
+                        "cos >= Tanimoto in the scoring space; 0 = off")
+    p.add_argument("--lig_sim_thr", type=float, default=0.5,
+                   help="Tanimoto at or above which two ligands are pulled together")
+    p.add_argument("--lig_sim_k", type=int, default=32,
+                   help="neighbours kept per train ligand; each batch ligand "
+                        "brings one, drawn from these. 0 = in-batch pairs only")
     p.add_argument("--val_frac", type=float, default=0.1)
     p.add_argument("--val_split", default="",
                    help="use the dataset's own split(s) as validation instead "

@@ -180,6 +180,47 @@ Then, in any order:
    them), but misleading to read. `train.py` and `probe_retrieval.py` both
    take the flags.
 
+## v8: pocket-logit anchors on contact + PLIP, learned atom typing, pair pooling, Tanimoto pull - WRITTEN; numpy parts of `lig_sim.py` / `plip_loss.py` selftests PASS, torch parts + train path untested
+
+User, 2026-11-01: back to the pocket logit placing the anchors (blind, the
+inference setting), but with the logit trained on atom contact AND PLIP
+interactions inside the pocket; the expanded atom features; pair pooling
+(288 pair bins); and a light pull of high-Tanimoto ligands toward each other
+in the scoring space. `src/slurm/train_v8.sbatch`, all of it in one preset:
+- anchors: `--region_source predicted`, ball_R8 from the head's top 5%,
+  k_pos 8, `K_NEG=0` (negative patches feed only the BatchNorm here);
+  `--atom_feats`, `--pool_mode pairs` (8 types -> 36 x 8 = 288 pair dims),
+  `--anchor_norm batch`, batch 32, const lr, no chemo, no bank.
+- `--pocket_target contact_plip` (`plip_loss.pocket_target`): BCE target =
+  contact x (base + (1 - base) x PLIP weight), base 0.5, PLIP = this ROW's own
+  interactions (soft 1.5 A, max over classes) with anything outside the 4 A
+  pocket dropped (`plip_loss.pocket_plip`; `LabelCache(plip_pocket=True)`
+  carries it per row). pos_weight stays the contact ratio; AUROC / AP stay
+  against the contact label. New eval line: in-pocket AUROC of the logit for
+  PLIP-interacting vs contact-only points (`plip_in` in history.json).
+- `--lam_lig_sim 0.05 --lig_sim_thr 0.5 --lig_sim_k 32` (`src/lig_sim.py`):
+  relu(T - cos)^2 over pairs at Tanimoto >= 0.5 - in-batch pairs plus one
+  partner per batch ligand from its precomputed TRAIN-ligand neighbours,
+  encoded with the batch (own RNG stream, so batches are unchanged). New eval
+  line: loss, pulled pairs' cos vs their Tanimoto, random in-batch cos (the
+  collapse alarm).
+All new flags default off; every earlier command reproduces.
+
+Run order (login node first, container, CPU):
+```
+EX="apptainer exec --cleanenv --env OMP_NUM_THREADS=8 $WORK/dmasif_sandbox python"
+$EX src/lig_sim.py selftest && $EX src/plip_loss.py selftest
+sbatch --job-name=v8 src/slurm/train_v8.sbatch            # smoke runs the whole path first
+# ablations, same seed / data / batches:
+POCKET_TARGET=contact RUN=$WORK/out/runs/v8_contact sbatch src/slurm/train_v8.sbatch
+LAM_LIG_SIM=0 RUN=$WORK/out/runs/v8_nolsim sbatch src/slurm/train_v8.sbatch
+```
+Read: v8 is BLIND, so compare it with its ablations and with blind evals of
+v4 / v5 (`--pocket_select topk --pocket_rank drug`), not with C's known-site
+0.151. `fb` = how often none of the 8 logit anchors hits the pocket; the
+in-pocket AUROC should sit above v8_contact's; the ligsim random cos must stay
+well below the pulled pairs' cos.
+
 ## v6: PLIP supervision of the site types and salience (`src/plip_loss.py`) - WRITTEN, numpy part of selftest PASSES, torch part + train path untested
 
 Why: channel_viz on C (RESULTS) - types coarse (polar / apolar / shape,
