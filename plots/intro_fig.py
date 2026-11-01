@@ -315,21 +315,27 @@ def panel_a(ax, rec, lig, surf, plip, cam, half, max_labels=6, region=None, cent
 # ---------------------------------------------------------------------------
 # panel B: one pocket, many molecules
 # ---------------------------------------------------------------------------
-def decoys(items, row, n, seed=0, min_heavy=6):
-    """n random SMILES from the dataset's distinct ligands, none from this
-    target group, none under min_heavy heavy atoms."""
+def decoy_rows(items, row, n, seed=0, min_heavy=6):
+    """n random distinct ligands of the dataset (items.tsv rows), none from this
+    target group, none under min_heavy heavy atoms -> (DataFrame, n distinct)."""
     df = pd.read_csv(items, sep="\t", dtype=str)
     banned = set(df.loc[df.group == row.group, "fp_row"])
     lig = df.drop_duplicates("fp_row")
     n_total = len(lig)
     pool = lig[~lig.fp_row.isin(banned)].sample(frac=1, random_state=seed)
-    out = []
-    for s in pool.smiles:
+    keep = []
+    for i, s in zip(pool.index, pool.smiles):
         if n_heavy(s) >= min_heavy:
-            out.append(s)
-        if len(out) == n:
+            keep.append(i)
+        if len(keep) == n:
             break
-    return out, n_total
+    return pool.loc[keep], n_total
+
+
+def decoys(items, row, n, seed=0, min_heavy=6):
+    """decoy_rows' SMILES, in the same order."""
+    rows, n_total = decoy_rows(items, row, n, seed, min_heavy)
+    return list(rows.smiles), n_total
 
 
 def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None,
