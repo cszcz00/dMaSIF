@@ -14,6 +14,12 @@ Two panels from one real items.tsv row:
      every ligand of the same target group (so none is a known binder of this
      protein) and anything under 6 heavy atoms (ions, solvents).
 
+The tinted pocket (--pocket): `contact`, the surface within 4 A of a ligand
+heavy atom (the pocket label), or `fallback`, training's fallback region
+(train_data.fallback_region): a ball of --ball_radius (8 A, train.py's
+default) at the centroid of the contact patch, marked +. The ligand's own
+atoms say where the ball goes.
+
 Picking the row (--row auto, the default): among subset rows whose files are
 present, a ligand of 15-40 heavy atoms with the most kinds of specific contact
 (H-bond, salt bridge, pi, halogen), then the most contacts. The candidates are
@@ -44,7 +50,8 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "src"))
 
 SURFACE = "#d5dbe3"
-POCKET_TINT = "#eab3b9"     # surface within 4 A of the ligand
+POCKET_TINT = "#eab3b9"     # the pocket region, either definition below
+BALL_R = 8.0                # train.py --ball_radius default: the fallback ball
 BINDER = "#d1495b"          # outline of the true binder in panel B
 # PLIP kinds -> what the slide calls them (water kinds never occur: no waters)
 CONTACTS = {
@@ -120,10 +127,33 @@ def pocket_mesh(surf, lig, radius):
     return mesh({"xyz": surf["xyz"][keep], "normals": surf["normals"][keep]})
 
 
-def draw_mesh(ax, V, T, cam, lig, front_cut=None, tint=True, z=1):
+def pocket_region(surf, lig, how="contact", radius=BALL_R):
+    """-> (centre or None, test(points) -> bool mask) for the tinted region.
+
+    contact   surface within 4 A of a ligand heavy atom: the pocket LABEL.
+    fallback  train_data.fallback_region: a ball of `radius` at the centroid
+              of the labelled points - the region training uses when no
+              predicted / fpocket region covers the site, and the same shape
+              as the ball_R8 selector's regions.
+    """
+    from structview import POCKET_A, min_dist
+
+    label = min_dist(surf["xyz"], lig["xyz"]) <= POCKET_A
+    if how == "contact":
+        return None, lambda q: min_dist(q.astype(np.float32), lig["xyz"]) <= POCKET_A
+    if how != "fallback":
+        raise ValueError(f"unknown pocket style {how!r}")
+    if not label.any():
+        raise SystemExit("no surface point within 4 A of the ligand; no fallback ball")
+    centre = surf["xyz"][label].mean(0)
+    return centre, lambda q: ((q - centre) ** 2).sum(-1) < radius * radius
+
+
+def draw_mesh(ax, V, T, cam, lig, front_cut=None, tint=True, z=1, region=None):
     """Painter's-algorithm render of a triangle mesh in the camera's view:
     Lambert shading from a light over the viewer's left shoulder, the 4 A
-    contact patch tinted. front_cut (A in front of the ligand) drops faces
+    contact patch tinted (or `region`, a points -> mask test from
+    pocket_region). front_cut (A in front of the ligand) drops faces
     nearer the viewer than that; off by default, because cutting the pocket's
     rim leaves holes, and the camera already looks straight into the pocket."""
     from matplotlib.collections import PolyCollection
@@ -145,7 +175,9 @@ def draw_mesh(ax, V, T, cam, lig, front_cut=None, tint=True, z=1):
     shade = 0.42 + 0.58 * lam
     base = np.tile(np.asarray(to_rgb(SURFACE)), (len(f), 1))
     if tint:
-        near = min_dist(V[Tk].mean(1).astype(np.float32), lig["xyz"]) <= POCKET_A
+        centres = V[Tk].mean(1)
+        near = (region(centres) if region is not None else
+                min_dist(centres.astype(np.float32), lig["xyz"]) <= POCKET_A)
         base[near] = to_rgb(POCKET_TINT)
     col = np.clip(base * shade[:, None] + 0.08 * (1 - shade[:, None]), 0, 1)
     order = np.argsort(f[:, :, 2].mean(1))
@@ -161,13 +193,16 @@ def residue_name(rec, xyz):
     return name.capitalize() + num
 
 
-def panel_a(ax, rec, lig, surf, plip, cam, half, max_labels=6):
+def panel_a(ax, rec, lig, surf, plip, cam, half, max_labels=6, region=None, centre=None):
     from pipeline_fig import frame, ligand_3d
 
     c = cam(lig["xyz"]).mean(0)
     frame(ax, c, half)
     V, T = pocket_mesh(surf, lig, half * 1.5)
-    draw_mesh(ax, V, T, cam, lig)
+    draw_mesh(ax, V, T, cam, lig, region=region)
+    if centre is not None:                                     # the fallback ball's centre
+        cc = cam(centre[None])[0]
+        ax.scatter([cc[0]], [cc[1]], marker="+", s=120, c="#7a2230", lw=2, zorder=9)
     ligand_3d(ax, cam, lig, z=6, ball_a=0.32, bond_a=0.22)
 
     labels, used = [], set()
@@ -212,7 +247,8 @@ def decoys(items, row, n, seed=0, min_heavy=6):
     return out, n_total
 
 
-def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None):
+def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None,
+         pocket="contact", ball_radius=BALL_R):
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from matplotlib.patches import FancyArrowPatch, Rectangle
@@ -226,6 +262,13 @@ def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None):
     cam = Camera(rec["xyz"], lig["xyz"])
     L = cam(lig["xyz"])
     half = half or max(9.0, np.ptp(L[:, :2], axis=0).max() / 2 + 5.0)
+    centre, region = pocket_region(surf, lig, pocket, ball_radius)
+    from structview import POCKET_A, min_dist
+    n_label = int((min_dist(surf["xyz"], lig["xyz"]) <= POCKET_A).sum())
+    n_region = int(region(surf["xyz"]).sum())
+    print(f"pocket: {n_label} surface points within {POCKET_A:g} A of the ligand"
+          + (f"; fallback ball R={ball_radius:g} A: {n_region} points" if centre is not None
+             else ""))
     rows_, cols = grid
     dec, n_total = decoys(items, row, rows_ * cols - 1, seed)
     print(f"{row.system_id} ({row.group}): {len(plip['kind'])} PLIP contacts; "
@@ -233,7 +276,7 @@ def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None):
 
     fig = plt.figure(figsize=(15.5, 6.6))
     a = fig.add_axes([0.0, 0.06, 0.40, 0.80])
-    shown = panel_a(a, rec, lig, surf, plip, cam, half)
+    shown = panel_a(a, rec, lig, surf, plip, cam, half, region=region, centre=centre)
     handles = [Line2D([], [], color=CONTACTS[k][1], ls=CONTACTS[k][2], lw=2, label=k)
                for k in CONTACTS if k in shown]
     a.legend(handles=handles, loc="lower left", fontsize=9, frameon=True, framealpha=0.9,
@@ -243,7 +286,7 @@ def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None):
     p = fig.add_axes([0.445, 0.30, 0.15, 0.36])
     frame(p, L.mean(0), half)
     V, T = pocket_mesh(surf, lig, half * 1.5)
-    draw_mesh(p, V, T, cam, lig, tint=True)
+    draw_mesh(p, V, T, cam, lig, tint=True, region=region)
     fig.add_artist(FancyArrowPatch((0.605, 0.48), (0.655, 0.48), transform=fig.transFigure,
                                    arrowstyle="-|>", mutation_scale=22, color="#555", lw=1.6))
     fig.text(0.63, 0.53, "?", fontsize=30, weight="bold", ha="center", color="#333")
@@ -270,7 +313,9 @@ def draw(row, items, out, root=".", half=None, grid=(4, 4), seed=0, title=None):
     fig.text(0.0, 0.97, "A  Binding: shape and chemistry complement each other",
              fontsize=14, weight="bold", va="top")
     fig.text(0.0, 0.915, f"{row.receptor_key.split('__')[0].upper()} · {row.group} · "
-             "dMaSIF surface, crystal ligand, PLIP contacts; pocket ≤ 4 Å tinted",
+             "dMaSIF surface, crystal ligand, PLIP contacts; "
+             + (f"pocket = {ball_radius:g} Å ball at the ligand's contact patch (+)"
+                if centre is not None else "pocket ≤ 4 Å tinted"),
              fontsize=9.5, color="#555", va="top")
     fig.text(0.445, 0.97, "B  Finding binders: a needle in a haystack",
              fontsize=14, weight="bold", va="top")
@@ -299,6 +344,10 @@ def main():
                     help="half-width in A of panel A (default: fits the ligand)")
     ap.add_argument("--grid", type=int, nargs=2, default=(4, 4), metavar=("ROWS", "COLS"))
     ap.add_argument("--seed", type=int, default=0, help="which random decoys")
+    ap.add_argument("--pocket", default="contact", choices=("contact", "fallback"),
+                    help="tint the 4 A contact patch, or training's fallback ball")
+    ap.add_argument("--ball_radius", type=float, default=BALL_R,
+                    help="fallback ball radius in A (train.py --ball_radius)")
     ap.add_argument("--title", default="")
     a = ap.parse_args()
 
@@ -308,7 +357,7 @@ def main():
     else:
         i = int(a.row) if a.row.isdigit() else int(np.flatnonzero(sub.system_id == a.row)[0])
     draw(sub.iloc[i], a.items, a.out, half=a.half or None, grid=tuple(a.grid),
-         seed=a.seed, title=a.title or None)
+         seed=a.seed, title=a.title or None, pocket=a.pocket, ball_radius=a.ball_radius)
 
 
 if __name__ == "__main__":
