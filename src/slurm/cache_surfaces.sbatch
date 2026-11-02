@@ -27,13 +27,17 @@
 # that read the cache are unaffected.
 #
 # Needs $RUN/items.tsv (src/train.py prepare).
-# Overrides: RUN, SURFACES, LIMIT, ATOM_FEATS.
+# Overrides: RUN, SURFACES, LIMIT, ATOM_FEATS, SHARDS.
 set -e
 module load apptainer
 cd $WORK
 RUN=${RUN:-$WORK/out/runs/v1}
 SURFACES=${SURFACES:-$WORK/data/surfaces}
-N=${SLURM_ARRAY_TASK_COUNT:-1}
+# SHARDS pins the shard count, for rerunning single tasks of an earlier
+# array: `--array=15` alone has a task count of 1, which would make task 15
+# shard "15 of 1", i.e. nearly every receptor. Rerun one shard with
+#   SHARDS=16 ... sbatch --array=15 src/slurm/cache_surfaces.sbatch
+N=${SHARDS:-${SLURM_ARRAY_TASK_COUNT:-1}}
 I=${SLURM_ARRAY_TASK_ID:-0}
 EXEC="apptainer exec --nv --cleanenv --env KEOPS_CACHE_FOLDER=$KEOPS_CACHE_FOLDER,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK $WORK/dmasif_sandbox"
 
