@@ -209,8 +209,13 @@ All new flags default off; every earlier command reproduces.
 **SUBMITTED 2026-11-01** (selftests incl. torch parts PASS on the login node;
 all older held fpocket / v9_af jobs cancelled by the user):
 - `161292` cache array [0-15]: `ATOM_FEATS=1 RUN=$WORK/out/runs/dataset_v2
-  cache_surfaces.sbatch` - atom features into the shared surface cache
-- `161298` v8 (main run only, defaults), `--dependency=afterok:161292`,
+  cache_surfaces.sbatch` - atom features into the shared surface cache.
+  Shards 0-14 done (~0.42 s/surface); shard 15 hit the 4 h limit at
+  1,400 / 2,104 on alphagpu51 (~10 s/surface, a slow node), so the first v8
+  job (161298) never started and was cancelled.
+- `162885` shard 15 rerun: `SHARDS=16 ... sbatch --array=15 --time=06:00:00
+  --exclude=alphagpu51` (finished surfaces are skipped)
+- `162886` v8 (main run only, defaults), `--dependency=afterok:162885`,
   -> `$WORK/out/runs/v8_logit_plip_af_pairs_lsim`
 Ablations `v8_contact` / `v8_nolsim` NOT submitted (optional; same seed and
 batches, so they can be added later and compared at matched steps).
