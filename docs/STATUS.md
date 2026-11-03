@@ -206,6 +206,16 @@ in the scoring space. `src/slurm/train_v8.sbatch`, all of it in one preset:
   collapse alarm).
 All new flags default off; every earlier command reproduces.
 
+**RAN to step 7,125 of 10,000 (walltime); blind MRR 0.122 on the fixed val
+set, fb 0.158 - RESULTS 2026-11-03.** The fallback ball is scored at
+evaluation, so 0.122 is an upper bound until the `--no_fallback` eval runs:
+```
+CKPTS=$WORK/out/runs/v8_logit_plip_af_pairs_lsim/last.pt DATA=$WORK/out/runs/dataset_v2 \
+EVAL_ARGS="--val_set $WORK/out/valset_v1v2 --no_fallback \
+--per_row $WORK/out/per_row/v8_nofb.tsv" sbatch src/slurm/eval.sbatch
+sbatch --job-name=v8 src/slurm/train_v8.sbatch       # resumes 7,125 -> 10,000
+```
+
 **SUBMITTED 2026-11-01** (selftests incl. torch parts PASS on the login node;
 all older held fpocket / v9_af jobs cancelled by the user):
 - `161292` cache array [0-15]: `ATOM_FEATS=1 RUN=$WORK/out/runs/dataset_v2

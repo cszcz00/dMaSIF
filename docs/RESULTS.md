@@ -1122,6 +1122,69 @@ salience head has learned nothing yet.** That motivated v7 (soft labels,
 salience weight 0.5; STATUS). (3) Throughput: 65% of training surface reads
 from disk at SURFACE_RAM 4,000, ~0.8 s/step of load; defaults raised.
 
+## v8 to step 7,125 (2026-11-03, single evaluation pasted from the log)
+
+**The first run where the POCKET LOGIT places the anchors and retrieval still
+works.** `v8_logit_plip_af_pairs_lsim`, dataset_v2, fixed val set (400 rows,
+chance 0.0165), stopped by the 12 h walltime at 7,125 of 10,000 steps.
+
+| | mrr | top1 | top10 | site | AUROC / AP | fb | cosdiff | tau |
+|---|---|---|---|---|---|---|---|---|
+| v8 @ 7,125 (BLIND) | **0.122** | 0.050 | 0.255 | 0.690 | 0.942 / 0.522 | **0.158** | 0.910 | 0.066 |
+| C @ 4,375 (known site) | 0.151 | 0.085 | 0.268 | - | 0.940 / 0.522 | 0.04 | 0.773 | - |
+| v5 @ 2,625-2,750 (known site) | 0.101 | - | - | - | - | - | 0.875 | - |
+
+Also printed: in-pocket AUROC 0.561, ligsim loss 0.0047 (pulled pairs cos
+0.827 against Tanimoto 0.652, 35.5 pairs/step; random in-batch cos 0.180),
+4.2 s/step (fwd 1.76 of which select+pool 1.32, bwd 2.33), RSS 42.4 GB,
+GPU 23.7 GB.
+
+Read:
+
+1. **The headline, with its caveat: 0.122 blind against C's 0.151 known-site,
+   on the same 400 rows - but `fb` is 0.158, and the fallback ball is SCORED
+   at evaluation.** `collect` -> `anchor_block` adds the fallback anchor
+   whenever `a.fallback` (the default) and marks it valid + is_pos, so for
+   15.8% of val rows the scored anchor is a ball placed at the TRUE pocket
+   centroid. C's 0.151 carried the same assist at fb 0.04, so v8's number is
+   helped about four times as much. **The clean number needs
+   `--no_fallback`** and is the first thing to run (command below). Until
+   then "blind 0.122" is an upper bound, not a screening number.
+2. **The logit does place anchors on real pockets.** fb 0.158 means that for
+   84% of val proteins one of the 8 balls grown from the top 5% of the logit
+   covered the ligand's pocket, with no ligand information. The fpocket
+   equivalent (top 8 pockets by druggability) left fb 0.230 on dataset_v1.
+   `site` 0.690 says that when a matching anchor exists, the ligand's best
+   anchor is that one 69% of the time.
+3. **top1 is the weak spot, not top10.** v8 0.050 / 0.255 against C's
+   0.085 / 0.268: v8 gets the right ligand into the top ten nearly as often
+   as the known-site model and to the top far less often. Consistent with
+   anchors that find the right pocket but describe it coarsely.
+4. **The PLIP grading is barely visible in the logit: in-pocket AUROC 0.561.**
+   Above 0.5, so the head is not blind to which points the ligand interacts
+   with, but channel_viz measured 0.65 for the CONTACT-trained head of C on
+   dataset_v1 (different model, dataset and checkpoint, so not a controlled
+   comparison). **`v8_contact` is the only thing that can say whether the
+   graded target helped**; it was never submitted.
+5. **The Tanimoto pull is inactive, not helping.** The hinge is one-sided, and
+   the pulled pairs already sit at cos 0.827 against a target of 0.652, so
+   relu(T - cos) is zero for nearly every pair and the loss is 0.0047 - about
+   0.2% of the total. The ligand encoder groups analogues more tightly than
+   the regulariser asks on its own. `v8_nolsim` should therefore come out
+   nearly identical; the claim to make is "it did not need to act", not "it
+   helped". Raising the target (cos >= T + margin, or weighting by 1 - T)
+   would be needed to make it bite.
+6. **cosdiff 0.910 is the highest of any learning run** (v4 0.828, v5 0.875,
+   C 0.773) while retrieval is good, confirming again that cosdiff does not
+   track MRR and is only a collapse alarm.
+7. **Cost: 4.2 s/step, backward 2.33 s of it.** 7,125 steps in ~10 h. Region
+   selection + pooling is 1.32 s on the CPU; K_NEG=0 already removed the
+   negative patches. The remaining lever is `--gpu_neighbors`.
+
+Next, in order: the `--no_fallback` eval (minutes, decides what the headline
+number is), the resubmit to 10,000 steps (it resumes itself), then
+`v8_contact` and `v8_nolsim` if either addition is to be claimed.
+
 ## v4 / v5 / v6 window means to step 2,750 (2026-10-30, logs pasted)
 
 Fixed val set (400 rows, chance 0.0165). Means of the evaluations in each
