@@ -1130,9 +1130,15 @@ chance 0.0165), stopped by the 12 h walltime at 7,125 of 10,000 steps.
 
 | | mrr | top1 | top10 | site | AUROC / AP | fb | cosdiff | tau |
 |---|---|---|---|---|---|---|---|---|
-| v8 @ 7,125 (BLIND) | **0.122** | 0.050 | 0.255 | 0.690 | 0.942 / 0.522 | **0.158** | 0.910 | 0.066 |
+| v8 @ 7,125 (BLIND) | 0.122 | 0.050 | 0.255 | 0.690 | 0.942 / 0.522 | 0.158 | 0.910 | 0.066 |
+| v8 @ 10,125 (BLIND) | **0.129** | 0.050 | **0.305** | **0.752** | 0.942 / 0.530 | 0.150 | 0.908 | 0.058 |
 | C @ 4,375 (known site) | 0.151 | 0.085 | 0.268 | - | 0.940 / 0.522 | 0.04 | 0.773 | - |
 | v5 @ 2,625-2,750 (known site) | 0.101 | - | - | - | - | - | 0.875 | - |
+
+At 10,125 (the run was extended to 15,000; this is the resumed job, 3,000
+steps in 3.9 h): nce 1.820 -> 1.570, pock 0.467 -> 0.461, in-pocket AUROC
+0.563, ligsim loss 0.0034 (pulled cos 0.825 against Tanimoto 0.652, random
+in-batch 0.166), 4.72 s/step.
 
 Also printed: in-pocket AUROC 0.561, ligsim loss 0.0047 (pulled pairs cos
 0.827 against Tanimoto 0.652, 35.5 pairs/step; random in-batch cos 0.180),
@@ -1181,9 +1187,28 @@ Read:
    selection + pooling is 1.32 s on the CPU; K_NEG=0 already removed the
    negative patches. The remaining lever is `--gpu_neighbors`.
 
+8. **7,125 -> 10,125, extended to 15,000.** MRR +0.007 is inside the +-0.015
+   noise, but **top10 +0.050 and `site` +0.062 are real movement** and point
+   the same way: the shortlist and the within-protein anchor choice both
+   improve while **top1 is pinned at 0.050**. `site` rising from 0.690 to
+   0.752 with `lam_site` at 0 **weakens the case for turning it on**: anchor
+   choice is already improving unsupervised, so the top1 gap is cross-protein
+   discrimination (telling the true target from similar ones), not picking
+   the right pocket. An arm that adds capacity or harder negatives is the
+   better bet than `site_loss`.
+9. **The memorisation signature is showing.** nce 1.820 -> 1.570 over 3,000
+   steps while val MRR moves +0.007. At 10,125 x 32 that is 42 visits per
+   train group against the ~69 where `v3c+` put the dataset_v1 ceiling, so
+   the remaining 4,875 steps are worth running but should be expected to
+   flatten rather than climb.
+10. **The Tanimoto pull is confirmed inactive at a second time point** (loss
+    0.0034, pulled cos 0.825 against a 0.652 target) and **in-pocket AUROC has
+    plateaued** (0.561 -> 0.563). Neither addition is doing visible work;
+    `v8_contact` / `v8_nolsim` would now mostly confirm that.
+
 Next, in order: the `--no_fallback` eval (minutes, decides what the headline
-number is), the resubmit to 10,000 steps (it resumes itself), then
-`v8_contact` and `v8_nolsim` if either addition is to be claimed.
+number is), finish 15,000, then `v8_contact` / `v8_nolsim` only if either
+addition is to be claimed in writing.
 
 ## v4 / v5 / v6 window means to step 2,750 (2026-10-30, logs pasted)
 
