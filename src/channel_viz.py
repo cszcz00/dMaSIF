@@ -151,7 +151,9 @@ def unpack(path_or_dict):
 # dump (container, GPU)
 # ---------------------------------------------------------------------------
 def pick_rows(table, ckpt, saved, a):
-    """The checkpoint's val rows, group-balanced, + named groups; or --rows_from."""
+    """The checkpoint's val rows, group-balanced, + named groups + named rows
+    (--system_ids, any split: a train row is a protein the model trained on);
+    or --rows_from. --n 0 keeps only the named ones."""
     from train import subsample_val
 
     if a.rows_from:
@@ -173,7 +175,19 @@ def pick_rows(table, ckpt, saved, a):
             print(f"[warn] --groups {g}: no row in {a.items}")
         elif hit[0] not in rows:
             rows.append(hit[0])
-    return np.asarray(rows)
+    for sid in (getattr(a, "system_ids", "") or "").split(","):
+        sid = sid.strip()
+        if not sid:
+            continue
+        hit = [i for i, r in enumerate(table.rows) if r["system_id"] == sid]
+        if not hit:
+            raise SystemExit(f"--system_ids {sid}: not in {a.items} (or dropped "
+                             "because its ligand could not be featurised)")
+        if hit[0] not in rows:
+            rows.append(hit[0])
+    if not rows:
+        raise SystemExit("no proteins: --n 0 and no --groups / --system_ids")
+    return np.asarray(rows, dtype=np.int64)
 
 
 def dump(a):
@@ -1009,6 +1023,8 @@ def main():
     p.add_argument("--n", type=int, default=64, help="val proteins, group-balanced")
     p.add_argument("--groups", default="",
                    help="comma-separated target groups to add (UniProt or up:/pli: ids)")
+    p.add_argument("--system_ids", default="",
+                   help="comma-separated system_ids to add, any split (--n 0: only these)")
     p.add_argument("--rows_from", default="", help="an earlier dump: use its proteins")
     p.add_argument("--no_pretrained", action="store_true",
                    help="skip the published-weights AtomNet comparison")

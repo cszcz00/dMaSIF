@@ -14,7 +14,9 @@ Three panels, one protein, from any checkpoint with --region_source predicted:
 
 Two stages:
 
-    dump     container, GPU, ~minutes. A checkpoint + N val proteins -> one
+    dump     container, GPU, ~minutes. A checkpoint + N val proteins (plus
+             any rows named by --system_ids, train rows included; --n 0
+             for only those) -> one
              .npz with, per protein: surface points / normals, pocket logit,
              the selector's candidate mask (the SAME smoothing and top
              fraction as anchors.ball_regions), the anchor regions, their
@@ -149,6 +151,7 @@ def dump(a):
                     out[f"p{i_prot}_{k}"] = v
                 out[f"p{i_prot}_system_id"] = np.asarray(row["system_id"])
                 out[f"p{i_prot}_group"] = np.asarray(row["group"])
+                out[f"p{i_prot}_split"] = np.asarray(row["split"])
                 i_prot += 1
             print(f"    {s + len(idx)}/{len(rows)}", end="\r", flush=True)
     meta = {"ckpt": str(a.ckpt), "step": int(ckpt["step"]), "n": i_prot,
@@ -173,6 +176,8 @@ def load_dump(path):
         p = {k: d[f"p{i}_{k}"] for k in PER_PROT}
         p["system_id"] = str(d[f"p{i}_system_id"])
         p["group"] = str(d[f"p{i}_group"])
+        # dumps from before --system_ids carry no split (they were all val)
+        p["split"] = str(d[f"p{i}_split"]) if f"p{i}_split" in d.files else "val"
         ptr = p.pop("region_ptr")
         idx = p.pop("region_idx")
         p["regions"] = [idx[ptr[j]:ptr[j + 1]] for j in range(len(ptr) - 1)]
@@ -311,12 +316,13 @@ def choose(prots):
 
 
 def protein_table(prots):
-    print(f"{'#':>3} {'system_id':40s} {'points':>7} {'anchors':>7} {'fb':>3} "
+    print(f"{'#':>3} {'system_id':40s} {'split':>5} {'points':>7} {'anchors':>7} {'fb':>3} "
           f"{'best':>5} {'label':>5} {'cos':>6}")
     for i, p in enumerate(prots):
         c = p["anchor_cos"]
         j = int(np.argmax(c)) if len(c) else -1
-        print(f"{i:3d} {p['system_id'][:40]:40s} {len(p['xyz']):7d} {len(c):7d} "
+        print(f"{i:3d} {p['system_id'][:40]:40s} {p.get('split', 'val')[:5]:>5} "
+              f"{len(p['xyz']):7d} {len(c):7d} "
               f"{'yes' if len(p['fallback_idx']) else '':>3} {j + 1:5d} "
               f"{int(p['region_label'][j]) if j >= 0 else 0:5d} "
               f"{(c[j] if j >= 0 else np.nan):6.3f}")
@@ -417,7 +423,8 @@ def figure(a, meta=None, prots=None):
     w(f'<rect width="{Wd}" height="{Hd}" fill="#ffffff"/>')
     text(40, 50, "From pocket logit to anchors: where the protein is read, and what each "
          "read becomes", 24, INK, weight="bold")
-    text(40, 78, f"{p['system_id']}  ·  target {p['group']}  ·  checkpoint step "
+    text(40, 78, f"{p['system_id']}  ·  target {p['group']}  ·  "
+         f"{p.get('split', 'val')} row  ·  checkpoint step "
          f"{meta['step']:,}  ·  ligand drawn for reference only (the selector never sees it)",
          14, MUTED)
 
@@ -693,8 +700,11 @@ def main():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--plip", default="", help="PLIP dir (default: the checkpoint's)")
-    p.add_argument("--n", type=int, default=12, help="val proteins, group-balanced")
+    p.add_argument("--n", type=int, default=12,
+                   help="val proteins, group-balanced (0: only --groups / --system_ids)")
     p.add_argument("--groups", default="", help="comma-separated UniProt ids to add")
+    p.add_argument("--system_ids", default="",
+                   help="comma-separated system_ids to add, any split")
     p.add_argument("--rows_from", default="", help="(channel_viz) reuse a dump's proteins")
     p = sub.add_parser("figure", help="numpy")
     p.add_argument("--dump", required=True)
