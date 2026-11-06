@@ -81,14 +81,21 @@ POINT_F16 = ("normals", "feats", "pre_atomnet", "chemo_ref", "point_emb",
 
 
 def feature_names(curvature_scales=(1.0, 2.0, 3.0, 5.0, 10.0), atom_dims=6,
-                  chemo_names=()):
-    """Input channel names in surface_encoder.input_features order:
-    geometry_processing.curvatures interleaves (mean, Gaussian) per scale."""
+                  chemo_names=(), chemnet_dims=0):
+    """Input channel names in surface_encoder.input_features order.
+
+    That order is [curvatures, AtomNet, chemo, DirAtomNet]:
+    geometry_processing.curvatures interleaves (mean, Gaussian) per scale, and
+    `chemnet_dims` (surface_encoder.CHEMNET_DIMS under cfg.atom_feats) are the
+    learned typing channels, appended last. Like atomnet_*, they are learned
+    and so have no fixed meaning across checkpoints.
+    """
     names = []
     for s in curvature_scales:
         names += [f"curv_H{s:g}", f"curv_K{s:g}"]
     names += [f"atomnet_{k}" for k in range(atom_dims)]
-    return names + [f"chemo_{n}" for n in chemo_names]
+    names += [f"chemo_{n}" for n in chemo_names]
+    return names + [f"chemnet_{k}" for k in range(chemnet_dims)]
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +234,11 @@ def dump(a):
         except Exception as e:           # published weights not where cfg.repo says
             print(f"[warn] no pretrained AtomNet comparison: {type(e).__name__}: {e}")
             pre = None
+    from surface_encoder import CHEMNET_DIMS
+
     chemo_names = chemotype.feature_names(tuple(cfg.chemo_sigmas)) if cfg.chemo else ()
-    names = feature_names(cfg.curvature_scales, cfg.atom_dims, chemo_names)
+    names = feature_names(cfg.curvature_scales, cfg.atom_dims, chemo_names,
+                          CHEMNET_DIMS if getattr(cfg, "atom_feats", False) else 0)
     n_curv = 2 * len(cfg.curvature_scales)
 
     prots, gen = [], torch.Generator().manual_seed(a.seed)

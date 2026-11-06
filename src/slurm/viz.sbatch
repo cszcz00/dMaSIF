@@ -23,7 +23,16 @@
 #   out/runs/v1), SURFACES, POCKETS, PLIP, OUT (out/viz), N (64), TARGETS
 #   (not GROUPS: bash's own GROUPS holds your numeric group ids)
 #   (comma-separated UniProt ids to add, e.g. P56817,P0DTD1), N_HTML (12),
+#   SYSTEM_IDS (comma-separated system_ids to add, any split), DUMP_ONLY=1
+#   (skip the report: one protein has nothing to average), POCKETS= (empty
+#   omits --pockets / --pocket_select, which is what a --region_source
+#   predicted checkpoint such as v8 wants), POCKET_SELECT (site),
 #   DUMP_ARGS / REPORT_ARGS (verbatim).
+# One named row's channels, e.g. to plot a curvature on its surface. N=0 adds
+# no val proteins, so the dump holds that row alone:
+#   CKPTS=$WORK/out/runs/v8_logit_plip_af_pairs_lsim/best.pt \
+#   DATA=$WORK/out/runs/dataset_v2 POCKETS= N=0 DUMP_ONLY=1 \
+#   SYSTEM_IDS=7a5l__1__1.A__1.B sbatch src/slurm/viz.sbatch
 # Then open $OUT/report/<run>_html/*.html in a browser (scp them down), or
 #   cd $OUT/report/<run>_pymol/<system_id> && pymol load.pml
 set -e
@@ -32,7 +41,7 @@ cd $WORK
 CKPTS=${CKPTS:-"$WORK/out/runs/v3c_site_pairs_bn/best.pt $WORK/out/runs/v3d_pairs_bn_chemo/best.pt $WORK/out/runs/v3f_pairs_bn_decoys/best.pt"}
 DATA=${DATA:-$WORK/out/runs/v1}
 SURFACES=${SURFACES:-$WORK/data/surfaces}
-POCKETS=${POCKETS:-$WORK/data/pockets/fpocket}
+POCKETS=${POCKETS-$WORK/data/pockets/fpocket}   # POCKETS= omits them entirely
 PLIP=${PLIP:-$WORK/data/plip}
 OUT=${OUT:-$WORK/out/viz}
 N=${N:-64}
@@ -52,13 +61,20 @@ for CKPT in $CKPTS; do
     echo "=== dump $TAG ==="
     $EXEC python $WORK/src/channel_viz.py dump --ckpt $CKPT --tag $TAG \
         --items $DATA/items.tsv --lig_feats $DATA/ligand_feats.npz \
-        --surface_cache $SURFACES --pockets $POCKETS --pocket_select site \
-        --n $N ${TARGETS:+--groups $TARGETS} ${FIRST:+--rows_from $FIRST} \
+        --surface_cache $SURFACES \
+        ${POCKETS:+--pockets $POCKETS --pocket_select ${POCKET_SELECT:-site}} \
+        --n $N ${TARGETS:+--groups $TARGETS} ${SYSTEM_IDS:+--system_ids $SYSTEM_IDS} \
+        ${FIRST:+--rows_from $FIRST} \
         --out $OUT/$TAG.npz ${DUMP_ARGS:-}
     FIRST=${FIRST:-$OUT/$TAG.npz}
     DUMPS="$DUMPS $OUT/$TAG.npz"
 done
 [ -n "$DUMPS" ] || { echo "no checkpoint found"; exit 1; }
+
+if [ -n "${DUMP_ONLY:-}" ]; then
+    echo "DUMP_ONLY: skipping the report. Dumps:$DUMPS"
+    exit 0
+fi
 
 echo "=== report ==="
 $EXEC python $WORK/src/channel_viz.py report --dumps $DUMPS --plip $PLIP \
