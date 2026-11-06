@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 300" width="560" height="300">
+<rect width="560" height="300" fill="#ffffff"/>
+<text x="60.0" y="46.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="bold" letter-spacing="1.6">TRAINS ON</text>
+<text x="500.0" y="46.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="end" font-weight="bold" letter-spacing="1.6">HELD OUT</text>
+<line x1="60" y1="60" x2="500" y2="60" stroke="#dcdbd4" stroke-width="1"/>
+<ellipse cx="122" cy="118" rx="46" ry="33" fill="#eaeff7" stroke="#dcdbd4" stroke-width="1"/>
+<circle cx="125.3" cy="109.1" r="4.6" fill="#2a5599"/>
+<circle cx="115.1" cy="139.6" r="4.6" fill="#2a5599"/>
+<circle cx="92.6" cy="123.4" r="4.6" fill="#2a5599"/>
+<circle cx="149.1" cy="131.1" r="4.6" fill="#2a5599"/>
+<circle cx="143.1" cy="104.0" r="4.6" fill="#2a5599"/>
+<circle cx="110.0" cy="122.4" r="4.6" fill="#2a5599"/>
+<circle cx="99.2" cy="107.9" r="4.6" fill="#2a5599"/>
+<ellipse cx="254" cy="108" rx="38" ry="28" fill="#eaeff7" stroke="#dcdbd4" stroke-width="1"/>
+<circle cx="251.4" cy="107.1" r="4.6" fill="#2a5599"/>
+<circle cx="256.1" cy="88.2" r="4.6" fill="#2a5599"/>
+<circle cx="235.8" cy="100.5" r="4.6" fill="#2a5599"/>
+<circle cx="256.5" cy="123.6" r="4.6" fill="#2a5599"/>
+<circle cx="235.7" cy="118.8" r="4.6" fill="#2a5599"/>
+<ellipse cx="330" cy="178" rx="32" ry="25" fill="#eaeff7" stroke="#dcdbd4" stroke-width="1"/>
+<circle cx="351.8" cy="177.0" r="4.6" fill="#2a5599"/>
+<circle cx="339.8" cy="193.0" r="4.6" fill="#2a5599"/>
+<circle cx="319.3" cy="193.0" r="4.6" fill="#2a5599"/>
+<circle cx="314.1" cy="167.6" r="4.6" fill="#2a5599"/>
+<ellipse cx="150" cy="206" rx="44" ry="30" fill="#eaeff7" stroke="#dcdbd4" stroke-width="1"/>
+<circle cx="127.2" cy="211.2" r="4.6" fill="#2a5599"/>
+<circle cx="150.1" cy="207.9" r="4.6" fill="#2a5599"/>
+<circle cx="144.7" cy="187.0" r="4.6" fill="#2a5599"/>
+<circle cx="169.8" cy="209.4" r="4.6" fill="#2a5599"/>
+<circle cx="154.9" cy="223.1" r="4.6" fill="#2a5599"/>
+<circle cx="127.9" cy="192.6" r="4.6" fill="#2a5599"/>
+<ellipse cx="248" cy="178" rx="26" ry="21" fill="#eaeff7" stroke="#dcdbd4" stroke-width="1"/>
+<circle cx="262.2" cy="178.3" r="4.6" fill="#2a5599"/>
+<circle cx="248.6" cy="186.1" r="4.6" fill="#2a5599"/>
+<circle cx="230.4" cy="175.1" r="4.6" fill="#2a5599"/>
+<ellipse cx="466" cy="125" rx="42" ry="31" fill="#f2f1ec" stroke="#dcdbd4" stroke-width="1"/>
+<circle cx="467.3" cy="115.0" r="4.6" fill="#b4b3ac"/>
+<circle cx="440.4" cy="113.7" r="4.6" fill="#b4b3ac"/>
+<circle cx="471.9" cy="137.4" r="4.6" fill="#b4b3ac"/>
+<circle cx="487.8" cy="112.0" r="4.6" fill="#b4b3ac"/>
+<circle cx="485.6" cy="128.2" r="4.6" fill="#b4b3ac"/>
+<circle cx="452.8" cy="145.6" r="4.6" fill="#b4b3ac"/>
+<ellipse cx="470" cy="207" rx="34" ry="25" fill="#f2f1ec" stroke="#dcdbd4" stroke-width="1"/>
+<circle cx="484.1" cy="213.8" r="4.6" fill="#b4b3ac"/>
+<circle cx="463.5" cy="199.4" r="4.6" fill="#b4b3ac"/>
+<circle cx="446.7" cy="204.3" r="4.6" fill="#b4b3ac"/>
+<circle cx="470.3" cy="223.7" r="4.6" fill="#b4b3ac"/>
+<line x1="392" y1="74" x2="392" y2="252" stroke="#86857f" stroke-width="1.6" stroke-dasharray="6 5"/>
+<text x="60.0" y="282.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13.5" fill="#86857f" text-anchor="start" font-weight="normal">one dot = one interaction · one blob = one cluster</text>
+<text x="500.0" y="282.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13.5" fill="#5a5a56" text-anchor="end" font-weight="normal">a cluster is never split</text>
+</svg>
