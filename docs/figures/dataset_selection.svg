@@ -1,17 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 282" width="1240" height="282">
-<rect width="1240" height="282" fill="#ffffff"/>
-<text x="60.0" y="46.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="17" fill="#1a1a1a" text-anchor="start" font-weight="bold">dataset_v2</text>
-<line x1="60" y1="62" x2="1180" y2="62" stroke="#dcdbd4" stroke-width="1"/>
-<text x="60.0" y="102.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="bold" letter-spacing="1.6">INTERACTIONS</text>
-<text x="60.0" y="164.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="46" fill="#1a1a1a" text-anchor="start" font-weight="bold">35,407</text>
-<rect x="60" y="190" width="500" height="26" rx="4" fill="#ecebe6"/>
-<rect x="60" y="190" width="51.8" height="26" rx="4.0" fill="#2a5599"/>
-<text x="121.8" y="208.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="14" fill="#86857f" text-anchor="start" font-weight="normal">10%</text>
-<text x="60.0" y="246.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="14.5" fill="#5a5a56" text-anchor="start" font-weight="normal">of PLINDER's 341,945 interactions</text>
-<text x="680.0" y="102.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="bold" letter-spacing="1.6">DISTINCT TRAINING TARGETS</text>
-<text x="680.0" y="164.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="46" fill="#1a1a1a" text-anchor="start" font-weight="bold">7,895</text>
-<rect x="680" y="190" width="500" height="26" rx="4" fill="#ecebe6"/>
-<rect x="680" y="190" width="162.3" height="26" rx="4.0" fill="#2a5599"/>
-<text x="852.3" y="208.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="14" fill="#86857f" text-anchor="start" font-weight="normal">32%</text>
-<text x="680.0" y="246.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="14.5" fill="#5a5a56" text-anchor="start" font-weight="normal">of PLINDER's 24,327 targets</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 332" width="720" height="332">
+<rect width="720" height="332" fill="#ffffff"/>
+<text x="440.0" y="60.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="end" font-weight="bold" letter-spacing="1.6">DATASET_V2, TRAIN SPLIT</text>
+<text x="660.0" y="60.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="end" font-weight="bold" letter-spacing="1.6">A TRAINING RUN USES</text>
+<line x1="60" y1="76" x2="660" y2="76" stroke="#dcdbd4" stroke-width="1"/>
+<text x="60.0" y="150.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="18" fill="#5a5a56" text-anchor="start" font-weight="normal">Interactions</text>
+<text x="440.0" y="150.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="40" fill="#1a1a1a" text-anchor="end" font-weight="normal">34,265</text>
+<path d="M470 137 H498" stroke="#86857f" stroke-width="1.6" fill="none"/>
+<path d="M495 132.5 L504 137 L495 141.5 Z" fill="#86857f"/>
+<text x="660.0" y="150.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="40" fill="#2a5599" text-anchor="end" font-weight="bold">31,861</text>
+<text x="60.0" y="222.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="18" fill="#5a5a56" text-anchor="start" font-weight="normal">Distinct targets</text>
+<text x="440.0" y="222.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="40" fill="#1a1a1a" text-anchor="end" font-weight="normal">7,895</text>
+<path d="M470 209 H498" stroke="#86857f" stroke-width="1.6" fill="none"/>
+<path d="M495 204.5 L504 209 L495 213.5 Z" fill="#86857f"/>
+<text x="660.0" y="222.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="40" fill="#2a5599" text-anchor="end" font-weight="bold">7,644</text>
+<line x1="60" y1="266" x2="660" y2="266" stroke="#dcdbd4" stroke-width="1"/>
+<text x="60.0" y="298.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="15" fill="#5a5a56" text-anchor="start" font-weight="normal">Validation is carved by interaction cluster, so a cluster is held out whole.</text>
 </svg>
