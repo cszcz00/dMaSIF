@@ -1,38 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1420 420" width="1420" height="420">
-<rect width="1420" height="420" fill="#ffffff"/>
-<text x="60.0" y="72.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="bold" font-style="normal" letter-spacing="1.6">INTERACTIONS</text>
-<line x1="60" y1="88" x2="660" y2="88" stroke="#dcdbd4" stroke-width="1"/>
-<rect x="175.0" y="118.0" width="400" height="30" rx="4" fill="#ecebe6"/>
-<rect x="175.0" y="118.0" width="400.0" height="30" rx="4.0" fill="#b4b3ac"/>
-<text x="60.0" y="138.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="15" fill="#5a5a56" text-anchor="start" font-weight="normal" font-style="normal">PLINDER</text>
-<text x="660.0" y="138.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="16" fill="#5a5a56" text-anchor="end" font-weight="normal" font-style="normal">341,945</text>
-<rect x="175.0" y="182.0" width="400" height="30" rx="4" fill="#ecebe6"/>
-<rect x="175.0" y="182.0" width="24.8" height="30" rx="4.0" fill="#b4b3ac"/>
-<text x="60.0" y="202.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="15" fill="#5a5a56" text-anchor="start" font-weight="normal" font-style="normal">dataset_v1</text>
-<text x="660.0" y="202.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="16" fill="#5a5a56" text-anchor="end" font-weight="normal" font-style="normal">21,209</text>
-<text x="209.8" y="202.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="normal" font-style="normal">6%</text>
-<rect x="175.0" y="246.0" width="400" height="30" rx="4" fill="#ecebe6"/>
-<rect x="175.0" y="246.0" width="41.4" height="30" rx="4.0" fill="#2a5599"/>
-<text x="60.0" y="266.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="15" fill="#1a1a1a" text-anchor="start" font-weight="bold" font-style="normal">dataset_v2</text>
-<text x="660.0" y="266.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="16" fill="#1a1a1a" text-anchor="end" font-weight="bold" font-style="normal">35,407</text>
-<text x="226.4" y="266.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="normal" font-style="normal">10%</text>
-<text x="760.0" y="72.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="bold" font-style="normal" letter-spacing="1.6">DISTINCT TRAINING TARGETS</text>
-<line x1="760" y1="88" x2="1360" y2="88" stroke="#dcdbd4" stroke-width="1"/>
-<rect x="875.0" y="118.0" width="400" height="30" rx="4" fill="#ecebe6"/>
-<rect x="875.0" y="118.0" width="400.0" height="30" rx="4.0" fill="#b4b3ac"/>
-<text x="760.0" y="138.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="15" fill="#5a5a56" text-anchor="start" font-weight="normal" font-style="normal">PLINDER</text>
-<text x="1360.0" y="138.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="16" fill="#5a5a56" text-anchor="end" font-weight="normal" font-style="normal">24,327</text>
-<rect x="875.0" y="182.0" width="400" height="30" rx="4" fill="#ecebe6"/>
-<rect x="875.0" y="182.0" width="42.8" height="30" rx="4.0" fill="#b4b3ac"/>
-<text x="760.0" y="202.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="15" fill="#5a5a56" text-anchor="start" font-weight="normal" font-style="normal">dataset_v1</text>
-<text x="1360.0" y="202.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="16" fill="#5a5a56" text-anchor="end" font-weight="normal" font-style="normal">2,605</text>
-<text x="927.8" y="202.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="normal" font-style="normal">11%</text>
-<rect x="875.0" y="246.0" width="400" height="30" rx="4" fill="#ecebe6"/>
-<rect x="875.0" y="246.0" width="129.8" height="30" rx="4.0" fill="#2a5599"/>
-<text x="760.0" y="266.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="15" fill="#1a1a1a" text-anchor="start" font-weight="bold" font-style="normal">dataset_v2</text>
-<text x="1360.0" y="266.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="16" fill="#1a1a1a" text-anchor="end" font-weight="bold" font-style="normal">7,895</text>
-<text x="1014.8" y="266.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="normal" font-style="normal">32%</text>
-<line x1="60" y1="322" x2="1360" y2="322" stroke="#dcdbd4" stroke-width="1"/>
-<text x="60.0" y="360.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="19" fill="#1a1a1a" text-anchor="start" font-weight="normal" font-style="normal">dataset_v2 holds 1.7× dataset_v1's interactions but 3.0× its distinct targets.</text>
-<text x="60.0" y="388.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="15" fill="#5a5a56" text-anchor="start" font-weight="normal" font-style="normal">At a fixed training budget that cuts visits per target from 67 to 20 — the memorisation ceiling, not row count, was the lever.</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 282" width="1240" height="282">
+<rect width="1240" height="282" fill="#ffffff"/>
+<text x="60.0" y="46.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="17" fill="#1a1a1a" text-anchor="start" font-weight="bold">dataset_v2</text>
+<line x1="60" y1="62" x2="1180" y2="62" stroke="#dcdbd4" stroke-width="1"/>
+<text x="60.0" y="102.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="bold" letter-spacing="1.6">INTERACTIONS</text>
+<text x="60.0" y="164.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="46" fill="#1a1a1a" text-anchor="start" font-weight="bold">35,407</text>
+<rect x="60" y="190" width="500" height="26" rx="4" fill="#ecebe6"/>
+<rect x="60" y="190" width="51.8" height="26" rx="4.0" fill="#2a5599"/>
+<text x="121.8" y="208.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="14" fill="#86857f" text-anchor="start" font-weight="normal">10%</text>
+<text x="60.0" y="246.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="14.5" fill="#5a5a56" text-anchor="start" font-weight="normal">of PLINDER's 341,945 interactions</text>
+<text x="680.0" y="102.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="13" fill="#86857f" text-anchor="start" font-weight="bold" letter-spacing="1.6">DISTINCT TRAINING TARGETS</text>
+<text x="680.0" y="164.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="46" fill="#1a1a1a" text-anchor="start" font-weight="bold">7,895</text>
+<rect x="680" y="190" width="500" height="26" rx="4" fill="#ecebe6"/>
+<rect x="680" y="190" width="162.3" height="26" rx="4.0" fill="#2a5599"/>
+<text x="852.3" y="208.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="14" fill="#86857f" text-anchor="start" font-weight="normal">32%</text>
+<text x="680.0" y="246.0" font-family="Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif" font-size="14.5" fill="#5a5a56" text-anchor="start" font-weight="normal">of PLINDER's 24,327 targets</text>
 </svg>
